@@ -1,0 +1,47 @@
+import { PaymentsController } from './payments.controller.js'
+import { PaymentsService } from './payments.service.js'
+import { PaymentsRepository } from './payments.repository.js'
+import {
+  createPaymentOrderSchema,
+  verifyPaymentSchema,
+  paymentHistorySchema,
+  refundSchema,
+} from './payments.schema.js'
+
+/**
+ * Payments routes plugin
+ * Prefix: /api/v1/payments
+ */
+export default async function paymentsRoutes(fastify) {
+  const repository = new PaymentsRepository()
+  const service = new PaymentsService(repository)
+  const controller = new PaymentsController(service)
+
+  // ─── Customer routes (AUTH) ─────────────────────────────
+
+  // POST /create-order — Create Razorpay payment order
+  fastify.post('/create-order', {
+    schema: createPaymentOrderSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.createPaymentOrder.bind(controller))
+
+  // POST /verify — Verify payment signature
+  fastify.post('/verify', {
+    schema: verifyPaymentSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.verifyPayment.bind(controller))
+
+  // GET /history — Payment history
+  fastify.get('/history', {
+    schema: paymentHistorySchema,
+    preHandler: [fastify.authenticate],
+  }, controller.history.bind(controller))
+
+  // ─── Admin routes ───────────────────────────────────────
+
+  // POST /:id/refund — Initiate refund [ADMIN]
+  fastify.post('/:id/refund', {
+    schema: refundSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.refund.bind(controller))
+}

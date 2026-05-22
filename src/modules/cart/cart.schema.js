@@ -1,0 +1,275 @@
+/**
+ * Cart JSON Schemas — validation for all cart endpoints
+ */
+
+const cartItemResponse = {
+  type: 'object',
+  properties: {
+    productId:    { type: 'string' },
+    name:         { type: 'string' },
+    slug:         { type: 'string' },
+    price:        { type: 'number' },
+    originalPrice:{ type: ['number', 'null'] },
+    salePrice:    { type: ['number', 'null'] },
+    quantity:     { type: 'integer' },
+    unit:         { type: 'string' },
+    image:        { type: ['string', 'null'] },
+    thumbnailUrl: { type: ['string', 'null'] },
+    stockQuantity:{ type: 'integer' },
+    subtotal:     { type: 'number' },
+    lineTotal:    { type: 'number' },
+    inStock:      { type: 'boolean' },
+  },
+}
+
+const cartResponse = {
+  type: 'object',
+  properties: {
+    success: { type: 'boolean' },
+    message: { type: 'string' },
+    data: {
+      type: 'object',
+      properties: {
+        items:                { type: 'array', items: cartItemResponse },
+        subtotal:             { type: 'number' },
+        count:                { type: 'integer' },
+        totalMrp:             { type: 'number' },
+        totalSavings:         { type: 'number' },
+        tipAmount:            { type: 'number' },
+        deliveryInstructions: { type: ['string', 'null'] },
+      },
+    },
+  },
+}
+
+export const getCartSchema = {
+  tags: ['Cart'],
+  summary: 'Get current cart',
+  response: { 200: cartResponse },
+}
+
+export const addItemSchema = {
+  tags: ['Cart'],
+  summary: 'Add item to cart',
+  body: {
+    type: 'object',
+    required: ['productId', 'quantity'],
+    properties: {
+      productId: { type: 'string', format: 'uuid' },
+      quantity:  { type: 'integer', minimum: 1, maximum: 50 },
+    },
+  },
+  response: { 200: cartResponse },
+}
+
+export const updateItemSchema = {
+  tags: ['Cart'],
+  summary: 'Update item quantity',
+  params: {
+    type: 'object',
+    required: ['productId'],
+    properties: {
+      productId: { type: 'string', format: 'uuid' },
+    },
+  },
+  body: {
+    type: 'object',
+    required: ['quantity'],
+    properties: {
+      quantity: { type: 'integer', minimum: 1, maximum: 50 },
+    },
+  },
+  response: { 200: cartResponse },
+}
+
+export const removeItemSchema = {
+  tags: ['Cart'],
+  summary: 'Remove item from cart',
+  params: {
+    type: 'object',
+    required: ['productId'],
+    properties: {
+      productId: { type: 'string', format: 'uuid' },
+    },
+  },
+  response: { 200: cartResponse },
+}
+
+export const clearCartSchema = {
+  tags: ['Cart'],
+  summary: 'Clear entire cart',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data:    { type: 'null' },
+      },
+    },
+  },
+}
+
+export const validateCartSchema = {
+  tags: ['Cart'],
+  summary: 'Validate cart before checkout (stock + price check)',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            valid:    { type: 'boolean' },
+            items:    { type: 'array' },
+            subtotal: { type: 'number' },
+            warnings: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      },
+    },
+  },
+}
+
+export const getCartSummarySchema = {
+  tags: ['Cart'],
+  summary: 'Get full bill summary with fees, savings, and delivery estimate',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            itemTotal: {
+              type: 'object',
+              properties: {
+                original: { type: 'number' },
+                discounted: { type: 'number' },
+              },
+            },
+            deliveryFee: {
+              type: 'object',
+              properties: {
+                amount: { type: 'number' },
+                isFree: { type: 'boolean' },
+                freeIn: { type: 'number' },
+              },
+            },
+            handlingFee: {
+              type: 'object',
+              properties: {
+                amount: { type: 'number' },
+                isFree: { type: 'boolean' },
+                savedAmount: { type: 'number' },
+              },
+            },
+            lateNightFee: {
+              type: 'object',
+              properties: {
+                amount: { type: 'number' },
+                isFree: { type: 'boolean' },
+                savedAmount: { type: 'number' },
+                isLateNight: { type: 'boolean' },
+              },
+            },
+            couponDiscount: { type: 'number' },
+            tipAmount: { type: 'number' },
+            toPay: {
+              type: 'object',
+              properties: {
+                original: { type: 'number' },
+                final: { type: 'number' },
+              },
+            },
+            savings: {
+              type: 'object',
+              properties: {
+                total: { type: 'number' },
+                breakdown: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      type: { type: 'string' },
+                      label: { type: 'string' },
+                      amount: { type: 'number' },
+                    },
+                  },
+                },
+              },
+            },
+            deliveryEstimate: {
+              type: 'object',
+              properties: {
+                minutes: { type: 'integer' },
+                label: { type: 'string' },
+              },
+            },
+            itemCount: { type: 'integer' },
+          },
+        },
+      },
+    },
+  },
+}
+
+export const updateTipSchema = {
+  tags: ['Cart'],
+  summary: 'Save tip amount for delivery partner',
+  body: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['amount'],
+    properties: {
+      amount: { type: 'number', minimum: 0, maximum: 500 },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            tipAmount: { type: 'number' },
+          },
+        },
+      },
+    },
+  },
+}
+
+export const updateDeliveryInstructionsSchema = {
+  tags: ['Cart'],
+  summary: 'Save delivery instructions',
+  body: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['instructions'],
+    properties: {
+      instructions: { type: 'string', maxLength: 200 },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            instructions: { type: ['string', 'null'] },
+          },
+        },
+      },
+    },
+  },
+}
