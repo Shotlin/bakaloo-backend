@@ -13,9 +13,20 @@ export class OrdersController {
   async placeOrder(request, reply) {
     const result = await this.service.placeOrder(request.user.id, request.body)
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'ORDER_FAILED'))
+      const code = result.code || 'ORDER_FAILED'
+      const payload = error(result.message, code)
+      if (Array.isArray(result.failures) && result.failures.length > 0) {
+        payload.failures = result.failures
+      }
+      return reply.code(400).send(payload)
     }
-    return reply.code(201).send(success(result.order, 'Order placed successfully'))
+    // Multi-vendor: return the full per-shop order list, keep `order` for
+    // backwards compatibility with single-shop clients.
+    const data = {
+      orders: result.orders || [result.order],
+      order: result.order,
+    }
+    return reply.code(201).send(success(data, 'Order placed successfully'))
   }
 
   async list(request, reply) {

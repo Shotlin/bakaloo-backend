@@ -21,14 +21,88 @@ function normalizeSearchTerms(q) {
 }
 
 /**
+ * Customer-scoped visibility predicate (Requirements 1.5, 4.5, 11.5, 14.7).
+ *
+ * When an `allocatedShopIds` array is provided the predicate gates each
+ * product on the existence of at least one shop_products row that:
+ *   - belongs to a shop in the customer's User_Shop_Allocations
+ *   - has is_available = true and deleted_at IS NULL
+ *   - is on a shop with is_active = true and deleted_at IS NULL
+ *
+ * The helper appends to the existing `params` array and returns the SQL
+ * snippet plus the next placeholder index. Callers that don't want
+ * customer scoping (admin queries, anonymous browsing) pass `null` and
+ * receive an empty snippet so the master-catalog SQL is unchanged.
+ *
+ * Implementation notes:
+ *   - Uses idx_shop_products_shop_available (shop_id, is_available)
+ *     and the products PK on `id` for the EXISTS lookup.
+ *   - Casts $N::uuid[] so PostgreSQL can use the GIN-friendly array path
+ *     without per-row casts on the inner query.
+ *   - Only $-placeholder *numbers* are spliced into the returned string;
+ *     all user-supplied values continue through the pg parameter bindings.
+ *
+ * @param {string[]|null} allocatedShopIds
+ * @param {any[]} params - Mutated; the array of $-placeholder values.
+ * @param {number} startIdx - Next available $-placeholder index.
+ * @returns {{ sql: string, nextIdx: number }}
+ */
+function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
+  if (!Array.isArray(allocatedShopIds)) {
+    return { sql: '', nextIdx: startIdx }
+  }
+  // Empty allocations → caller is expected to short-circuit; we still emit a
+  // predicate that matches no rows in case we get here defensively.
+  if (allocatedShopIds.length === 0) {
+    return { sql: 'AND FALSE', nextIdx: startIdx }
+  }
+  params.push(allocatedShopIds)
+  const idx = startIdx
+  return {
+    sql: `AND EXISTS (
+      SELECT 1
+        FROM shop_products sp
+        JOIN shops s ON s.id = sp.shop_id
+       WHERE sp.product_id = p.id
+         AND sp.shop_id = ANY($${idx}::uuid[])
+         AND sp.is_available = true
+         AND sp.deleted_at IS NULL
+         AND s.is_active = true
+         AND s.deleted_at IS NULL
+    )`,
+    nextIdx: startIdx + 1,
+  }
+}
+
+/**
  * Products repository — all SQL queries for products
  * NEVER uses SELECT * — always named columns
+ *
+ * Customer-facing read paths accept an optional `allocatedShopIds` array
+ * that gates product visibility on the customer's User_Shop_Allocations
+ * (Requirements 1.5, 4.5, 11.5). Admin/anonymous callers pass `null` to
+ * preserve the legacy unscoped behaviour.
  */
 export class ProductsRepository {
   /**
    * List products with filtering, sorting, pagination
+   *
+   * @param {object} filters
+   * @param {string[]|null} [filters.allocatedShopIds] - When set, restrict
+   *   results to products available in at least one allocated shop.
    */
-  async findMany({ page = 1, limit = 20, category, search, status, sort, minPrice, maxPrice, inStock }) {
+  async findMany({
+    page = 1,
+    limit = 20,
+    category,
+    search,
+    status,
+    sort,
+    minPrice,
+    maxPrice,
+    inStock,
+    allocatedShopIds = null,
+  }) {
     const offset = (page - 1) * limit
     const conditions = []
     const params = []
@@ -72,6 +146,18 @@ export class ProductsRepository {
       conditions.push('p.stock_quantity > 0')
     } else if (inStock === false || inStock === 'false') {
       conditions.push('p.stock_quantity = 0')
+    }
+
+    // Customer scoping (Req 1.5, 4.5, 11.5)
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      paramIdx
+    )
+    if (visibility.sql) {
+      // Strip the leading "AND " — we add it back via the conditions join
+      conditions.push(visibility.sql.replace(/^AND\s+/, ''))
+      paramIdx = visibility.nextIdx
     }
 
     const sortMap = {
@@ -121,8 +207,12 @@ export class ProductsRepository {
    * Hybrid search: prefix full-text (simple dictionary) + ILIKE fallback
    * Uses 'simple' dictionary so prefix queries like 'amu:*' match 'amul'
    * without English stemming issues. Returns fuzzy suggestions when 0 results.
+   *
+   * @param {string} q
+   * @param {object} filters
+   * @param {string[]|null} [filters.allocatedShopIds]
    */
-  async fullTextSearch(q, { page = 1, limit = 20 }) {
+  async fullTextSearch(q, { page = 1, limit = 20, allocatedShopIds = null }) {
     const offset = (page - 1) * limit
     const trimmed = String(q || '').trim()
     const searchTerms = normalizeSearchTerms(trimmed)
@@ -133,6 +223,19 @@ export class ProductsRepository {
 
     const prefixTsQuery = searchTerms.map((term) => `${term}:*`).join(' & ')
     const likePattern = `%${trimmed}%`
+
+    const params = [prefixTsQuery, likePattern]
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    const visClause = visibility.sql
+
+    // $1 = prefixTsQuery, $2 = likePattern, optional $3 = shop_ids,
+    // then limit + offset.
+    const limitIdx = visibility.nextIdx
+    const offsetIdx = visibility.nextIdx + 1
 
     const sql = `
       WITH fts AS (
@@ -154,6 +257,7 @@ export class ProductsRepository {
         LEFT JOIN categories c ON c.id = p.category_id
         WHERE p.is_active = true
           AND p.search_vector @@ to_tsquery('simple', $1)
+          ${visClause}
       ),
       ilike_fallback AS (
         SELECT
@@ -179,6 +283,7 @@ export class ProductsRepository {
             OR p.sku ILIKE $2
             OR p.barcode ILIKE $2
           )
+          ${visClause}
       ),
       combined AS (
         SELECT * FROM fts
@@ -200,7 +305,7 @@ export class ProductsRepository {
         rank
       FROM combined
       ORDER BY source ASC, rank DESC, total_sold DESC, name ASC
-      LIMIT $3 OFFSET $4
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
     `
 
     const countSql = `
@@ -210,6 +315,7 @@ export class ProductsRepository {
         FROM products p
         WHERE p.is_active = true
           AND p.search_vector @@ to_tsquery('simple', $1)
+          ${visClause}
         UNION
         SELECT p.id
         FROM products p
@@ -219,20 +325,23 @@ export class ProductsRepository {
             OR p.sku ILIKE $2
             OR p.barcode ILIKE $2
           )
+          ${visClause}
       ) AS matches
     `
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
-      query(sql, [prefixTsQuery, likePattern, limit, offset]),
-      query(countSql, [prefixTsQuery, likePattern]),
+      query(sql, [...params, limit, offset]),
+      query(countSql, params),
     ])
 
     const total = countRows[0]?.total || 0
 
-    // When no exact/prefix results, provide fuzzy nearest-match suggestions
+    // When no exact/prefix results, provide fuzzy nearest-match suggestions.
+    // Suggestions inherit the same allocation scoping so customers never
+    // see suggestions for products outside their allocated shops.
     let suggestions = []
     if (rows.length === 0 && trimmed.length >= 2) {
-      suggestions = await this.fuzzySuggest(trimmed)
+      suggestions = await this.fuzzySuggest(trimmed, 6, allocatedShopIds)
     }
 
     return {
@@ -251,9 +360,22 @@ export class ProductsRepository {
    * Fuzzy suggestions using pg_trgm similarity.
    * Returns nearest products when exact/prefix search finds nothing.
    * Requires: CREATE EXTENSION pg_trgm (migration 017)
+   *
+   * @param {string} q
+   * @param {number} [limit=6]
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async fuzzySuggest(q, limit = 6) {
+  async fuzzySuggest(q, limit = 6, allocatedShopIds = null) {
     try {
+      const params = [q]
+      const visibility = buildCustomerVisibilitySnippet(
+        allocatedShopIds,
+        params,
+        params.length + 1
+      )
+      params.push(limit)
+      const limitIdx = visibility.nextIdx
+
       const { rows } = await query(
         `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
                 p.stock_quantity, p.unit, p.thumbnail_url,
@@ -264,9 +386,10 @@ export class ProductsRepository {
          LEFT JOIN categories c ON c.id = p.category_id
          WHERE p.is_active = true
            AND similarity(p.name, $1) > 0.08
+           ${visibility.sql}
          ORDER BY sim DESC, p.total_sold DESC
-         LIMIT $2`,
-        [q, limit]
+         LIMIT $${limitIdx}`,
+        params
       )
       return rows
     } catch {
@@ -277,8 +400,20 @@ export class ProductsRepository {
 
   /**
    * Get featured/bestseller products
+   *
+   * @param {number} [limit=20]
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async findFeatured(limit = 20) {
+  async findFeatured(limit = 20, allocatedShopIds = null) {
+    const params = []
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    params.push(limit)
+    const limitIdx = visibility.nextIdx
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
@@ -286,17 +421,29 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        WHERE p.is_active = true AND p.is_featured = true
+         ${visibility.sql}
        ORDER BY p.total_sold DESC
-       LIMIT $1`,
-      [limit]
+       LIMIT $${limitIdx}`,
+      params
     )
     return rows
   }
 
   /**
    * Get single product with full details
+   *
+   * @param {string} id
+   * @param {string[]|null} [allocatedShopIds] - Customer scoping; when set
+   *   the product is only returned if at least one allocated shop carries it.
    */
-  async findById(id) {
+  async findById(id, allocatedShopIds = null) {
+    const params = [id]
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
@@ -314,16 +461,27 @@ export class ProductsRepository {
               p.created_at, p.updated_at
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
-       WHERE p.id = $1`,
-      [id]
+       WHERE p.id = $1
+         ${visibility.sql}`,
+      params
     )
     return rows[0] || null
   }
 
   /**
    * Get product by slug (public-facing)
+   *
+   * @param {string} slug
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async findBySlug(slug) {
+  async findBySlug(slug, allocatedShopIds = null) {
+    const params = [slug]
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
@@ -341,16 +499,31 @@ export class ProductsRepository {
               p.created_at, p.updated_at
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
-       WHERE p.slug = $1 AND p.is_active = true`,
-      [slug]
+       WHERE p.slug = $1 AND p.is_active = true
+         ${visibility.sql}`,
+      params
     )
     return rows[0] || null
   }
 
   /**
    * Get related products (same category, excluding current)
+   *
+   * @param {string} productId
+   * @param {string} categoryId
+   * @param {number} [limit=10]
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async findRelated(productId, categoryId, limit = 10) {
+  async findRelated(productId, categoryId, limit = 10, allocatedShopIds = null) {
+    const params = [categoryId, productId]
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    params.push(limit)
+    const limitIdx = visibility.nextIdx
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url, p.total_sold
@@ -358,14 +531,24 @@ export class ProductsRepository {
        WHERE p.is_active = true
          AND p.category_id = $1
          AND p.id != $2
+         ${visibility.sql}
        ORDER BY p.total_sold DESC
-       LIMIT $3`,
-      [categoryId, productId, limit]
+       LIMIT $${limitIdx}`,
+      params
     )
     return rows
   }
 
-  async findPairWith(productId, categoryId, limit = 10) {
+  async findPairWith(productId, categoryId, limit = 10, allocatedShopIds = null) {
+    const params = [categoryId, productId]
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    params.push(limit)
+    const limitIdx = visibility.nextIdx
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
@@ -376,9 +559,10 @@ export class ProductsRepository {
        WHERE p.is_active = true
          AND p.category_id != $1
          AND p.id != $2
+         ${visibility.sql}
        ORDER BY p.total_sold DESC
-       LIMIT $3`,
-      [categoryId, productId, limit]
+       LIMIT $${limitIdx}`,
+      params
     )
     return rows
   }
@@ -559,18 +743,31 @@ export class ProductsRepository {
   /**
    * Find products with active price drops (sale_price < price)
    * Used in cart "Price Drop Alert" section
+   *
+   * @param {number} [limit=10]
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async getPriceDrops(limit = 10) {
+  async getPriceDrops(limit = 10, allocatedShopIds = null) {
+    const params = []
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    params.push(limit)
+    const limitIdx = visibility.nextIdx
+
     const { rows } = await query(
-      `SELECT id, name, thumbnail_url, price, sale_price, unit, stock_quantity,
-              (price - sale_price) AS discount
+      `SELECT p.id, p.name, p.thumbnail_url, p.price, p.sale_price, p.unit, p.stock_quantity,
+              (p.price - p.sale_price) AS discount
        FROM products p
-       WHERE is_active = true
-         AND sale_price IS NOT NULL
-         AND sale_price < price
+       WHERE p.is_active = true
+         AND p.sale_price IS NOT NULL
+         AND p.sale_price < p.price
+         ${visibility.sql}
        ORDER BY discount DESC
-       LIMIT $1`,
-      [limit]
+       LIMIT $${limitIdx}`,
+      params
     )
     return rows
   }
@@ -578,8 +775,20 @@ export class ProductsRepository {
   /**
    * Find last-minute / cafe / snack products
    * Used in cart "Last-Minute Cravings" section
+   *
+   * @param {number} [limit=10]
+   * @param {string[]|null} [allocatedShopIds]
    */
-  async getLastMinute(limit = 10) {
+  async getLastMinute(limit = 10, allocatedShopIds = null) {
+    const params = []
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      params.length + 1
+    )
+    params.push(limit)
+    const limitIdx = visibility.nextIdx
+
     const { rows } = await query(
       `SELECT p.id, p.name, p.thumbnail_url, p.price, p.sale_price, p.unit
        FROM products p
@@ -589,18 +798,19 @@ export class ProductsRepository {
          AND (c.slug IN ('snacks','cafe','bakery','sweets','beverages')
               OR c.name ILIKE '%cafe%'
               OR c.name ILIKE '%snack%')
+         ${visibility.sql}
        ORDER BY p.sale_price ASC NULLS LAST
-       LIMIT $1`,
-      [limit]
+       LIMIT $${limitIdx}`,
+      params
     )
     return rows
   }
 
-  async findPriceDrops(limit = 10) {
-    return this.getPriceDrops(limit)
+  async findPriceDrops(limit = 10, allocatedShopIds = null) {
+    return this.getPriceDrops(limit, allocatedShopIds)
   }
 
-  async findLastMinute(limit = 10) {
-    return this.getLastMinute(limit)
+  async findLastMinute(limit = 10, allocatedShopIds = null) {
+    return this.getLastMinute(limit, allocatedShopIds)
   }
 }

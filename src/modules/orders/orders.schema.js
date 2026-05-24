@@ -64,6 +64,7 @@ const orderResponseSchema = {
   properties: {
     id: { type: 'string', format: 'uuid' },
     orderNumber: { type: 'string' },
+    shopId: { type: ['string', 'null'] },
     status: { type: 'string' },
     items: { type: 'array', items: orderItemSchema },
     subtotal: { type: 'number' },
@@ -117,7 +118,13 @@ export const placeOrderSchema = {
       properties: {
         success: { type: 'boolean' },
         message: { type: 'string' },
-        data: orderResponseSchema,
+        data: {
+          type: 'object',
+          properties: {
+            orders: { type: 'array', items: orderResponseSchema },
+            order:  orderResponseSchema,
+          },
+        },
       },
     },
   },

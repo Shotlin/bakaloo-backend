@@ -133,4 +133,69 @@ export class AuthRepository {
     }
     return code
   }
+
+  /**
+   * Find all active shop_staff records for a user.
+   * "Active" means: shop_staff.is_active = true, shop_staff.deleted_at IS NULL,
+   *                 the parent shop is_active = true and deleted_at IS NULL.
+   * Joins shops in a single query to avoid N+1 lookups.
+   *
+   * Used by:
+   *   - login flow (decide auto-scope vs require selection) — Requirement 13.1, 13.2, 13.3, 13.4
+   *   - select-shop endpoint (validate selection)               — Requirement 2.8
+   *
+   * @param {string} userId
+   * @returns {Promise<Array<{shop_staff_id, shop_id, shop_name, role, permissions}>>}
+   */
+  async findActiveShopStaffByUserId(userId) {
+    const { rows } = await query(
+      `SELECT
+         ss.id          AS shop_staff_id,
+         ss.shop_id     AS shop_id,
+         s.name         AS shop_name,
+         ss.role        AS role,
+         ss.permissions AS permissions
+       FROM shop_staff ss
+       JOIN shops s ON s.id = ss.shop_id
+      WHERE ss.user_id    = $1
+        AND ss.is_active  = true
+        AND ss.deleted_at IS NULL
+        AND s.is_active   = true
+        AND s.deleted_at  IS NULL
+      ORDER BY s.created_at ASC`,
+      [userId]
+    )
+    return rows
+  }
+
+  /**
+   * Find a single active shop_staff record for a (user_id, shop_id) pair.
+   * Used by select-shop to validate a user's access to the requested shop.
+   * Requirement 2.8, 13.2
+   *
+   * @param {string} userId
+   * @param {string} shopId
+   * @returns {Promise<{shop_staff_id, shop_id, shop_name, role, permissions}|null>}
+   */
+  async findActiveShopStaffByUserAndShop(userId, shopId) {
+    const { rows } = await query(
+      `SELECT
+         ss.id          AS shop_staff_id,
+         ss.shop_id     AS shop_id,
+         s.name         AS shop_name,
+         ss.role        AS role,
+         ss.permissions AS permissions
+       FROM shop_staff ss
+       JOIN shops s ON s.id = ss.shop_id
+      WHERE ss.user_id    = $1
+        AND ss.shop_id    = $2
+        AND ss.is_active  = true
+        AND ss.deleted_at IS NULL
+        AND s.is_active   = true
+        AND s.deleted_at  IS NULL
+      LIMIT 1`,
+      [userId, shopId]
+    )
+    return rows[0] || null
+  }
 }

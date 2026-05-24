@@ -69,6 +69,113 @@ export const themeQueue = new Queue('themes', {
   },
 })
 
+/**
+ * Allocation queue — recompute user-shop allocations on shop area change
+ * (Requirements 4.8, 4.9). Concurrency 2, retry 3x exponential backoff.
+ */
+export const allocationQueue = new Queue('allocation', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
+})
+
+/**
+ * Settlement queue — daily/weekly/monthly Shop_Financial aggregation
+ * (Requirements 6.2, 6.3, 6.4, 6.7, 6.9, 14.6, 14.11).
+ *
+ * Concurrency 1 (financial writes serialized), 3 attempts with exponential
+ * backoff (Req 6.7), and an extended retention window so failed jobs stay
+ * inspectable for two weeks.
+ */
+export const settlementQueue = new Queue('settlement', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 7 * 24 * 3600 },
+    removeOnFail: { age: 14 * 24 * 3600 },
+  },
+})
+
+/**
+ * Payouts queue — weekly payout processing (Requirements 8.1–8.7, 14.6).
+ *
+ * Cron-driven `weekly-run` fans out a `process-payout` job per PENDING
+ * shop_financials row, plus admin-triggered `set-hold` / `release-hold`
+ * jobs from the Super Admin endpoints.
+ *
+ * Concurrency 1: payout state transitions and ledger writes are
+ * serialized so concurrent runs cannot move the same row twice. Three
+ * attempts with exponential backoff complement the row-level
+ * `attempt_count` field — Req 8.5 limits row-level retries to 3 before
+ * flipping to HELD, while job-level retries cover transient infra hiccups
+ * (Redis blip, transient DB error) without burning through a payout
+ * attempt.
+ */
+export const payoutQueue = new Queue('payouts', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 7 * 24 * 3600 },
+    removeOnFail: { age: 14 * 24 * 3600 },
+  },
+})
+
+/**
+ * Stock notifications queue — restock notifications to wishlist customers
+ * (Requirements 3.4, 11.6; task 13.2 worker).
+ *
+ * Producer side (shop-products service post-commit handler in task 13.1):
+ *   - Enqueues `wishlist-restock` jobs when a Shop_Product transitions
+ *     from stock_quantity = 0 to a positive value, so the worker can
+ *     fan-out push notifications to every Customer who has wishlisted
+ *     the underlying product.
+ *
+ * Worker config (per design.md Background Job Architecture):
+ *   - attempts 2, fixed backoff (5s) — restock alerts are best-effort and
+ *     should not flood Redis with deep retry chains
+ *   - concurrency 2 (applied at worker registration in task 13.2)
+ *   - removeOnComplete 24h, removeOnFail 7d
+ */
+export const stockNotificationsQueue = new Queue('stock-notifications', {
+  connection,
+  defaultJobOptions: {
+    attempts: 2,
+    backoff: { type: 'fixed', delay: 5000 },
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
+})
+
+/**
+ * Scheduled orders queue — fires customer scheduled orders at their
+ * scheduled_for time (Requirements 10.2, 10.3, 10.5; task 10.3 worker).
+ *
+ * Producer side (scheduled-orders module): enqueues delayed jobs with a
+ * deterministic jobId (`scheduled-order:{row.id}`) so:
+ *   - duplicate enqueues coalesce (idempotent retries)
+ *   - cancellation can remove the queued job by id (Requirement 10.6)
+ *
+ * Worker config (per design.md Background Job Architecture):
+ *   - attempts 3, exponential backoff (2s base)
+ *   - removeOnComplete 24h, removeOnFail 7d
+ *   - concurrency 3 (applied at worker registration in task 10.3)
+ */
+export const scheduledOrdersQueue = new Queue('scheduled-orders', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 2000 },
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
+})
+
 // ─── WORKERS ─────────────────────────────────────────────
 
 const workers = []
@@ -162,6 +269,165 @@ export function startThemeWorker(processor) {
 }
 
 /**
+ * Start allocation worker — handles `recompute-by-shop` jobs that fan out
+ * pincode/radius changes to affected customers (Requirements 4.8, 4.9).
+ * Concurrency 2 per design.md Background Job Architecture.
+ */
+export function startAllocationWorker(processor) {
+  const worker = new Worker('allocation', processor, {
+    connection,
+    concurrency: 2,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug({ jobId: job.id, name: job.name }, 'Allocation job completed')
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message },
+      'Allocation job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Allocation worker started')
+  return worker
+}
+
+/**
+ * Start scheduled-orders worker — fires customer scheduled orders at their
+ * scheduled_for time (Requirements 10.2, 10.3, 10.5).
+ *
+ * The actual job processor (validate stock, place real order, link
+ * placed_order_id, compute next recurrence, mark FAILED on stock failure)
+ * is implemented in task 10.3. This factory exists so 10.2 can wire the
+ * queue producer end-to-end without coupling to the worker, and 10.3 just
+ * needs to register a processor.
+ *
+ * Concurrency 3 per design.md Background Job Architecture.
+ */
+export function startScheduledOrderWorker(processor) {
+  const worker = new Worker('scheduled-orders', processor, {
+    connection,
+    concurrency: 3,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug(
+      { jobId: job.id, name: job.name },
+      'Scheduled-order job completed'
+    )
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message },
+      'Scheduled-order job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Scheduled-orders worker started')
+  return worker
+}
+
+/**
+ * Start settlement worker — handles daily/weekly/monthly Shop_Financial
+ * aggregation jobs (Requirements 6.2, 6.7, 6.9, 14.6).
+ *
+ * Concurrency 1: financial writes are serialized so the daily UPSERT
+ * loop never races with itself across multiple worker processes.
+ */
+export function startSettlementWorker(processor) {
+  const worker = new Worker('settlement', processor, {
+    connection,
+    concurrency: 1,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug({ jobId: job.id, name: job.name }, 'Settlement job completed')
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message },
+      'Settlement job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Settlement worker started')
+  return worker
+}
+
+/**
+ * Start payout worker — handles weekly payout processing
+ * (Requirements 8.1–8.7, 14.6).
+ *
+ * Concurrency 1: every payout job locks one shop_financials row with
+ * SELECT FOR UPDATE and writes to the ledger; serializing job execution
+ * keeps the lock window short and avoids worker contention on the same
+ * row when retries collide.
+ */
+export function startPayoutWorker(processor) {
+  const worker = new Worker('payouts', processor, {
+    connection,
+    concurrency: 1,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug({ jobId: job.id, name: job.name }, 'Payout job completed')
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message },
+      'Payout job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Payout worker started')
+  return worker
+}
+
+/**
+ * Start stock-notifications worker — fans out restock alerts to customers
+ * who wishlisted a Shop_Product when stock transitions from 0 to >0
+ * (Requirements 3.4, 11.6).
+ *
+ * Concurrency 2 per design.md Background Job Architecture: restock fan-out
+ * can run in parallel across products without contention on shared rows.
+ * The actual processor (lookup wishlist users, send push) is implemented
+ * in task 13.2.
+ */
+export function startStockNotificationsWorker(processor) {
+  const worker = new Worker('stock-notifications', processor, {
+    connection,
+    concurrency: 2,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug(
+      { jobId: job.id, name: job.name },
+      'Stock-notifications job completed'
+    )
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message },
+      'Stock-notifications job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Stock-notifications worker started')
+  return worker
+}
+
+/**
  * Close all queues and workers (graceful shutdown)
  */
 export async function closeBullMQ() {
@@ -172,5 +438,10 @@ export async function closeBullMQ() {
   await orderQueue.close()
   await smsQueue.close()
   await themeQueue.close()
+  await allocationQueue.close()
+  await scheduledOrdersQueue.close()
+  await settlementQueue.close()
+  await payoutQueue.close()
+  await stockNotificationsQueue.close()
   logger.info('BullMQ queues and workers closed')
 }

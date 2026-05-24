@@ -50,19 +50,45 @@ export const verifyOtpSchema = {
         message: { type: 'string' },
         data: {
           type: 'object',
+          // Two response shapes are possible:
+          //  - Standard login: accessToken, refreshToken, user (existing behavior)
+          //  - Multi-shop staff: requires_shop_selection=true, shops[], temp_token
+          // Schema is intentionally permissive so Fastify does not strip extras.
+          additionalProperties: true,
+        },
+      },
+    },
+  },
+}
+
+// POST /select-shop — issue a shop-scoped JWT for a staff member.
+// Requirements: 2.6, 2.7, 2.8, 13.2, 13.3, 13.5
+export const selectShopSchema = {
+  tags: ['Auth'],
+  summary: 'Select a shop and receive a shop-scoped JWT [Authenticated]',
+  security: [{ bearerAuth: [] }],
+  body: {
+    type: 'object',
+    required: ['shop_id'],
+    properties: {
+      shop_id: { type: 'string', format: 'uuid' },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
           properties: {
-            accessToken: { type: 'string' },
-            refreshToken: { type: 'string' },
-            user: {
-              type: 'object',
-              properties: {
-                id: { type: 'string', format: 'uuid' },
-                phone: { type: 'string' },
-                name: { type: 'string' },
-                role: { type: 'string' },
-                isNewUser: { type: 'boolean' },
-                isVerified: { type: 'boolean' },
-              },
+            token: { type: 'string' },
+            shop_id: { type: 'string', format: 'uuid' },
+            shop_role: { type: 'string' },
+            permissions: {
+              type: 'array',
+              items: { type: 'string' },
             },
           },
         },

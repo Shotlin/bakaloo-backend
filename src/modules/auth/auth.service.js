@@ -1,6 +1,6 @@
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.js'
 import { sendSmsOtp, verifySmsOtp } from '../../utils/sms.js'
-import { generateTokenPair, verifyToken } from '../../utils/jwt.js'
+import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken } from '../../utils/jwt.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { redis } from '../../config/redis.js'
 import { env } from '../../config/env.js'
@@ -8,6 +8,10 @@ import { logger } from '../../config/logger.js'
 
 const REFRESH_TOKEN_PREFIX = 'refresh:'
 const SMS_SESSION_PREFIX = 'sms:session:'
+// Short-lived token issued when a staff member logs in but has multiple shop
+// assignments and must select one before getting a full session JWT.
+// Requirement 13.3
+const TEMP_TOKEN_EXPIRY = '10m'
 
 function normalizePhoneForOtp(phone) {
   const digits = `${phone || ''}`.replace(/\D/g, '')
@@ -164,6 +168,127 @@ export class AuthService {
       return { success: false, message: 'Your account has been blocked. Contact support.' }
     }
 
+    // ─── Shop staff branch-level authentication ──────────────────
+    // Requirement 13.1, 13.2, 13.3, 13.4 — staff must auto-scope (1 shop),
+    // pick (multiple shops), or fall through (zero shops → behave as a
+    // regular user with no shop scope).
+    //
+    // Backward compatibility: customers and riders never reach this branch
+    // because they have no shop_staff records, so their JWT structure is
+    // unchanged.
+    let staffAssignments = []
+    if (user.role !== 'RIDER') {
+      try {
+        staffAssignments = await this.repo.findActiveShopStaffByUserId(user.id)
+      } catch (err) {
+        // If the lookup fails (e.g. shop_staff/shops tables not yet present
+        // in a fresh environment), treat the user as a non-staff and continue.
+        logger.warn(
+          { err: err.message, userId: user.id, action: 'shop_staff_lookup_failed' },
+          'Shop staff lookup failed during login — falling back to standard auth'
+        )
+        staffAssignments = []
+      }
+    }
+
+    if (staffAssignments.length === 1) {
+      // Single shop → issue shop-scoped JWT directly (Requirement 2.6, 13.2)
+      const assignment = staffAssignments[0]
+      const accessToken = signAccessToken(
+        {
+          id: user.id,
+          phone: user.phone,
+          role: user.role,
+          shopId: assignment.shop_id,
+          shopRole: assignment.role,
+          permissions: assignment.permissions || [],
+        },
+        { expiresIn: '24h' }
+      )
+      const refreshToken = signRefreshToken({
+        id: user.id,
+        phone: user.phone,
+        role: user.role,
+      })
+      await redis.set(
+        `${REFRESH_TOKEN_PREFIX}${user.id}`,
+        refreshToken,
+        'EX',
+        7 * 24 * 60 * 60
+      )
+
+      logger.info(
+        {
+          userId: user.id,
+          shopId: assignment.shop_id,
+          shopRole: assignment.role,
+          action: 'staff_login_auto_scope',
+        },
+        'Shop staff auto-scoped to single shop'
+      )
+
+      return {
+        success: true,
+        accessToken,
+        refreshToken,
+        user: {
+          id: user.id,
+          phone: user.phone,
+          name: user.name,
+          role: user.role,
+          isNewUser,
+          isVerified: false,
+          shop_id: assignment.shop_id,
+          shop_role: assignment.role,
+          permissions: assignment.permissions || [],
+        },
+      }
+    }
+
+    if (staffAssignments.length > 1) {
+      // Multiple shops → require selection (Requirement 2.7, 13.3)
+      // Issue a short-lived temp token (no shop scope) so the client can
+      // call POST /auth/select-shop. We do NOT issue a refresh token here.
+      const tempToken = signAccessToken(
+        {
+          id: user.id,
+          phone: user.phone,
+          role: user.role,
+          requires_shop_selection: true,
+        },
+        { expiresIn: TEMP_TOKEN_EXPIRY }
+      )
+
+      logger.info(
+        {
+          userId: user.id,
+          shopCount: staffAssignments.length,
+          action: 'staff_login_requires_selection',
+        },
+        'Shop staff has multiple shops — selection required'
+      )
+
+      return {
+        success: true,
+        requires_shop_selection: true,
+        temp_token: tempToken,
+        shops: staffAssignments.map((a) => ({
+          shop_id: a.shop_id,
+          shop_name: a.shop_name,
+          shop_role: a.role,
+        })),
+        user: {
+          id: user.id,
+          phone: user.phone,
+          name: user.name,
+          role: user.role,
+          isNewUser,
+        },
+      }
+    }
+
+    // ─── Default path: zero shop assignments (customers, riders, admins) ─
+    // JWT structure remains unchanged for backward compatibility.
     // Generate JWT pair
     const payload = { id: user.id, phone: user.phone, role: user.role }
     const tokens = generateTokenPair(payload)
@@ -258,6 +383,78 @@ export class AuthService {
     await this.repo.deleteUser(userId)
     await redis.del(`${REFRESH_TOKEN_PREFIX}${userId}`)
     logger.info({ userId }, 'User account deleted')
+  }
+
+  /**
+   * Select a shop after authentication and issue a shop-scoped JWT.
+   * Validates that the user has an active Shop_Staff_Record for the requested
+   * shop (and the parent shop is itself active).
+   *
+   * Requirements: 2.6, 2.7, 2.8, 13.2, 13.5
+   * Error codes: STAFF_NOT_FOUND (404), STAFF_INACTIVE (403)
+   *
+   * @param {string} userId - From the authenticated request (could be a temp
+   *   token issued during a multi-shop login or any token without shopId).
+   * @param {string} shopId - From the request body, validated as UUID.
+   * @returns {Promise<{success, token?, shop_id?, shop_role?, permissions?, message?, code?}>}
+   */
+  async selectShop(userId, shopId) {
+    // Verify the user is still active before issuing a long-lived token.
+    const user = await this.repo.findById(userId)
+    if (!user || !user.is_active) {
+      return {
+        success: false,
+        message: 'User account is not active',
+        code: 'STAFF_INACTIVE',
+      }
+    }
+
+    const assignment = await this.repo.findActiveShopStaffByUserAndShop(
+      userId,
+      shopId
+    )
+
+    if (!assignment) {
+      logger.info(
+        { userId, shopId, action: 'select_shop_rejected' },
+        'Shop selection rejected — no active assignment'
+      )
+      return {
+        success: false,
+        message: 'No active shop assignment found for this user and shop',
+        code: 'STAFF_NOT_FOUND',
+      }
+    }
+
+    const token = signAccessToken(
+      {
+        id: user.id,
+        phone: user.phone,
+        role: user.role,
+        shopId: assignment.shop_id,
+        shopRole: assignment.role,
+        permissions: assignment.permissions || [],
+      },
+      { expiresIn: '24h' }
+    )
+
+    logger.info(
+      {
+        userId: user.id,
+        shopId: assignment.shop_id,
+        shopRole: assignment.role,
+        action: 'shop_scope_selected',
+      },
+      'Shop scope selected and JWT issued'
+    )
+
+    return {
+      success: true,
+      token,
+      shop_id: assignment.shop_id,
+      shop_role: assignment.role,
+      permissions: assignment.permissions || [],
+    }
   }
 
   async _queueBacklogAssignScan(source) {

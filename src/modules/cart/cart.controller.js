@@ -24,9 +24,13 @@ export class CartController {
 
   /** POST /items */
   async addItem(request, reply) {
-    const result = await this.service.addItem(request.user.id, request.body)
+    const result = await this.service.addItem(request.user.id, {
+      productId: request.body.productId,
+      shopId: request.body.shopId || null,
+      quantity: request.body.quantity,
+    })
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'CART_ERROR'))
+      return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
     }
     return reply.code(200).send(success(result.cart, 'Item added to cart'))
   }
@@ -36,10 +40,11 @@ export class CartController {
     const result = await this.service.updateItem(
       request.user.id,
       request.params.productId,
-      request.body.quantity
+      request.body.quantity,
+      request.body.shopId || null
     )
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'CART_ERROR'))
+      return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
     }
     return reply.code(200).send(success(result.cart, 'Cart item updated'))
   }
@@ -48,10 +53,11 @@ export class CartController {
   async removeItem(request, reply) {
     const result = await this.service.removeItem(
       request.user.id,
-      request.params.productId
+      request.params.productId,
+      request.query?.shopId || null
     )
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'CART_ERROR'))
+      return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
     }
     return reply.code(200).send(success(result.cart, 'Item removed from cart'))
   }

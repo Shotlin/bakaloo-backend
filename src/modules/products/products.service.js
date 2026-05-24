@@ -1,39 +1,179 @@
+import crypto from 'node:crypto'
 import { cacheGet, cacheSet, cacheDeletePattern } from '../../utils/cache.js'
 import { generateSlug } from '../../utils/slugify.js'
 import { logger } from '../../config/logger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
+import { AllocationService } from '../allocation/allocation.service.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const CACHE_TTL_LIST = 600     // 10 min for lists
 const CACHE_TTL_FEATURED = 1800 // 30 min for featured
 const CACHE_TTL_DETAIL = 900   // 15 min for single product
-const CACHE_VERSION = 'v2'
+const CACHE_VERSION = 'v3'
+
+/**
+ * Hash a sorted array of UUIDs to a short stable token suitable for use
+ * inside a Redis cache key. We don't need cryptographic strength here —
+ * this just keeps two customers with overlapping but non-identical
+ * allocations from sharing a cached payload (Requirement 14.7).
+ *
+ * @param {string[]} ids
+ * @returns {string}
+ */
+function hashShopIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return 'empty'
+  const sorted = [...ids].sort()
+  return crypto
+    .createHash('sha1')
+    .update(sorted.join(','))
+    .digest('hex')
+    .slice(0, 12)
+}
+
+/**
+ * Empty paginated result helper. Used when a customer has zero allocations
+ * so we can short-circuit before hitting the repository.
+ */
+function emptyList(filters) {
+  const page = Number(filters?.page) || 1
+  const limit = Number(filters?.limit) || 20
+  return {
+    data: [],
+    pagination: { page, limit, total: 0, totalPages: 0 },
+  }
+}
 
 /**
  * Products service — business logic with Redis caching
+ *
+ * Customer-facing read paths (`list`, `search`, `getById`, `getBySlug`,
+ * `getRelated`, `getPairWith`, `getFeatured`, `getPriceDrops`,
+ * `getLastMinute`) accept an optional `customerContext` argument carrying
+ * the requesting user's id. When present:
+ *   - the service resolves the customer's allocated shop_ids via
+ *     AllocationService (Redis-backed, TTL 600s)
+ *   - the resolved list is forwarded to the repository which gates each
+ *     query on shop_products + shops visibility predicates
+ *   - cached payloads are scoped to a per-allocation hash so two
+ *     customers in different areas never share results
+ *
+ * Admin / anonymous reads pass `null` and continue to use the legacy
+ * unscoped queries — preserving existing API contracts.
  */
 export class ProductsService {
-  constructor(repository) {
+  /**
+   * @param {import('./products.repository.js').ProductsRepository} repository
+   * @param {object} [deps]
+   * @param {AllocationService} [deps.allocationService] - Injectable for tests.
+   */
+  constructor(repository, deps = {}) {
     this.repo = repository
+    this.allocationService =
+      deps.allocationService ||
+      new AllocationService(new AllocationRepository())
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Allocation resolution + cache key helpers
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the customer's allocated shop_ids. Returns:
+   *   - null when no customer context (admin/anonymous → legacy unscoped)
+   *   - [] when the customer has zero allocations (caller short-circuits)
+   *   - [shopId, ...] otherwise
+   *
+   * Errors from the allocation service are logged and treated as "no
+   * allocations" so a transient Redis/DB hiccup never leaks the full
+   * catalog to a customer (fail-closed for visibility, Requirement 1.5).
+   *
+   * @param {{ userId?: string }|null|undefined} customerContext
+   * @returns {Promise<string[]|null>}
+   */
+  async _resolveAllocatedShopIds(customerContext) {
+    if (!customerContext || !customerContext.userId) return null
+    try {
+      const ids = await this.allocationService.getShopIdsForUser(
+        customerContext.userId
+      )
+      return Array.isArray(ids) ? ids : []
+    } catch (err) {
+      logger.error(
+        {
+          customerId: customerContext.userId,
+          err: err.message,
+          action: 'products.resolve_allocations',
+        },
+        'Failed to resolve customer allocations; returning empty visibility'
+      )
+      return []
+    }
   }
 
   /**
-   * List products with filters (cached by filter combination)
+   * Build a customer-scoped cache key fragment. Anonymous/admin callers
+   * get the literal "anon" so their cached payload remains shared
+   * (Requirement 14.7).
+   *
+   * @param {string[]|null} allocatedShopIds
+   * @returns {string}
    */
-  async list(filters) {
-    const cacheKey = `products:list:${CACHE_VERSION}:${JSON.stringify(filters)}`
+  _scopeKey(allocatedShopIds) {
+    if (!Array.isArray(allocatedShopIds)) return 'anon'
+    return `c:${hashShopIds(allocatedShopIds)}`
+  }
+
+  /**
+   * List products with filters (cached by filter combination + scope)
+   *
+   * @param {object} filters
+   * @param {{ userId?: string }|null} [customerContext]
+   */
+  async list(filters, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      logger.info(
+        {
+          customerId: customerContext?.userId,
+          shopIds: [],
+          action: 'products.list',
+        },
+        'Customer has no allocated shops; returning empty product list'
+      )
+      return emptyList(filters)
+    }
+
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = `products:list:${CACHE_VERSION}:${scope}:${JSON.stringify(filters)}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
-    const result = this._normalizeProductListResult(await this.repo.findMany(filters))
+    const result = this._normalizeProductListResult(
+      await this.repo.findMany({ ...filters, allocatedShopIds })
+    )
     await cacheSet(cacheKey, result, CACHE_TTL_LIST)
+
+    logger.info(
+      {
+        customerId: customerContext?.userId || null,
+        shopIds: Array.isArray(allocatedShopIds) ? allocatedShopIds.length : null,
+        action: 'products.list',
+      },
+      'Products list served'
+    )
     return result
   }
 
   /**
    * Hybrid search — prefix FTS + ILIKE + fuzzy suggestions
    * Accepts single character queries for instant suggestions
+   *
+   * @param {string} q
+   * @param {object} filters
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async search(q, filters) {
+  async search(q, filters, customerContext = null) {
     const trimmed = String(q || '').trim()
 
     if (!trimmed) {
@@ -49,38 +189,86 @@ export class ProductsService {
       }
     }
 
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      logger.info(
+        {
+          customerId: customerContext?.userId,
+          shopIds: [],
+          action: 'products.search',
+        },
+        'Customer has no allocated shops; returning empty search'
+      )
+      return { ...emptyList(filters), suggestions: [] }
+    }
+
     // search queries bypass cache for freshness
     try {
-      return this._normalizeProductListResult(await this.repo.fullTextSearch(trimmed, filters))
+      return this._normalizeProductListResult(
+        await this.repo.fullTextSearch(trimmed, { ...filters, allocatedShopIds })
+      )
     } catch (err) {
-      logger.warn({ err: err.message, q: trimmed }, 'Search query failed, falling back to ILIKE')
-      const result = this._normalizeProductListResult(await this.repo.findMany({ ...filters, search: trimmed }))
+      logger.warn(
+        { err: err.message, q: trimmed, action: 'products.search' },
+        'Search query failed, falling back to ILIKE'
+      )
+      const result = this._normalizeProductListResult(
+        await this.repo.findMany({
+          ...filters,
+          search: trimmed,
+          allocatedShopIds,
+        })
+      )
       return { ...result, suggestions: [] }
     }
   }
 
   /**
    * Featured products (cached 30 min)
+   *
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async getFeatured() {
-    const cacheKey = `products:featured:${CACHE_VERSION}`
+  async getFeatured(customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = `products:featured:${CACHE_VERSION}:${scope}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
-    const products = this._normalizeProducts(await this.repo.findFeatured())
+    const products = this._normalizeProducts(
+      await this.repo.findFeatured(20, allocatedShopIds)
+    )
     await cacheSet(cacheKey, products, CACHE_TTL_FEATURED)
     return products
   }
 
   /**
    * Get single product detail
+   *
+   * @param {string} id
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async getById(id) {
-    const cacheKey = `products:detail:${CACHE_VERSION}:${id}`
+  async getById(id, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return null
+    }
+
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = `products:detail:${CACHE_VERSION}:${scope}:${id}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
-    const product = this._normalizeProduct(await this.repo.findById(id))
+    const product = this._normalizeProduct(
+      await this.repo.findById(id, allocatedShopIds)
+    )
     if (product) {
       await cacheSet(cacheKey, product, CACHE_TTL_DETAIL)
     }
@@ -89,13 +277,25 @@ export class ProductsService {
 
   /**
    * Get product by slug (public-facing)
+   *
+   * @param {string} slug
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async getBySlug(slug) {
-    const cacheKey = `products:slug:${CACHE_VERSION}:${slug}`
+  async getBySlug(slug, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return null
+    }
+
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = `products:slug:${CACHE_VERSION}:${scope}:${slug}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
-    const product = this._normalizeProduct(await this.repo.findBySlug(slug))
+    const product = this._normalizeProduct(
+      await this.repo.findBySlug(slug, allocatedShopIds)
+    )
     if (product) {
       await cacheSet(cacheKey, product, CACHE_TTL_DETAIL)
     }
@@ -104,34 +304,74 @@ export class ProductsService {
 
   /**
    * Get product by ID or slug (auto-detect)
+   *
+   * @param {string} identifier
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async getByIdOrSlug(identifier) {
+  async getByIdOrSlug(identifier, customerContext = null) {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier)
-    return isUUID ? this.getById(identifier) : this.getBySlug(identifier)
+    return isUUID
+      ? this.getById(identifier, customerContext)
+      : this.getBySlug(identifier, customerContext)
   }
 
   /**
    * Get related products (same category)
+   *
+   * @param {string} id
+   * @param {{ userId?: string }|null} [customerContext]
    */
-  async getRelated(id) {
+  async getRelated(id, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    // Look up the master-catalog row directly (admin scope) so we can read
+    // its category_id; visibility is enforced separately by findRelated.
     const product = await this.repo.findById(id)
     if (!product) return null
 
-    return this._normalizeProducts(await this.repo.findRelated(id, product.category_id))
-  }
-
-  async getPairWith(productId, categoryId, limit = 10) {
     return this._normalizeProducts(
-      await this.repo.findPairWith(productId, categoryId, limit)
+      await this.repo.findRelated(id, product.category_id, 10, allocatedShopIds)
     )
   }
 
-  async getPriceDrops(limit = 10) {
-    return this._normalizeProducts(await this.repo.getPriceDrops(limit))
+  async getPairWith(productId, categoryId, limit = 10, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    return this._normalizeProducts(
+      await this.repo.findPairWith(productId, categoryId, limit, allocatedShopIds)
+    )
   }
 
-  async getLastMinute(limit = 10) {
-    return this._normalizeProducts(await this.repo.getLastMinute(limit))
+  async getPriceDrops(limit = 10, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    return this._normalizeProducts(
+      await this.repo.getPriceDrops(limit, allocatedShopIds)
+    )
+  }
+
+  async getLastMinute(limit = 10, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    return this._normalizeProducts(
+      await this.repo.getLastMinute(limit, allocatedShopIds)
+    )
   }
 
   /**
@@ -147,8 +387,8 @@ export class ProductsService {
 
     // Invalidate list/featured caches
     await cacheDeletePattern('products:list:*')
-    await cacheDeletePattern('products:featured')
-    logger.info({ productId: product.id }, 'Product created')
+    await cacheDeletePattern('products:featured*')
+    logger.info({ productId: product.id, action: 'products.create' }, 'Product created')
 
     return { success: true, product: this._normalizeProduct(product) }
   }
@@ -170,7 +410,7 @@ export class ProductsService {
     const product = await this.repo.update(id, updateData)
 
     await cacheDeletePattern('products:*')
-    logger.info({ productId: id }, 'Product updated')
+    logger.info({ productId: id, action: 'products.update' }, 'Product updated')
 
     return { success: true, product: this._normalizeProduct(product) }
   }
@@ -184,7 +424,7 @@ export class ProductsService {
 
     const product = await this.repo.updateStock(id, stock)
 
-    await cacheDeletePattern(`products:detail:${id}`)
+    await cacheDeletePattern(`products:detail:*:${id}`)
     await cacheDeletePattern('products:list:*')
 
     return { success: true, product }
@@ -200,7 +440,7 @@ export class ProductsService {
     await this.repo.delete(id)
 
     await cacheDeletePattern('products:*')
-    logger.info({ productId: id }, 'Product deleted')
+    logger.info({ productId: id, action: 'products.delete' }, 'Product deleted')
 
     return { success: true }
   }

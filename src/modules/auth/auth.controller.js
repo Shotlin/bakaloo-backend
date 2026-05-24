@@ -41,6 +41,23 @@ export class AuthController {
       return reply.code(400).send(error(result.message, 'INVALID_OTP'))
     }
 
+    // Multi-shop staff: client must call POST /auth/select-shop next.
+    // No refresh-token cookie is issued for the temp token.
+    // Requirement 2.7, 13.3
+    if (result.requires_shop_selection) {
+      return reply.code(200).send(
+        success(
+          {
+            requires_shop_selection: true,
+            temp_token: result.temp_token,
+            shops: result.shops,
+            user: result.user,
+          },
+          'Multiple shop assignments — please select a shop'
+        )
+      )
+    }
+
     // Set refresh token as httpOnly cookie
     reply.setCookie('refreshToken', result.refreshToken, {
       httpOnly: true,
@@ -58,6 +75,40 @@ export class AuthController {
           user: result.user,
         },
         result.user.isNewUser ? 'Account created successfully' : 'Login successful'
+      )
+    )
+  }
+
+  /**
+   * POST /select-shop — issue shop-scoped JWT after staff selects a shop.
+   * Requires authenticated user (could be temp token or any token without shopId).
+   * Requirements: 2.7, 2.8, 13.2, 13.3, 13.5
+   */
+  async selectShop(request, reply) {
+    const { shop_id: shopId } = request.body || {}
+
+    if (!shopId) {
+      return reply
+        .code(400)
+        .send(error('shop_id is required', 'VALIDATION_ERROR'))
+    }
+
+    const result = await this.service.selectShop(request.user.id, shopId)
+
+    if (!result.success) {
+      const statusCode = result.code === 'STAFF_INACTIVE' ? 403 : 404
+      return reply.code(statusCode).send(error(result.message, result.code))
+    }
+
+    return reply.code(200).send(
+      success(
+        {
+          token: result.token,
+          shop_id: result.shop_id,
+          shop_role: result.shop_role,
+          permissions: result.permissions,
+        },
+        'Shop selected successfully'
       )
     )
   }

@@ -33,7 +33,12 @@ async function corsPlugin(fastify) {
     origin: origins,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    // X-Shop-Id is set by the dashboard's axios interceptor for every
+    // shop-scoped request (multi-vendor design — see dashboard
+    // src/lib/api.ts and design.md "X-Shop-Id Interceptor"). Must be in
+    // allowedHeaders so the browser preflight passes. Without it, every
+    // shop-scoped GET/POST fails with net::ERR_FAILED at the browser.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Shop-Id'],
     exposedHeaders: ['X-Total-Count', 'X-Total-Pages'],
     maxAge: 86400,
   })

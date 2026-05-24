@@ -90,6 +90,57 @@ export class WishlistRepository {
     await query('DELETE FROM wishlist WHERE user_id = $1', [userId])
   }
 
+  /**
+   * Page through users who have wishlisted a specific product. Used by the
+   * stock-notifications BullMQ worker (task 13.2) to fan out restock push
+   * notifications to interested customers (Requirements 3.4, 11.6).
+   *
+   * Keyset cursor on `user_id` keeps memory bounded on the 2-core/4GB
+   * target box and avoids OFFSET scans on large wishlists. The caller
+   * drives the loop until fewer than `limit` rows come back.
+   *
+   * Index note: the unique index `idx_wishlist_user_product (user_id,
+   * product_id)` covers the (user_id) ordering; Postgres falls back to a
+   * bitmap/sequential scan for the product_id predicate. Acceptable for
+   * the restock-notification path which fires only on stock 0→positive
+   * transitions (low frequency, small per-product wishlist sizes).
+   *
+   * @param {string} productId
+   * @param {object} [opts]
+   * @param {string|null} [opts.afterUserId] - Keyset cursor; pass the
+   *   `user_id` of the last row from the previous batch (or null/undefined
+   *   to start from the beginning).
+   * @param {number} [opts.limit=200] - Page size; clamped to [1, 1000].
+   * @returns {Promise<Array<{user_id: string}>>}
+   */
+  async findUsersByWishlistedProduct(productId, { afterUserId, limit } = {}) {
+    // Resolve limit: invalid (NaN / non-numeric) → default 200, otherwise
+    // clamp into [1, 1000] so callers can't accidentally request 0 /
+    // negative / huge pages.
+    const rawLimit = Number(limit)
+    const resolvedLimit = Number.isFinite(rawLimit) ? rawLimit : 200
+    const safeLimit = Math.max(1, Math.min(1000, resolvedLimit))
+    const params = [productId]
+    let where = 'WHERE w.product_id = $1'
+
+    if (afterUserId) {
+      params.push(afterUserId)
+      where += ` AND w.user_id > $${params.length}`
+    }
+
+    params.push(safeLimit)
+    const { rows } = await query(
+      `SELECT w.user_id
+       FROM wishlist w
+       ${where}
+       ORDER BY w.user_id ASC
+       LIMIT $${params.length}`,
+      params
+    )
+
+    return rows
+  }
+
   async moveToCart(userId, items) {
     const client = await getClient()
     try {

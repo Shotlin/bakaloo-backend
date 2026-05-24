@@ -3,12 +3,13 @@ import { env } from '../config/env.js'
 
 /**
  * Sign an access token (short-lived)
- * @param {object} payload - { id, phone, role }
+ * @param {object} payload - { id, phone, role, ... }
+ * @param {object} [options] - Optional override (e.g. { expiresIn })
  * @returns {string} JWT
  */
-export function signAccessToken(payload) {
+export function signAccessToken(payload, options = {}) {
   return jwt.sign(payload, env.JWT_ACCESS_SECRET, {
-    expiresIn: env.JWT_ACCESS_EXPIRY,
+    expiresIn: options.expiresIn || env.JWT_ACCESS_EXPIRY,
   })
 }
 

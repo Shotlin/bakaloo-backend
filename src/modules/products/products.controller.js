@@ -2,6 +2,33 @@ import { success, error } from '../../utils/apiResponse.js'
 import { query } from '../../config/database.js'
 
 /**
+ * Build a customer scoping context from the authenticated request.
+ *
+ * Returns:
+ *   - { userId } when the request comes from an authenticated CUSTOMER —
+ *     downstream service applies allocation-based product visibility
+ *     (Requirements 1.5, 4.5, 11.5).
+ *   - null for anonymous requests OR for ADMIN / RIDER / shop-staff
+ *     callers; those bypass customer scoping so admin dashboards and
+ *     internal flows continue to see the full master catalog.
+ *
+ * Keeping this resolver in the controller layer (HTTP boundary) means
+ * the service stays unaware of JWT claim shape and can be exercised
+ * directly from tests.
+ *
+ * @param {object} request
+ * @returns {{ userId: string }|null}
+ */
+function resolveCustomerContext(request) {
+  const user = request?.user
+  if (!user || !user.id) return null
+  // Only customers are scoped. ADMIN/RIDER/shop-staff sessions retain
+  // legacy unscoped behaviour to preserve existing internal contracts.
+  if (user.role && user.role !== 'CUSTOMER') return null
+  return { userId: user.id }
+}
+
+/**
  * Products controller — thin HTTP layer
  */
 export class ProductsController {
@@ -11,7 +38,8 @@ export class ProductsController {
 
   /** GET / — List products */
   async list(request, reply) {
-    const result = await this.service.list(request.query)
+    const customerContext = resolveCustomerContext(request)
+    const result = await this.service.list(request.query, customerContext)
     return reply.code(200).send(
       success(result.data, 'Products fetched', { pagination: result.pagination })
     )
@@ -20,7 +48,8 @@ export class ProductsController {
   /** GET /search — Hybrid search with fuzzy suggestions */
   async search(request, reply) {
     const { q, ...filters } = request.query
-    const result = await this.service.search(q, filters)
+    const customerContext = resolveCustomerContext(request)
+    const result = await this.service.search(q, filters, customerContext)
     return reply.code(200).send(
       success(result.data, 'Search results', {
         pagination: result.pagination,
@@ -31,27 +60,34 @@ export class ProductsController {
 
   /** GET /featured — Featured products */
   async featured(request, reply) {
-    const products = await this.service.getFeatured()
+    const customerContext = resolveCustomerContext(request)
+    const products = await this.service.getFeatured(customerContext)
     return reply.code(200).send(success(products, 'Featured products'))
   }
 
   /** GET /price-drops — Products with price drops */
   async getPriceDrops(request, reply) {
     const limit = Math.min(parseInt(request.query.limit, 10) || 10, 20)
-    const products = await this.service.getPriceDrops(limit)
+    const customerContext = resolveCustomerContext(request)
+    const products = await this.service.getPriceDrops(limit, customerContext)
     return reply.code(200).send(success(products, 'Price drop products fetched'))
   }
 
   /** GET /last-minute — Last-minute craving products */
   async getLastMinute(request, reply) {
     const limit = Math.min(parseInt(request.query.limit, 10) || 10, 20)
-    const products = await this.service.getLastMinute(limit)
+    const customerContext = resolveCustomerContext(request)
+    const products = await this.service.getLastMinute(limit, customerContext)
     return reply.code(200).send(success(products, 'Last-minute products fetched'))
   }
 
   /** GET /:id — Single product */
   async getOne(request, reply) {
-    const product = await this.service.getByIdOrSlug(request.params.id)
+    const customerContext = resolveCustomerContext(request)
+    const product = await this.service.getByIdOrSlug(
+      request.params.id,
+      customerContext
+    )
     if (!product) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))
     }
@@ -71,7 +107,11 @@ export class ProductsController {
 
   /** GET /:id/related — Related products */
   async getRelated(request, reply) {
-    const products = await this.service.getRelated(request.params.id)
+    const customerContext = resolveCustomerContext(request)
+    const products = await this.service.getRelated(
+      request.params.id,
+      customerContext
+    )
     if (products === null) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))
     }

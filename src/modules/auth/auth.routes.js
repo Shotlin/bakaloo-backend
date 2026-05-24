@@ -5,6 +5,7 @@ import { validatePhone } from '../../middlewares/validatePhone.js'
 import {
   sendOtpSchema,
   verifyOtpSchema,
+  selectShopSchema,
   refreshTokenSchema,
   logoutSchema,
   deleteAccountSchema,
@@ -54,6 +55,19 @@ export default async function authRoutes(fastify) {
       },
     },
   }, controller.refreshToken.bind(controller))
+
+  // POST /select-shop — Issue shop-scoped JWT after staff selects a shop [AUTH]
+  // Requirements: 2.6, 2.7, 2.8, 13.2, 13.3, 13.5
+  fastify.post('/select-shop', {
+    schema: selectShopSchema,
+    preHandler: [fastify.authenticate],
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '5 minutes',
+      },
+    },
+  }, controller.selectShop.bind(controller))
 
   // POST /logout — Invalidate refresh token [AUTH]
   fastify.post('/logout', {

@@ -7,29 +7,60 @@ const CART_TIP_PREFIX = 'cart-tip:'
 const CART_INSTRUCTIONS_PREFIX = 'cart-instructions:'
 
 /**
- * Cart repository — Redis for cart data, PostgreSQL for product lookups
+ * Cart repository
+ *
+ * - Redis: cart line items (`{ productId, shopId, quantity }`), tip and
+ *   delivery instructions
+ * - PostgreSQL: per-shop product lookups gated on the customer's active
+ *   user_shop_allocations and the shop's `is_active` flag (Requirements
+ *   5.2, 5.3, 5.4, 5.5, 12.2)
+ *
+ * All SQL is parameterized ($1, $2…) and never uses `SELECT *`.
  */
 export class CartRepository {
+  // ────────────────────────────────────────────────────────
+  // Redis — cart line items
+  // ────────────────────────────────────────────────────────
+
   /**
-   * Get all items in user's cart from Redis
+   * Get all items in user's cart from Redis. Each item is shaped as
+   * `{ productId, shopId, quantity }`. Legacy entries without shopId are
+   * filtered out so multi-vendor checkout can group safely (Requirement 5.6).
    */
   async getCart(userId) {
     const data = await redis.get(`${CART_PREFIX}${userId}`)
     if (!data) return []
+    let parsed
     try {
-      return JSON.parse(data)
+      parsed = JSON.parse(data)
     } catch {
       return []
     }
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((item) => item && item.productId && item.shopId && item.quantity > 0)
+      .map((item) => ({
+        productId: item.productId,
+        shopId: item.shopId,
+        quantity: Number(item.quantity),
+      }))
   }
 
   /**
-   * Save entire cart to Redis
+   * Save entire cart to Redis. Caller must pass the new array shape
+   * `{ productId, shopId, quantity }`.
    */
   async saveCart(userId, items) {
+    const normalized = (items || [])
+      .filter((i) => i && i.productId && i.shopId && i.quantity > 0)
+      .map((i) => ({
+        productId: i.productId,
+        shopId: i.shopId,
+        quantity: Number(i.quantity),
+      }))
     await redis.set(
       `${CART_PREFIX}${userId}`,
-      JSON.stringify(items),
+      JSON.stringify(normalized),
       'EX',
       CART_TTL
     )
@@ -42,34 +73,164 @@ export class CartRepository {
     await redis.del(`${CART_PREFIX}${userId}`)
   }
 
+  // ────────────────────────────────────────────────────────
+  // PostgreSQL — multi-vendor product lookups
+  // ────────────────────────────────────────────────────────
+
   /**
-   * Look up a product by ID (for stock/price checks)
+   * Find a single shop_product accessible to the user.
+   *
+   * Joins user_shop_allocations + shops + shop_products + products and only
+   * returns the row if:
+   *   - the shop is in the user's active allocations (Requirement 5.2)
+   *   - the shop is active and not soft-deleted (Requirement 5.3)
+   *   - the shop_product is not soft-deleted
+   *
+   * `is_available` is intentionally NOT filtered here so the service can
+   * surface a precise error code (OUT_OF_STOCK / SHOP_PRODUCT_UNAVAILABLE)
+   * to the caller.
+   *
+   * @param {string} userId
+   * @param {string} productId
+   * @param {string} shopId
+   * @returns {Promise<object|null>}
    */
-  async findProduct(productId) {
+  async findShopProductForUser(userId, productId, shopId) {
     const { rows } = await query(
-      `SELECT id, name, slug, price, sale_price, stock_quantity, unit, thumbnail_url, is_active
-       FROM products
-       WHERE id = $1`,
-      [productId]
+      `SELECT sp.id            AS shop_product_id,
+              sp.shop_id,
+              sp.product_id,
+              sp.price         AS sp_price,
+              sp.sale_price    AS sp_sale_price,
+              sp.stock_quantity,
+              sp.max_order_qty,
+              sp.is_available,
+              p.name,
+              p.slug,
+              p.unit,
+              p.thumbnail_url,
+              p.is_active      AS product_active,
+              p.price          AS product_price,
+              p.sale_price     AS product_sale_price,
+              s.name           AS shop_name,
+              s.is_active      AS shop_active
+         FROM shop_products sp
+         JOIN products p ON p.id = sp.product_id
+         JOIN shops    s ON s.id = sp.shop_id
+         JOIN user_shop_allocations a
+           ON a.shop_id = sp.shop_id
+          AND a.user_id = $1
+        WHERE sp.product_id  = $2
+          AND sp.shop_id     = $3
+          AND sp.deleted_at IS NULL
+          AND s.is_active    = true
+          AND s.deleted_at  IS NULL`,
+      [userId, productId, shopId]
     )
     return rows[0] || null
   }
 
   /**
-   * Look up multiple products by IDs
+   * Resolve which shop a product should be added from when the caller does
+   * not specify shop_id. Returns every active shop_products row across the
+   * user's allocations, ordered with the primary allocation first.
+   *
+   * Used by the cart service to auto-pick a shop when the customer adds a
+   * product that exists in exactly one of their allocated shops; ambiguous
+   * cases are surfaced back to the caller (CART_SHOP_REQUIRED).
+   *
+   * @param {string} userId
+   * @param {string} productId
+   * @returns {Promise<Array<object>>}
    */
-  async findProductsByIds(productIds) {
-    if (productIds.length === 0) return []
+  async findShopProductsForProduct(userId, productId) {
     const { rows } = await query(
-      `SELECT id, name, slug, price, sale_price, stock_quantity, unit, thumbnail_url, is_active
-       FROM products
-       WHERE id = ANY($1)`,
-      [productIds]
+      `SELECT sp.id            AS shop_product_id,
+              sp.shop_id,
+              sp.product_id,
+              sp.price         AS sp_price,
+              sp.sale_price    AS sp_sale_price,
+              sp.stock_quantity,
+              sp.max_order_qty,
+              sp.is_available,
+              s.name           AS shop_name,
+              a.is_primary,
+              a.distance_km
+         FROM shop_products sp
+         JOIN shops s
+           ON s.id = sp.shop_id
+         JOIN user_shop_allocations a
+           ON a.shop_id = sp.shop_id
+          AND a.user_id = $1
+        WHERE sp.product_id  = $2
+          AND sp.deleted_at IS NULL
+          AND sp.is_available = true
+          AND s.is_active    = true
+          AND s.deleted_at  IS NULL
+        ORDER BY a.is_primary DESC, a.distance_km ASC NULLS LAST`,
+      [userId, productId]
     )
     return rows
   }
 
-  // ─── Cart Extras (Tip & Instructions) ─────────────
+  /**
+   * Batch-load shop_product rows for a list of (productId, shopId) pairs
+   * within the user's allocations. Used for cart enrichment and re-validation
+   * at checkout (Requirement 12.3). Returns rows keyed by `${productId}:${shopId}`.
+   *
+   * Implementation note: PostgreSQL `unnest` is used to expand two parallel
+   * arrays into a derived table, avoiding N+1 lookups while keeping the SQL
+   * fully parameterized.
+   *
+   * @param {string} userId
+   * @param {Array<{productId: string, shopId: string}>} pairs
+   * @returns {Promise<Array<object>>}
+   */
+  async findShopProductsForCart(userId, pairs) {
+    if (!Array.isArray(pairs) || pairs.length === 0) return []
+    const productIds = pairs.map((p) => p.productId)
+    const shopIds = pairs.map((p) => p.shopId)
+
+    const { rows } = await query(
+      `WITH targets AS (
+         SELECT * FROM unnest($2::uuid[], $3::uuid[]) AS t(product_id, shop_id)
+       )
+       SELECT sp.id            AS shop_product_id,
+              sp.shop_id,
+              sp.product_id,
+              sp.price         AS sp_price,
+              sp.sale_price    AS sp_sale_price,
+              sp.stock_quantity,
+              sp.max_order_qty,
+              sp.is_available,
+              p.name,
+              p.slug,
+              p.unit,
+              p.thumbnail_url,
+              p.is_active      AS product_active,
+              p.price          AS product_price,
+              p.sale_price     AS product_sale_price,
+              s.name           AS shop_name,
+              s.is_active      AS shop_active
+         FROM shop_products sp
+         JOIN products p ON p.id = sp.product_id
+         JOIN shops    s ON s.id = sp.shop_id
+         JOIN targets  t
+           ON t.product_id = sp.product_id
+          AND t.shop_id    = sp.shop_id
+         JOIN user_shop_allocations a
+           ON a.shop_id = sp.shop_id
+          AND a.user_id = $1
+        WHERE sp.deleted_at IS NULL
+          AND s.deleted_at  IS NULL`,
+      [userId, productIds, shopIds]
+    )
+    return rows
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Cart Extras (Tip & Instructions)
+  // ────────────────────────────────────────────────────────
 
   /**
    * Get tip amount from Redis

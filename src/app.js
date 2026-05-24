@@ -134,6 +134,68 @@ export const buildApp = async () => {
     prefix: '/api/v1/delivery',
   })
 
+  // Shops — multi-vendor system
+  await app.register(import('./modules/shops/shops.routes.js'), {
+    prefix: '/api/v1/shops',
+  })
+
+  // Shop Staff — role-based access management
+  await app.register(import('./modules/shop-staff/shop-staff.routes.js'), {
+    prefix: '/api/v1/shop-staff',
+  })
+
+  // Alias mount at /shops/:shopId/staff so the dashboard's canonical URL
+  // pattern (see bakaloo-dashboard/src/services/shop-staff.service.ts and
+  // design.md §6 "Shop_Staff_UI") resolves without a separate URL rewrite
+  // layer. The controller's resolveShopId() prefers `request.params.shopId`
+  // when present, so all role-check + scope semantics stay identical to the
+  // /shop-staff prefix; this is a pure URL alias, not a behavioural fork.
+  await app.register(import('./modules/shop-staff/shop-staff.routes.js'), {
+    prefix: '/api/v1/shops/:shopId/staff',
+  })
+
+  // Shop Products — per-shop inventory and pricing
+  await app.register(import('./modules/shop-products/shop-products.routes.js'), {
+    prefix: '/api/v1/shop-products',
+  })
+
+  // Shop Transactions — read-only append-only ledger
+  // (write side is exposed as LedgerWriteService for orders/refunds/payouts)
+  await app.register(
+    import('./modules/shop-transactions/shop-transactions.routes.js'),
+    {
+      prefix: '/api/v1/shop-transactions',
+    }
+  )
+
+  // Allocation — user-shop allocation (pincode + haversine)
+  await app.register(import('./modules/allocation/allocation.routes.js'), {
+    prefix: '/api/v1/allocation',
+  })
+
+  // Shop Financials — read-only paginated financials per period
+  await app.register(
+    import('./modules/shop-financials/shop-financials.routes.js'),
+    {
+      prefix: '/api/v1/shop-financials',
+    }
+  )
+
+  // Bulk Orders — large multi-vendor scheduled-delivery orders
+  // (registered after shop-financials; scheduled-orders comes online in 10.2)
+  await app.register(import('./modules/bulk-orders/bulk-orders.routes.js'), {
+    prefix: '/api/v1/bulk-orders',
+  })
+
+  // Scheduled Orders — customer-side future / recurring orders (task 10.2)
+  // (Worker that fires the orders at scheduled_for lives in task 10.3.)
+  await app.register(
+    import('./modules/scheduled-orders/scheduled-orders.routes.js'),
+    {
+      prefix: '/api/v1/scheduled-orders',
+    }
+  )
+
   // Notifications — fully implemented
   await app.register(import('./modules/notifications/notifications.routes.js'), {
     prefix: '/api/v1/notifications',

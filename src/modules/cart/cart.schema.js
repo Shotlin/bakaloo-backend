@@ -6,6 +6,8 @@ const cartItemResponse = {
   type: 'object',
   properties: {
     productId:    { type: 'string' },
+    shopId:       { type: 'string' },
+    shopName:     { type: ['string', 'null'] },
     name:         { type: 'string' },
     slug:         { type: 'string' },
     price:        { type: 'number' },
@@ -16,9 +18,21 @@ const cartItemResponse = {
     image:        { type: ['string', 'null'] },
     thumbnailUrl: { type: ['string', 'null'] },
     stockQuantity:{ type: 'integer' },
+    maxOrderQty:  { type: 'integer' },
     subtotal:     { type: 'number' },
     lineTotal:    { type: 'number' },
     inStock:      { type: 'boolean' },
+  },
+}
+
+const shopGroupResponse = {
+  type: 'object',
+  properties: {
+    shopId:    { type: 'string' },
+    shopName:  { type: ['string', 'null'] },
+    items:     { type: 'array', items: cartItemResponse },
+    subtotal:  { type: 'number' },
+    itemCount: { type: 'integer' },
   },
 }
 
@@ -37,6 +51,7 @@ const cartResponse = {
         totalSavings:         { type: 'number' },
         tipAmount:            { type: 'number' },
         deliveryInstructions: { type: ['string', 'null'] },
+        shopGroups:           { type: 'array', items: shopGroupResponse },
       },
     },
   },
@@ -56,7 +71,8 @@ export const addItemSchema = {
     required: ['productId', 'quantity'],
     properties: {
       productId: { type: 'string', format: 'uuid' },
-      quantity:  { type: 'integer', minimum: 1, maximum: 50 },
+      shopId:    { type: 'string', format: 'uuid' },
+      quantity:  { type: 'integer', minimum: 1, maximum: 10000 },
     },
   },
   response: { 200: cartResponse },
@@ -76,7 +92,8 @@ export const updateItemSchema = {
     type: 'object',
     required: ['quantity'],
     properties: {
-      quantity: { type: 'integer', minimum: 1, maximum: 50 },
+      quantity: { type: 'integer', minimum: 1, maximum: 10000 },
+      shopId:   { type: 'string', format: 'uuid' },
     },
   },
   response: { 200: cartResponse },
@@ -90,6 +107,12 @@ export const removeItemSchema = {
     required: ['productId'],
     properties: {
       productId: { type: 'string', format: 'uuid' },
+    },
+  },
+  querystring: {
+    type: 'object',
+    properties: {
+      shopId: { type: 'string', format: 'uuid' },
     },
   },
   response: { 200: cartResponse },

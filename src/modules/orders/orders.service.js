@@ -14,6 +14,9 @@ import { CartService } from '../cart/cart.service.js'
 import { AddressesRepository } from '../addresses/addresses.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { CouponsService } from '../coupons/coupons.service.js'
+import { ShopProductsRepository } from '../shop-products/shop-products.repository.js'
+import { ShopProductsService } from '../shop-products/shop-products.service.js'
+import { OrderSplitterService } from './order-splitter.service.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -26,30 +29,69 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
  * Orders service — business logic for order placement & management
  */
 export class OrdersService {
-  constructor(repository, fastify = null) {
+  constructor(repository, fastify = null, options = {}) {
     this.repo = repository
     this.fastify = fastify
 
     // Collaborators
-    this.cartRepo = new CartRepository()
-    this.cartService = new CartService(this.cartRepo)
-    this.addressRepo = new AddressesRepository()
-    this.couponsRepo = new CouponsRepository()
-    this.couponsService = new CouponsService(this.couponsRepo)
+    this.cartRepo = options.cartRepository || new CartRepository()
+    this.cartService = options.cartService || new CartService(this.cartRepo)
+    this.addressRepo = options.addressesRepository || new AddressesRepository()
+    this.couponsRepo = options.couponsRepository || new CouponsRepository()
+    this.couponsService =
+      options.couponsService || new CouponsService(this.couponsRepo)
+    this.shopProductsRepo =
+      options.shopProductsRepository || new ShopProductsRepository()
+    // Build a ShopProductsService for stock-transition side effects so that
+    // order-driven stock decrements (Req 11.1–11.4, 11.6, 11.9) emit the
+    // same Socket.IO + push notifications as manual stock updates.
+    this.shopProductsService =
+      options.shopProductsService ||
+      new ShopProductsService(this.shopProductsRepo, {
+        notificationsService: fastify
+          ? new NotificationsService(new NotificationsRepository(), fastify)
+          : null,
+      })
+    this.orderSplitter =
+      options.orderSplitter ||
+      new OrderSplitterService({
+        ordersRepository: this.repo,
+        shopProductsRepository: this.shopProductsRepo,
+        shopProductsService: this.shopProductsService,
+        fees: {
+          deliveryFee: DELIVERY_FEE,
+          platformFee: PLATFORM_FEE,
+          freeDeliveryThreshold: FREE_DELIVERY_THRESHOLD,
+        },
+      })
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
   }
 
   /**
-   * Place a new order
-   * 1. Validate cart (stock + prices)
-   * 2. Validate delivery address
-   * 3. Apply coupon (optional)
-   * 4. Calculate totals
-   * 5. Create order + decrement stock (transaction)
-   * 6. Clear cart
-   * 7. Record coupon usage
+   * Place a multi-vendor order from the cart.
+   *
+   * Flow:
+   *   1. Re-validate cart against current allocations + max_order_qty + stock
+   *      (Requirements 12.3, 12.7). Any failure short-circuits with code
+   *      CHECKOUT_PARTIAL_FAIL listing each `{ productId, shopId, reason }`.
+   *   2. Validate the delivery address has coordinates.
+   *   3. Open a single pg transaction.
+   *   4. Delegate to OrderSplitter which:
+   *        - groups items by shop_id (Req 5.6)
+   *        - locks shop_products rows (SELECT FOR UPDATE) (Req 11.7)
+   *        - re-checks max_order_qty + stock under the lock (Req 12.7)
+   *        - decrements stock and inserts one order per shop with
+   *          independently-computed fees (Req 5.7)
+   *   5. COMMIT on success; ROLLBACK on any error (Req 5.9, 15.9, 15.10).
+   *   6. Post-commit: clear cart + extras, enqueue per-order delivery
+   *      assignments, and send customer notifications (Req 5.8).
+   *
+   * Coupons and tip are applied ONLY when the cart resolves to a single
+   * shop. With multi-shop carts they are deferred to a later spec — applying
+   * a single coupon code across multiple per-shop totals would require
+   * platform-level coupon redistribution rules that are out of scope.
    */
   async placeOrder(userId, body) {
     const {
@@ -64,23 +106,30 @@ export class OrdersService {
       savingsTotal,
     } = body
 
-    // 1. Validate cart
+    // 1. Validate cart (re-checks allocations, shop active, stock,
+    //    max_order_qty per Req 12.3/12.7)
     const cartResult = await this.cartService.validateCart(userId)
     if (!cartResult.valid || cartResult.items.length === 0) {
+      const failed = cartResult.failed && cartResult.failed.length > 0
+        ? cartResult.failed
+        : []
+      const message = failed.length > 0
+        ? 'Some items in your cart cannot be ordered right now'
+        : (cartResult.warnings && cartResult.warnings[0]) || 'Cart is empty'
       return {
         success: false,
-        message: cartResult.warnings?.length
-          ? cartResult.warnings.join('; ')
-          : 'Cart is empty or has issues',
+        message,
+        code: failed.length > 0 ? 'CHECKOUT_PARTIAL_FAIL' : 'EMPTY_CART',
+        failures: failed,
       }
     }
 
-    const { items: cartItems, subtotal } = cartResult
+    const { items: cartItems, subtotal, groupedByShop } = cartResult
 
     // 2. Validate delivery address
     const address = await this.addressRepo.findByIdAndUser(addressId, userId)
     if (!address) {
-      return { success: false, message: 'Delivery address not found' }
+      return { success: false, message: 'Delivery address not found', code: 'ADDRESS_NOT_FOUND' }
     }
     const addressLat = Number(address.lat)
     const addressLng = Number(address.lng)
@@ -97,154 +146,191 @@ export class OrdersService {
       lng: addressLng,
     }
 
-    // 3. Apply coupon (optional)
-    let discountAmount = 0
+    // 3. Apply coupon — only meaningful when the cart is single-shop. For
+    //    multi-shop carts coupons are deferred (see method docstring).
     let appliedCouponCode = null
-
     if (couponCode) {
+      const isSingleShop = groupedByShop.size === 1
+      if (!isSingleShop) {
+        return {
+          success: false,
+          message: 'Coupons are not yet supported for multi-shop carts',
+          code: 'COUPON_MULTI_SHOP_UNSUPPORTED',
+        }
+      }
       const couponResult = await this.couponsService.validate(userId, couponCode, subtotal)
       if (!couponResult.valid) {
-        return { success: false, message: couponResult.message }
+        return { success: false, message: couponResult.message, code: 'INVALID_COUPON' }
       }
-      discountAmount = couponResult.discount
       appliedCouponCode = couponResult.code
     }
 
-    // 4. Calculate totals
+    // 4. Resolve checkout extras (tip / instructions) — preserves the
+    //    pre-multi-vendor behaviour for single-shop carts.
     const hasTipAmount = Object.prototype.hasOwnProperty.call(body, 'tipAmount')
     const normalizedInstructions = typeof deliveryInstructions === 'string'
       ? deliveryInstructions.trim()
       : deliveryInstructions
-
     const [tipFromRedis, instructionsFromRedis] = await Promise.all([
       hasTipAmount ? Promise.resolve(0) : this.cartRepo.getTip(userId),
       normalizedInstructions ? Promise.resolve(null) : this.cartRepo.getInstructions(userId),
     ])
-
-    const deliveryFee = subtotal >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_FEE
-    const platformFee = PLATFORM_FEE
-    const taxAmount = 0 // Tax included in product price for MVP
-    const orderHandlingFee = this._toNumber(handlingFee)
-    const orderLateNightFee = this._toNumber(lateNightFee)
     const orderTipAmount = hasTipAmount
       ? this._toNumber(tipAmount)
       : this._toNumber(tipFromRedis)
     const resolvedInstructions = normalizedInstructions || instructionsFromRedis || null
-    const orderSavingsTotal = this._toNumber(savingsTotal)
-    const totalAmount = parseFloat(
-      (subtotal - discountAmount + deliveryFee + platformFee + taxAmount + orderHandlingFee + orderLateNightFee + orderTipAmount).toFixed(2)
-    )
-
-    // 5. Build order items snapshot
-    const orderItems = cartItems.map((item) => ({
-      productId: item.productId,
-      name: item.name,
-      price: parseFloat(item.salePrice ?? item.price),
-      quantity: item.quantity,
-      unit: item.unit,
-      total: item.lineTotal,
-    }))
-
-    // 6. Generate order number
-    const orderNumber = await this.repo.generateOrderNumber()
-
-    // Estimate delivery: 30 minutes from now
-    const estimatedDelivery = new Date(Date.now() + 30 * 60 * 1000)
 
     const normalizedPaymentMethod = `${paymentMethod || 'COD'}`.toUpperCase()
-    const initialStatus = normalizedPaymentMethod === 'COD'
-      ? ORDER_STATUS.CONFIRMED
-      : ORDER_STATUS.PENDING
+    const initialPaymentStatus = 'PENDING'
 
-    // 7. Transaction: create order + decrement stock
+    // 5. Transaction: split + create orders + decrement stock atomically
     const client = await getClient()
-    let order
-
+    let createdOrders = []
     try {
       await client.query('BEGIN')
 
-      order = await this.repo.create(
+      const groups = this.orderSplitter.splitCart(cartItems)
+      createdOrders = await this.orderSplitter.createOrders({
         client,
-        {
-          orderNumber,
-          userId,
-          status: initialStatus,
-          items: orderItems,
-          subtotal,
-          discountAmount,
-          deliveryFee,
-          platformFee,
-          taxAmount,
-          totalAmount,
-          paymentMethod: normalizedPaymentMethod,
-          paymentStatus: 'PENDING',
+        userId,
+        groups,
+        deliveryAddress,
+        payment: { method: normalizedPaymentMethod, status: initialPaymentStatus },
+        checkoutMeta: {
           couponCode: appliedCouponCode,
-          deliveryAddress,
           deliveryNotes: deliveryNotes || null,
-          estimatedDelivery,
-          handlingFee: orderHandlingFee,
-          lateNightFee: orderLateNightFee,
-          tipAmount: orderTipAmount,
           deliveryInstructions: resolvedInstructions,
-          savingsTotal: orderSavingsTotal,
         },
-        orderItems
-      )
-
-      await this.repo.decrementStock(client, orderItems)
+      })
 
       await client.query('COMMIT')
     } catch (err) {
-      await client.query('ROLLBACK')
-      logger.error({ err, userId }, 'Order placement failed')
-      return { success: false, message: err.message || 'Failed to place order' }
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore rollback errors */
+      }
+      logger.error(
+        {
+          err: err.message,
+          userId,
+          code: err.code,
+          failures: err.failures || null,
+        },
+        'Order placement failed; transaction rolled back'
+      )
+      if (err.code === 'CHECKOUT_PARTIAL_FAIL') {
+        return {
+          success: false,
+          message: 'Some items in your cart cannot be ordered right now',
+          code: 'CHECKOUT_PARTIAL_FAIL',
+          failures: err.failures || [],
+        }
+      }
+      return {
+        success: false,
+        message: err.message || 'Failed to place order',
+        code: err.code || 'ORDER_FAILED',
+      }
     } finally {
       client.release()
     }
 
-    // 8. Post-transaction: clear cart + record coupon
+    // 6. Post-commit cleanup + side effects (best-effort; do not fail the
+    //    customer if any of these throw).
     try {
-      await Promise.all([
-        this.cartService.clearCart(userId),
-        this.cartRepo.clearTip(userId),
-        this.cartRepo.clearInstructions(userId),
-      ])
-
-      if (appliedCouponCode) {
-        await this.couponsService.recordUsage(appliedCouponCode, userId, order.id)
+      await this.cartService.clearCart(userId)
+      if (appliedCouponCode && createdOrders.length === 1) {
+        await this.couponsService.recordUsage(
+          appliedCouponCode,
+          userId,
+          createdOrders[0].id
+        )
       }
     } catch (err) {
-      // Non-critical — order is already placed
-      logger.warn({ err, orderId: order.id }, 'Post-order cleanup partial failure')
+      logger.warn(
+        { err: err.message, userId, orderIds: createdOrders.map((o) => o.id) },
+        'Post-order cleanup partial failure'
+      )
     }
 
-    logger.info(
-      {
-        orderId: order.id,
-        orderNumber,
+    // Stock-transition side effects (Req 11.1–11.4, 11.6, 11.9). Fired AFTER
+    // COMMIT so a rolled-back checkout never emits user-facing events.
+    // Already wrapped in a try/catch inside the splitter, but we add an
+    // outer guard here to defend against an exception escaping the helper.
+    try {
+      const transitions = createdOrders.stockTransitions || []
+      await this.orderSplitter.firePostCommitSideEffects(transitions)
+    } catch (err) {
+      logger.warn(
+        {
+          err: err.message,
+          userId,
+          orderIds: createdOrders.map((o) => o.id),
+          action: 'order_stock_transitions_fan_out',
+        },
+        'Order-driven stock transition fan-out failed'
+      )
+    }
+
+    // Per-order delivery assignment + notifications (Req 5.8)
+    for (const order of createdOrders) {
+      logger.info(
+        {
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          shopId: order.shopId,
+          userId,
+          total: order.totalAmount,
+          paymentMethod: normalizedPaymentMethod,
+          status: order.status,
+          action: 'order_placed',
+        },
+        'Per-shop order placed successfully'
+      )
+
+      await this._sendCustomerOrderNotification(
         userId,
-        total: totalAmount,
-        paymentMethod: normalizedPaymentMethod,
-        status: initialStatus,
-      },
-      'Order placed successfully'
-    )
+        buildCustomerOrderEventNotification({
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          timelineType: 'ORDER_PLACED',
+          status: order.status,
+        })
+      )
 
-    await this._sendCustomerOrderNotification(
-      userId,
-      buildCustomerOrderEventNotification({
-        orderId: order.id,
-        orderNumber,
-        timelineType: 'ORDER_PLACED',
-        status: initialStatus,
-      })
-    )
-
-    if (initialStatus === ORDER_STATUS.CONFIRMED) {
-      await this._queueAutoAssign(order.id, 'ORDER_PLACED_COD')
+      if (order.status === ORDER_STATUS.CONFIRMED) {
+        await this._queueAutoAssign(order.id, 'ORDER_PLACED_COD')
+      }
     }
 
-    return { success: true, order }
+    // Apply tip + instructions only on single-shop checkouts to avoid
+    // ambiguity around which order owns the tip.
+    if (createdOrders.length === 1 && (orderTipAmount > 0 || resolvedInstructions)) {
+      try {
+        await this.repo.updateExtras(createdOrders[0].id, {
+          tipAmount: orderTipAmount,
+          deliveryInstructions: resolvedInstructions,
+          handlingFee: this._toNumber(handlingFee),
+          lateNightFee: this._toNumber(lateNightFee),
+          savingsTotal: this._toNumber(savingsTotal),
+        })
+      } catch (err) {
+        logger.warn(
+          { err: err.message, orderId: createdOrders[0].id },
+          'Failed to update order extras (non-critical)'
+        )
+      }
+    }
+
+    // Backwards-compatible response shape: callers that expect a single
+    // `order` field still get the first order; new clients should read the
+    // `orders` array.
+    return {
+      success: true,
+      orders: createdOrders,
+      order: createdOrders[0],
+    }
   }
 
   _toNumber(value, fallback = 0) {
@@ -345,6 +431,7 @@ export class OrdersService {
     for (const item of order.items) {
       const result = await this.cartService.addItem(userId, {
         productId: item.productId,
+        shopId: item.shopId || order.shopId || null,
         quantity: item.quantity,
       })
       if (!result.success) {
