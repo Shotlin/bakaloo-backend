@@ -1,5 +1,7 @@
 import { cacheGet, cacheSet, cacheDeletePattern } from '../../utils/cache.js'
 import { logger } from '../../config/logger.js'
+import { emitInTx as emitAuditInTx } from '../../utils/audit-log.js'
+import { ShopTransactionsRepository } from './shop-transactions.repository.js'
 import {
   CREDIT_TYPES,
   DEBIT_TYPES,
@@ -246,6 +248,9 @@ export class LedgerWriteService {
    *   1. SELECT FOR UPDATE on the latest row for `shopId` (or no row if first).
    *   2. Compute balance_after = previous +/- amount  (Req 7.7, 7.8).
    *   3. INSERT the new row, returning the inserted record.
+   *   4. Emit a `transaction_posted` audit on the same `client` so the audit
+   *      row commits or rolls back atomically with the ledger row
+   *      (R24.13, design §9.2).
    *
    * @param {import('pg').PoolClient} client
    * @param {object} data
@@ -299,6 +304,38 @@ export class LedgerWriteService {
       reference_id: v.referenceId ?? null,
       description: v.description ?? null,
       created_by: v.createdBy ?? null,
+    })
+
+    // 3b) Emit `transaction_posted` audit on the SAME transactional client
+    //     so the audit row commits or rolls back together with the ledger
+    //     row (R24.13, design §9.2). The audit `after` snapshot is run
+    //     through `normalizeType` to surface the V2 canonical `type_v2`
+    //     value alongside the stored legacy `type` (R24.15). Sensitive-
+    //     field redaction is handled by `emitInTx` itself; ledger rows
+    //     never contain password_hash/bank_account_number anyway, but
+    //     the pipeline is consistent with every other mutating audit.
+    const normalized = ShopTransactionsRepository.normalizeType(inserted)
+    await emitAuditInTx(client, 'transaction_posted', {
+      actor_user_id: v.createdBy ?? null,
+      actor_role: null,
+      actor_shop_id: v.shopId,
+      target_type: 'shop_transaction',
+      target_id: inserted.id,
+      before: null,
+      after: {
+        type: inserted.type,
+        type_v2: normalized?.type_v2 ?? inserted.type,
+        direction: normalized?.direction ?? inserted.direction ?? null,
+        amount: inserted.amount,
+        balance_after: inserted.balance_after,
+        reference_type: inserted.reference_type,
+        reference_id: inserted.reference_id ?? null,
+        status: inserted.status ?? null,
+        order_id: inserted.order_id ?? null,
+        rider_id: inserted.rider_id ?? null,
+      },
+      ip_address: null,
+      user_agent: null,
     })
 
     // 4) Best-effort cache invalidation. We do NOT await this in a way that

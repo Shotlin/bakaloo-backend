@@ -48,12 +48,18 @@ export function emitSectionUpdate(io, tabKey, action) {
 
 /**
  * Socket.IO plugin for Fastify
- * Handles realtime: rider location, order status, notifications
+ * Handles realtime: rider location, order status, notifications, multi-vendor events
  *
  * Rooms:
  *   user:{userId}       — personal room for order updates + notifications
  *   order:{orderId}     — order tracking room (customer + rider + admin)
  *   riders:online       — all online riders (admin dashboard)
+ *   shop:{shopId}       — shop dashboard users (vendor-scoped events)
+ *   hq:global           — HQ users (cross-shop monitoring)
+ *   customer:{userId}   — customer app (delivery tracking)
+ *   rider:{riderId}     — rider app (assignment/delivery events)
+ *   admin:dashboard     — legacy admin dashboard
+ *   themes:live         — all users (theme updates)
  */
 async function socketioPlugin(fastify) {
   const corsOrigins = expandLoopbackOrigins(
@@ -93,12 +99,35 @@ async function socketioPlugin(fastify) {
 
   // ─── CONNECTION HANDLER ──────────────────────────────
   io.on('connection', (socket) => {
-    const { id: userId, role } = socket.user
+    const { id: userId, role, platform_role, shopId } = socket.user
 
-    logger.info({ userId, socketId: socket.id, role }, 'Socket connected')
+    logger.info({ userId, socketId: socket.id, role, platform_role, shopId }, 'Socket connected')
 
     // Auto-join personal room
     socket.join(`user:${userId}`)
+
+    // ─── MULTI-VENDOR ROOM SCOPING (Task 14.1) ──────
+    // HQ users (platform_role set) join hq:global for cross-shop events
+    if (platform_role) {
+      socket.join('hq:global')
+      logger.debug({ userId, room: 'hq:global' }, 'Joined HQ global room')
+    }
+
+    // Shop-scoped dashboard users join shop:{shopId} for shop-specific events
+    if (shopId) {
+      socket.join(`shop:${shopId}`)
+      logger.debug({ userId, shopId, room: `shop:${shopId}` }, 'Joined shop room')
+    }
+
+    // Customer users join customer:{userId} for personal delivery updates
+    if (role === 'CUSTOMER') {
+      socket.join(`customer:${userId}`)
+    }
+
+    // Rider users join rider:{userId} for assignment/delivery events
+    if (role === 'RIDER') {
+      socket.join(`rider:${userId}`)
+    }
 
     // ─── RIDER EVENTS ────────────────────────────────
     if (role === 'RIDER') {
@@ -269,10 +298,101 @@ async function socketioPlugin(fastify) {
     logger.info({ tabKey, themeId }, 'Theme update broadcasted to all users')
   })
 
+  // ─── MULTI-VENDOR EVENT HELPERS (Task 14.2) ──────────
+  // Emit shop.low_stock to shop:{shopId} room
+  // Triggered when stock drops to or below threshold but remains > 0
+  fastify.decorate('emitShopLowStock', (shopId, payload) => {
+    if (!shopId) return
+    io.to(`shop:${shopId}`).emit('shop.low_stock', {
+      shop_id: shopId,
+      ...payload,
+      timestamp: new Date().toISOString(),
+    })
+    logger.debug({ shopId, event: 'shop.low_stock' }, 'Low stock event emitted to shop room')
+  })
+
+  // Emit shop.stock_out to shop:{shopId} room
+  // Triggered when stock reaches exactly 0
+  fastify.decorate('emitShopStockOut', (shopId, payload) => {
+    if (!shopId) return
+    io.to(`shop:${shopId}`).emit('shop.stock_out', {
+      shop_id: shopId,
+      ...payload,
+      timestamp: new Date().toISOString(),
+    })
+    logger.debug({ shopId, event: 'shop.stock_out' }, 'Stock out event emitted to shop room')
+  })
+
+  // Emit order.auto_assignment_failed to hq:global room
+  // Triggered when auto-assignment cannot proceed (e.g. shop missing coordinates)
+  fastify.decorate('emitAutoAssignmentFailed', (payload) => {
+    io.to('hq:global').emit('order.auto_assignment_failed', {
+      ...payload,
+      timestamp: new Date().toISOString(),
+    })
+    logger.info({ orderId: payload?.order_id, event: 'order.auto_assignment_failed' }, 'Auto-assignment failed event emitted to HQ')
+  })
+
+  // Emit OUT_FOR_DELIVERY events to all relevant rooms:
+  //   - customer:{userId} (rider info + live coords)
+  //   - shop:{shopId} (order picked up notification)
+  //   - rider:{riderId} (confirmation)
+  //   - hq:global (global delivery monitoring)
+  fastify.decorate('emitOutForDelivery', ({ orderId, shopId, customerId, riderId, riderName, riderPhone, orderNumber }) => {
+    const basePayload = {
+      order_id: orderId,
+      order_number: orderNumber || null,
+      timestamp: new Date().toISOString(),
+    }
+
+    // Customer channel — rider details for tracking
+    if (customerId) {
+      io.to(`customer:${customerId}`).emit('order.out_for_delivery', {
+        ...basePayload,
+        rider: { id: riderId, name: riderName || null, phone: riderPhone || null },
+      })
+    }
+
+    // Shop channel — order picked up
+    if (shopId) {
+      io.to(`shop:${shopId}`).emit('order.out_for_delivery', {
+        ...basePayload,
+        rider_id: riderId,
+        shop_id: shopId,
+      })
+    }
+
+    // Rider channel — pickup confirmed
+    if (riderId) {
+      io.to(`rider:${riderId}`).emit('order.out_for_delivery', {
+        ...basePayload,
+        rider_id: riderId,
+      })
+    }
+
+    // HQ global — delivery monitoring
+    io.to('hq:global').emit('order.out_for_delivery', {
+      ...basePayload,
+      shop_id: shopId || null,
+      rider_id: riderId || null,
+      customer_id: customerId || null,
+    })
+
+    logger.info({ orderId, shopId, riderId, event: 'order.out_for_delivery' }, 'OUT_FOR_DELIVERY events emitted to all channels')
+  })
+
   // Periodic: broadcast all rider locations to admin dashboard every 10s
   const riderLocationInterval = setInterval(async () => {
     try {
-      const keys = await redis.keys(`${RIDER_LOCATION_PREFIX}*`)
+      // Task 13.5: Use SCAN-based pattern matching instead of KEYS *
+      const keys = []
+      let cursor = '0'
+      do {
+        const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', `${RIDER_LOCATION_PREFIX}*`, 'COUNT', 100)
+        cursor = nextCursor
+        if (batch.length > 0) keys.push(...batch)
+      } while (cursor !== '0')
+
       if (keys.length === 0) return
 
       const pipeline = redis.pipeline()

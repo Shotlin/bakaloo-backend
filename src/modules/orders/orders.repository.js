@@ -2,6 +2,19 @@ import { query, getClient } from '../../config/database.js'
 
 /**
  * Orders repository — all SQL queries for orders + order_items
+ *
+ * TODO (R14.7 / multi-vendor task 4.1 follow-up): several legacy reads in
+ * this repository still use `SELECT *` / `RETURNING *` (findById, findByUser,
+ * findAll, updateStatus, assignRider). These were not touched by task 4.1
+ * because that task is scoped to the shops and shop-products repositories.
+ * `SELECT *` does already surface the new `auto_assignment_status` column
+ * (added by migration 040) so consumers receive it correctly today, but the
+ * R14.7 "explicit column list, no SELECT *" rule still applies — converting
+ * these is tracked for a dedicated cleanup task. When that conversion lands,
+ * the explicit projection MUST include `auto_assignment_status` alongside
+ * the existing columns, and `_format()` should expose it on the camelCase
+ * payload so the HQ "manual rider required" UI can read it without a second
+ * fetch.
  */
 export class OrdersRepository {
   /**

@@ -1,12 +1,18 @@
 import { getClient } from '../../config/database.js'
 import { cacheGet, cacheSet, cacheDeletePattern } from '../../utils/cache.js'
 import { logger } from '../../config/logger.js'
+import { env } from '../../config/env.js'
 import {
   notificationQueue,
   stockNotificationsQueue,
 } from '../../config/bullmq.js'
 import { getSocketIo } from '../../plugins/socketio.plugin.js'
 import { ShopStaffRepository } from '../shop-staff/shop-staff.repository.js'
+import {
+  emit as emitAudit,
+  emitInTx as emitAuditInTx,
+} from '../../utils/audit-log.js'
+import { ERROR_CODES } from '../../constants/errors.js'
 
 /**
  * Shop Products service — business logic with Redis caching and
@@ -519,6 +525,17 @@ export class ShopProductsService {
       'Shop product created'
     )
 
+    // R28.4 — fire-and-forget audit for shop_product_created
+    emitAudit('shop_product_created', {
+      actor_user_id: actor.id || null,
+      actor_role: actor.shopRole || actor.role || null,
+      actor_shop_id: shopId,
+      target_type: 'shop_product',
+      target_id: created.id,
+      before: null,
+      after: created,
+    })
+
     return { success: true, data: created }
   }
 
@@ -631,6 +648,17 @@ export class ShopProductsService {
       'Shop product updated'
     )
 
+    // R28.4 — fire-and-forget audit for shop_product_updated
+    emitAudit('shop_product_updated', {
+      actor_user_id: actor.id || null,
+      actor_role: actor.shopRole || actor.role || null,
+      actor_shop_id: shopId,
+      target_type: 'shop_product',
+      target_id: id,
+      before: existing,
+      after: updated,
+    })
+
     return { success: true, data: updated }
   }
 
@@ -673,6 +701,17 @@ export class ShopProductsService {
       },
       'Shop product soft-deleted'
     )
+
+    // R28.4 — fire-and-forget audit for shop_product_deleted
+    emitAudit('shop_product_deleted', {
+      actor_user_id: actor.id || null,
+      actor_role: actor.shopRole || actor.role || null,
+      actor_shop_id: shopId,
+      target_type: 'shop_product',
+      target_id: id,
+      before: existing,
+      after: null,
+    })
 
     return { success: true }
   }
@@ -827,6 +866,664 @@ export class ShopProductsService {
           message: 'Stock quantity violates DB constraint (>= 0)',
           code: 'NEGATIVE_STOCK',
         }
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Adjust stock (R23.8, R23.9, R23.14)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Apply a single signed stock delta to one shop_product, recording
+   * exactly one stock_movements ledger row in the same transaction.
+   *
+   * Endpoint: POST /api/v1/shops/:shopId/products/:productId/adjust-stock
+   *
+   * Per design §8.1, every stock_quantity write flows through
+   * `repo.applyStockChange` which holds a `SELECT FOR UPDATE` lock on
+   * the row, runs the negative-stock guard (R23.9 → 409
+   * STOCK_NEGATIVE_FORBIDDEN), updates `is_available`/`sold_out_at`
+   * via the `applyStockUpdate` transition logic (R11.1, R11.6,
+   * R11.8), and inserts the ledger row. We then emit the
+   * `stock_changed` audit transactionally per R23.14 / design §10
+   * before COMMIT, so the audit row is rolled back atomically with
+   * the stock change on any failure.
+   *
+   * Cache invalidation runs from the service (not the repo) AFTER
+   * COMMIT per R23.13 — readers must not repopulate from a
+   * mid-transaction snapshot.
+   *
+   * Permission: `shop_products.update` (gated at the route layer).
+   *
+   * @param {string} shopId
+   * @param {string} shopProductId — `:productId` URL param refers to
+   *                                  `shop_products.id` per design §6.4.
+   * @param {{ quantity_delta: number, type: 'MANUAL_ADJUSTMENT'|'DAMAGED_STOCK'|'RETURN_STOCK', reason: string }} body
+   * @param {{ id: string, role?: string, shopRole?: string, platformRole?: string, ip?: string, userAgent?: string }} actor
+   * @returns {Promise<{success:boolean, data?:object, movement?:object, message?:string, code?:string}>}
+   *
+   * @see Requirements R23.8, R23.9, R23.14
+   * @see Design §8.1
+   */
+  async adjustStock(shopId, shopProductId, body, actor) {
+    const auth = this.authorizeMutation(actor)
+    if (!auth.ok)
+      return { success: false, message: auth.message, code: auth.code }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      // applyStockChange enforces:
+      //   - SELECT FOR UPDATE row lock (serializes concurrent writers)
+      //   - shop_id resolved from the locked row
+      //   - PRODUCT_NOT_FOUND when soft-deleted/missing (404)
+      //   - STOCK_NEGATIVE_FORBIDDEN when result < 0 (409)
+      //   - applyStockUpdate (is_available / sold_out_at transition)
+      //   - INSERT one stock_movements row (R23.4)
+      let result
+      try {
+        result = await this.repo.applyStockChange(client, {
+          shopProductId,
+          delta: body.quantity_delta,
+          type: body.type,
+          reason: body.reason,
+          actor: {
+            userId: actor.id || null,
+            shopRole: actor.shopRole || null,
+          },
+          source: 'DASHBOARD',
+          metadata: { ip: actor.ip || null },
+          orderId: null,
+        })
+      } catch (err) {
+        await client.query('ROLLBACK')
+        // Translate repo errors into the controller's error envelope
+        // (the repo carries `code` / `statusCode` / `details`).
+        if (err && err.code) {
+          if (err.code === ERROR_CODES.STOCK_NEGATIVE_FORBIDDEN) {
+            return {
+              success: false,
+              message: err.message,
+              code: ERROR_CODES.STOCK_NEGATIVE_FORBIDDEN,
+              details: err.details || null,
+            }
+          }
+          if (err.code === ERROR_CODES.PRODUCT_NOT_FOUND) {
+            return {
+              success: false,
+              message: 'Shop product not found',
+              code: ERROR_CODES.PRODUCT_NOT_FOUND,
+            }
+          }
+          if (err.code === ERROR_CODES.VALIDATION_ERROR) {
+            return {
+              success: false,
+              message: err.message,
+              code: ERROR_CODES.VALIDATION_ERROR,
+            }
+          }
+        }
+        // PG CHECK fallback (final defence)
+        if (err && err.code === '23514') {
+          return {
+            success: false,
+            message: 'Resulting stock_quantity cannot be negative',
+            code: ERROR_CODES.STOCK_NEGATIVE_FORBIDDEN,
+          }
+        }
+        throw err
+      }
+
+      const updated = result.stockProduct
+      const movement = result.movement
+      const before = Number(movement.quantity_before)
+      const after = Number(movement.quantity_after)
+
+      // Transactional audit (R23.14, design §10) — committed atomically
+      // with the stock change. Sensitive-field redaction is handled by
+      // emitInTx; we pass plain row snapshots here.
+      await emitAuditInTx(client, 'stock_changed', {
+        actor_user_id: actor.id || null,
+        actor_role:
+          actor.platformRole || actor.shopRole || actor.role || null,
+        actor_shop_id: shopId,
+        target_type: 'shop_product',
+        target_id: shopProductId,
+        before: { stock_quantity: before, is_available: undefined },
+        after: {
+          stock_quantity: after,
+          is_available: updated.is_available,
+          type: body.type,
+          source: 'DASHBOARD',
+          product_id: updated.product_id,
+        },
+        ip_address: actor.ip || null,
+        user_agent: actor.userAgent || null,
+      })
+
+      await client.query('COMMIT')
+
+      // R23.13: SCAN-based cache invalidation runs AFTER COMMIT so
+      // readers don't repopulate stale entries from the in-flight
+      // snapshot. cacheDeletePattern uses Redis SCAN (not KEYS *).
+      await this.invalidateShopCache(shopId)
+
+      logger.info(
+        {
+          userId: actor.id,
+          shopId,
+          shopProductId,
+          action: 'shop_product_stock_adjusted',
+          type: body.type,
+          delta: body.quantity_delta,
+          before,
+          after,
+        },
+        'Shop product stock adjusted'
+      )
+
+      // Post-commit Socket.IO + push notifications mirror updateStock
+      // (best-effort; failures are caught + logged so the API response
+      // doesn't flip after a successful commit).
+      try {
+        await this.handleStockTransitionSideEffects({
+          shopId,
+          shopProduct: updated,
+          prevQty: before,
+          newQty: after,
+          lowStockThreshold: Number(updated.low_stock_threshold),
+        })
+      } catch (sideErr) {
+        logger.error(
+          {
+            err: sideErr.message,
+            shopId,
+            shopProductId,
+            action: 'stock_transition_side_effects',
+          },
+          'Stock transition side effects failed (transaction already committed)'
+        )
+      }
+
+      return { success: true, data: updated, movement }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore */
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Bulk price update (R23.12)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Apply price-only updates to up to 500 shop_products in a single
+   * transaction. Stock is never touched (design §8.1: "Bulk price
+   * update never invokes [applyStockChange]; price-only changes don't
+   * write stock_movements per R23 AC#12") — so no `stock_movements`
+   * row is inserted for any item.
+   *
+   * For each item:
+   *   1. Find the existing shop_product by `(shop_id, product_id)`,
+   *      surfacing it for the per-item lock.
+   *   2. `SELECT … FOR UPDATE` to serialize concurrent writers and
+   *      capture the `before` snapshot (price/sale_price/cost_price).
+   *   3. Run repo.applyPriceUpdate to write the merged values.
+   *   4. Emit ONE `shop_products_bulk_price_updated` audit row at the
+   *      end with `before` + `after` arrays so the entire bulk action
+   *      can be replayed from a single audit entry (design §10).
+   *
+   * Failures (any item missing, duplicate `product_id`, schema
+   * violation) roll back the entire batch — no partial writes per
+   * R23.12 ("applying all updates in one transaction").
+   *
+   * Permission: `shop_products.bulk_update` (gated at the route layer).
+   *
+   * @param {string} shopId
+   * @param {{ items: Array<{ product_id: string, price?: number, sale_price?: number, cost_price?: number }> }} body
+   * @param {{ id: string, role?: string, shopRole?: string, platformRole?: string, ip?: string, userAgent?: string }} actor
+   * @returns {Promise<{success:boolean, data?:object, message?:string, code?:string}>}
+   *
+   * @see Requirement R23.12
+   * @see Design §8.1
+   */
+  async bulkPriceUpdate(shopId, body, actor) {
+    const auth = this.authorizeMutation(actor)
+    if (!auth.ok)
+      return { success: false, message: auth.message, code: auth.code }
+
+    const items = body.items || []
+
+    // Reject duplicate product_ids — locking the same row twice in one
+    // transaction is a no-op and would silently mask the operator's
+    // intent. Reject upfront with a friendly code.
+    const seen = new Set()
+    for (const item of items) {
+      if (seen.has(item.product_id)) {
+        return {
+          success: false,
+          message: `Duplicate product_id ${item.product_id} in items array`,
+          code: ERROR_CODES.VALIDATION_ERROR,
+        }
+      }
+      seen.add(item.product_id)
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const beforeSnapshots = []
+      const afterSnapshots = []
+
+      for (const item of items) {
+        // Resolve shop_product by (shop_id, product_id). The bulk endpoint
+        // uses product_id (the master id); per-shop uniqueness lets us
+        // map each item back to a shop_product.
+        const existing = await this.repo.findByShopAndProduct(
+          shopId,
+          item.product_id
+        )
+        if (!existing || existing.deleted_at) {
+          await client.query('ROLLBACK')
+          return {
+            success: false,
+            message: `Shop product not found for product_id ${item.product_id}`,
+            code: ERROR_CODES.PRODUCT_NOT_FOUND,
+          }
+        }
+
+        // Lock the shop_product row so concurrent writers (manual
+        // updates, other bulk runs) are serialized within this tx.
+        const locked = await this.repo.findByIdForUpdate(
+          client,
+          existing.id,
+          shopId
+        )
+        if (!locked) {
+          await client.query('ROLLBACK')
+          return {
+            success: false,
+            message: `Shop product not found for product_id ${item.product_id}`,
+            code: ERROR_CODES.PRODUCT_NOT_FOUND,
+          }
+        }
+
+        // Cross-field validation: sale_price < merged price. The Zod
+        // schema covers the case where both are present in the same
+        // item; here we re-check against the merged values so a
+        // partial item (only sale_price) cannot become inconsistent
+        // with the existing row's price.
+        const mergedPrice =
+          item.price !== undefined ? Number(item.price) : Number(locked.price)
+        const mergedSalePrice =
+          item.sale_price !== undefined
+            ? Number(item.sale_price)
+            : locked.sale_price !== null
+              ? Number(locked.sale_price)
+              : null
+        if (
+          mergedPrice != null &&
+          mergedSalePrice != null &&
+          mergedSalePrice >= mergedPrice
+        ) {
+          await client.query('ROLLBACK')
+          return {
+            success: false,
+            message: `sale_price must be less than price for product_id ${item.product_id}`,
+            code: ERROR_CODES.VALIDATION_ERROR,
+          }
+        }
+
+        const before = {
+          shop_product_id: locked.id,
+          product_id: locked.product_id,
+          price: locked.price,
+          sale_price: locked.sale_price,
+          cost_price: locked.cost_price,
+        }
+
+        const updated = await this.repo.applyPriceUpdate(
+          client,
+          locked.id,
+          shopId,
+          {
+            price: item.price,
+            sale_price: item.sale_price,
+            cost_price: item.cost_price,
+          }
+        )
+        if (!updated) {
+          await client.query('ROLLBACK')
+          return {
+            success: false,
+            message: `Shop product not found for product_id ${item.product_id}`,
+            code: ERROR_CODES.PRODUCT_NOT_FOUND,
+          }
+        }
+
+        const after = {
+          shop_product_id: updated.id,
+          product_id: updated.product_id,
+          price: updated.price,
+          sale_price: updated.sale_price,
+          cost_price: updated.cost_price,
+        }
+
+        beforeSnapshots.push(before)
+        afterSnapshots.push(after)
+      }
+
+      // Emit ONE audit row covering the whole batch (design §10:
+      // `shop_products_bulk_price_updated`). The `target_id` is null
+      // because the audit covers a SET of shop_products; the array
+      // payloads carry per-row before/after.
+      await emitAuditInTx(client, 'shop_products_bulk_price_updated', {
+        actor_user_id: actor.id || null,
+        actor_role:
+          actor.platformRole || actor.shopRole || actor.role || null,
+        actor_shop_id: shopId,
+        target_type: 'shop_products_batch',
+        target_id: null,
+        before: { items: beforeSnapshots },
+        after: { items: afterSnapshots },
+        ip_address: actor.ip || null,
+        user_agent: actor.userAgent || null,
+      })
+
+      await client.query('COMMIT')
+
+      // R23.13: SCAN-based cache invalidation after COMMIT. One pattern
+      // delete covers every cached page for the shop.
+      await this.invalidateShopCache(shopId)
+
+      logger.info(
+        {
+          userId: actor.id,
+          shopId,
+          action: 'shop_products_bulk_price_updated',
+          itemCount: items.length,
+        },
+        'Shop products bulk price update committed'
+      )
+
+      return {
+        success: true,
+        data: {
+          updated_count: afterSnapshots.length,
+          items: afterSnapshots,
+        },
+      }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore */
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Stock movements list (R23.5)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * List rows from the append-only `stock_movements` ledger for a
+   * shop, applying the validated query filters. Pagination defaults
+   * 20 / max 100 (Zod-enforced upstream); sort `created_at DESC`
+   * (R23.5).
+   *
+   * Permission: `shop_products.view` (gated at the route layer).
+   *
+   * @param {string} shopId
+   * @param {object} filters — already Zod-validated
+   * @returns {Promise<{items, total, page, limit}>}
+   */
+  async listStockMovements(shopId, filters) {
+    const { items, total } = await this.repo.findStockMovements({
+      shopId,
+      productId: filters.product_id,
+      type: filters.type,
+      actorUserId: filters.actor_user_id,
+      fromDate: filters.from_date,
+      toDate: filters.to_date,
+      page: filters.page,
+      limit: filters.limit,
+    })
+    return { items, total, page: filters.page, limit: filters.limit }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Approval workflow — HQ-only (R23.10, R23.11)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Approve a shop_product. Sets `approval_status='APPROVED'`,
+   * `approved_at=NOW()`, `approved_by=actor.id`, clears any prior
+   * `rejection_reason`, and emits a `shop_product_approved` audit row
+   * inside the same transaction.
+   *
+   * Gated behind `MULTI_VENDOR_PRODUCT_APPROVAL` at the route layer
+   * (caller returns 503 FEATURE_DISABLED when the flag is OFF) so
+   * this method assumes the flag is enabled. Permission
+   * `shop_products.approve` is enforced at the route layer.
+   *
+   * @param {string} shopProductId
+   * @param {{ id: string, role?: string, shopRole?: string, platformRole?: string, ip?: string, userAgent?: string }} actor
+   * @returns {Promise<{success:boolean, data?:object, message?:string, code?:string}>}
+   *
+   * @see Requirement R23.10
+   * @see Design §6.4
+   */
+  async approve(shopProductId, actor) {
+    if (!actor?.id) {
+      return {
+        success: false,
+        message: 'Unauthorized',
+        code: ERROR_CODES.UNAUTHORIZED,
+      }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const locked = await this.repo.findByIdForApprovalUpdate(
+        client,
+        shopProductId
+      )
+      if (!locked) {
+        await client.query('ROLLBACK')
+        return {
+          success: false,
+          message: 'Shop product not found',
+          code: ERROR_CODES.PRODUCT_NOT_FOUND,
+        }
+      }
+
+      const before = {
+        approval_status: locked.approval_status,
+        approved_at: locked.approved_at,
+        approved_by: locked.approved_by,
+        rejection_reason: locked.rejection_reason,
+      }
+
+      const updated = await this.repo.setApproved(client, shopProductId, actor.id)
+      if (!updated) {
+        await client.query('ROLLBACK')
+        return {
+          success: false,
+          message: 'Shop product not found',
+          code: ERROR_CODES.PRODUCT_NOT_FOUND,
+        }
+      }
+
+      await emitAuditInTx(client, 'shop_product_approved', {
+        actor_user_id: actor.id,
+        actor_role:
+          actor.platformRole || actor.role || actor.shopRole || null,
+        actor_shop_id: updated.shop_id,
+        target_type: 'shop_product',
+        target_id: shopProductId,
+        before,
+        after: {
+          approval_status: updated.approval_status,
+          approved_at: updated.approved_at,
+          approved_by: updated.approved_by,
+          rejection_reason: updated.rejection_reason,
+        },
+        ip_address: actor.ip || null,
+        user_agent: actor.userAgent || null,
+      })
+
+      await client.query('COMMIT')
+
+      // R23.13: SCAN-based cache invalidation after COMMIT (the
+      // approval state is part of the listing payload).
+      await this.invalidateShopCache(updated.shop_id)
+
+      logger.info(
+        {
+          userId: actor.id,
+          shopId: updated.shop_id,
+          shopProductId,
+          action: 'shop_product_approved',
+        },
+        'Shop product approved'
+      )
+
+      return { success: true, data: updated }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore */
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Reject a shop_product. Sets `approval_status='REJECTED'`,
+   * `approved_at=NOW()`, `approved_by=actor.id`,
+   * `rejection_reason=reason`, and emits a `shop_product_rejected`
+   * audit row inside the same transaction (R23.11).
+   *
+   * Reason is caller-validated 10–500 chars (Zod) before reaching
+   * this method.
+   *
+   * Permission `shop_products.approve` enforced at the route layer.
+   *
+   * @param {string} shopProductId
+   * @param {string} reason — already Zod-validated 10–500 chars
+   * @param {{ id: string, role?: string, shopRole?: string, platformRole?: string, ip?: string, userAgent?: string }} actor
+   * @returns {Promise<{success:boolean, data?:object, message?:string, code?:string}>}
+   *
+   * @see Requirement R23.11
+   * @see Design §6.4
+   */
+  async reject(shopProductId, reason, actor) {
+    if (!actor?.id) {
+      return {
+        success: false,
+        message: 'Unauthorized',
+        code: ERROR_CODES.UNAUTHORIZED,
+      }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const locked = await this.repo.findByIdForApprovalUpdate(
+        client,
+        shopProductId
+      )
+      if (!locked) {
+        await client.query('ROLLBACK')
+        return {
+          success: false,
+          message: 'Shop product not found',
+          code: ERROR_CODES.PRODUCT_NOT_FOUND,
+        }
+      }
+
+      const before = {
+        approval_status: locked.approval_status,
+        approved_at: locked.approved_at,
+        approved_by: locked.approved_by,
+        rejection_reason: locked.rejection_reason,
+      }
+
+      const updated = await this.repo.setRejected(
+        client,
+        shopProductId,
+        actor.id,
+        reason
+      )
+      if (!updated) {
+        await client.query('ROLLBACK')
+        return {
+          success: false,
+          message: 'Shop product not found',
+          code: ERROR_CODES.PRODUCT_NOT_FOUND,
+        }
+      }
+
+      await emitAuditInTx(client, 'shop_product_rejected', {
+        actor_user_id: actor.id,
+        actor_role:
+          actor.platformRole || actor.role || actor.shopRole || null,
+        actor_shop_id: updated.shop_id,
+        target_type: 'shop_product',
+        target_id: shopProductId,
+        before,
+        after: {
+          approval_status: updated.approval_status,
+          approved_at: updated.approved_at,
+          approved_by: updated.approved_by,
+          rejection_reason: updated.rejection_reason,
+        },
+        ip_address: actor.ip || null,
+        user_agent: actor.userAgent || null,
+      })
+
+      await client.query('COMMIT')
+
+      await this.invalidateShopCache(updated.shop_id)
+
+      logger.info(
+        {
+          userId: actor.id,
+          shopId: updated.shop_id,
+          shopProductId,
+          action: 'shop_product_rejected',
+        },
+        'Shop product rejected'
+      )
+
+      return { success: true, data: updated }
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* ignore */
       }
       throw err
     } finally {

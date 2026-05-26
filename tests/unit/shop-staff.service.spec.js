@@ -12,11 +12,46 @@ vi.mock('../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+// `audit-log` opens a pg pool when imported — replace it with a no-op
+// mock so unit tests do not require a live database connection.
+vi.mock('../../src/utils/audit-log.js', () => ({
+  emit: vi.fn(),
+  emitInTx: vi.fn(),
+}))
+
+// `getClient()` is called by `deactivate()` and `resetPassword()` to
+// run an atomic tx around the soft-delete / password update + audit
+// emit (task 5.4 / 5.5 / R28 AC#6). We hand back a fake pg client whose
+// `query` accepts `BEGIN` / `COMMIT` / `ROLLBACK` plus arbitrary
+// repository SQL so the transaction wrapper resolves without a real
+// connection. The fake exposes a `__queries` log for tests that need
+// to assert tx ordering, but the existing tests only need it to not
+// throw.
+vi.mock('../../src/config/database.js', () => {
+  const makeFakeClient = () => {
+    const calls = []
+    return {
+      query: vi.fn(async (sql) => {
+        calls.push(sql)
+        return { rows: [], rowCount: 1 }
+      }),
+      release: vi.fn(),
+      __queries: calls,
+    }
+  }
+  return {
+    pool: { query: vi.fn() },
+    query: vi.fn(),
+    getClient: vi.fn(async () => makeFakeClient()),
+    closePool: vi.fn(),
+  }
+})
+
 import { ShopStaffService } from '../../src/modules/shop-staff/shop-staff.service.js'
 import {
   createShopStaffSchema,
   updateShopStaffSchema,
-  VALID_PERMISSIONS,
+  PERMISSION_ENUM,
   VALID_ROLES,
 } from '../../src/modules/shop-staff/shop-staff.schema.js'
 import { invalidateStaffActiveCache } from '../../src/middlewares/shop-scope.js'
@@ -38,6 +73,8 @@ function makeRepoMock() {
     findMany: vi.fn(),
     update: vi.fn(),
     softDelete: vi.fn(),
+    findUserByEmailCI: vi.fn(),
+    createUserAndAssign: vi.fn(),
   }
 }
 
@@ -45,7 +82,7 @@ const VALID_CREATE_PAYLOAD = {
   shop_id: SHOP_ID,
   user_id: TARGET_USER_ID,
   role: 'SHOP_MANAGER',
-  permissions: ['manage_orders', 'manage_inventory'],
+  permissions: ['shop_orders.view', 'shop_products.view'],
 }
 
 const MOCK_STAFF_RECORD = {
@@ -53,7 +90,7 @@ const MOCK_STAFF_RECORD = {
   user_id: TARGET_USER_ID,
   shop_id: SHOP_ID,
   role: 'SHOP_MANAGER',
-  permissions: ['manage_orders', 'manage_inventory'],
+  permissions: ['shop_orders.view', 'shop_products.view'],
   is_active: true,
   invited_by: REQUESTER_ID,
   created_at: '2024-01-01T00:00:00Z',
@@ -173,12 +210,12 @@ describe('ShopStaffService.create() — limits and constraints', () => {
       user_id: TARGET_USER_ID,
       shop_id: SHOP_ID,
       role: 'SHOP_MANAGER',
-      permissions: ['manage_orders', 'manage_inventory'],
+      permissions: ['shop_orders.view', 'shop_products.view'],
       invited_by: REQUESTER_ID,
     })
   })
 
-  it('defaults permissions to [] when caller provides none', async () => {
+  it('defaults permissions to the SHOP_VIEWER default set when caller provides none', async () => {
     repo.findByUserAndShop.mockResolvedValueOnce(null)
     repo.countActiveByShop.mockResolvedValueOnce(0)
     repo.countActiveByUser.mockResolvedValueOnce(0)
@@ -189,9 +226,173 @@ describe('ShopStaffService.create() — limits and constraints', () => {
       REQUESTER_ID
     )
 
+    // SHOP_VIEWER default is exactly the 6 read-only permissions per
+    // R16 AC#14 / SHOP_ROLE_DEFAULT_PERMISSIONS.SHOP_VIEWER. The service
+    // converts the Set to a sorted array, so we assert containsAll.
     expect(repo.create).toHaveBeenCalledWith(
-      expect.objectContaining({ permissions: [] })
+      expect.objectContaining({
+        permissions: expect.arrayContaining([
+          'shops.view',
+          'shop_products.view',
+          'shop_orders.view',
+          'shop_transactions.view',
+          'shop_financials.view',
+          'shop_reports.view',
+        ]),
+      })
     )
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// ShopStaffService.create() — R20 / R16 extensions
+// New-user provisioning + Temp_Password + role-creation rules.
+// ═══════════════════════════════════════════════════════════════
+describe('ShopStaffService.create() — R20 new-user shape', () => {
+  let repo
+  let service
+
+  beforeEach(() => {
+    repo = makeRepoMock()
+    service = new ShopStaffService(repo)
+  })
+
+  it('provisions a new user with Temp_Password and returns it exactly once', async () => {
+    repo.findUserByEmailCI.mockResolvedValueOnce(null)
+    repo.countActiveByShop.mockResolvedValueOnce(0)
+    repo.createUserAndAssign.mockResolvedValueOnce({
+      user: { id: TARGET_USER_ID, email: 'sam@example.com' },
+      staff: MOCK_STAFF_RECORD,
+    })
+
+    const result = await service.create(
+      {
+        shop_id: SHOP_ID,
+        email: 'sam@example.com',
+        name: 'Sam',
+        role: 'SHOP_MANAGER',
+        generate_temp_password: true,
+      },
+      { invitedBy: REQUESTER_ID, invitedByPlatformRole: 'ADMIN' }
+    )
+
+    expect(result.success).toBe(true)
+    // The returned data carries the Temp_Password exactly once.
+    const pw = result.data.temp_password
+    expect(pw).toMatch(/^.{12}$/) // exactly 12 chars
+    // Verify each character class is represented (R20.3 complexity).
+    expect(pw).toMatch(/[a-z]/)
+    expect(pw).toMatch(/[A-Z]/)
+    expect(pw).toMatch(/\d/)
+    expect(pw).toMatch(/[!@#$%^&*()_=+\-]/)
+    expect(repo.createUserAndAssign).toHaveBeenCalledWith(
+      expect.objectContaining({
+        forcePasswordChange: true,
+        // bcrypt hashes start with $2a$/$2b$/$2y$ at cost 12.
+        passwordHash: expect.stringMatching(/^\$2[aby]\$12\$/),
+      })
+    )
+  })
+
+  it('rejects with EMAIL_TAKEN when email already exists', async () => {
+    repo.findUserByEmailCI.mockResolvedValueOnce({
+      id: 'existing-user',
+      email: 'taken@example.com',
+    })
+
+    await expect(
+      service.create(
+        {
+          shop_id: SHOP_ID,
+          email: 'taken@example.com',
+          name: 'Sam',
+          role: 'SHOP_MANAGER',
+          generate_temp_password: true,
+        },
+        { invitedBy: REQUESTER_ID, invitedByPlatformRole: 'ADMIN' }
+      )
+    ).rejects.toMatchObject({ statusCode: 409, code: 'EMAIL_TAKEN' })
+    expect(repo.createUserAndAssign).not.toHaveBeenCalled()
+  })
+
+  it('rejects when caller-supplied permissions include unknown strings', async () => {
+    await expect(
+      service.create(
+        {
+          shop_id: SHOP_ID,
+          email: 'sam2@example.com',
+          name: 'Sam',
+          role: 'SHOP_VIEWER',
+          permissions: ['shop_products.view', 'made.up.permission'],
+          generate_temp_password: true,
+        },
+        { invitedBy: REQUESTER_ID, invitedByPlatformRole: 'ADMIN' }
+      )
+    ).rejects.toMatchObject({ statusCode: 400, code: 'PERMISSION_INVALID' })
+  })
+})
+
+describe('ShopStaffService.create() — role-creation rules (R16.9–R16.13, R16.20)', () => {
+  let repo
+  let service
+
+  beforeEach(() => {
+    repo = makeRepoMock()
+    service = new ShopStaffService(repo)
+  })
+
+  it('SHOP_ADMIN cannot create another SHOP_ADMIN (R16.10)', async () => {
+    await expect(
+      service.create(
+        { ...VALID_CREATE_PAYLOAD, role: 'SHOP_ADMIN' },
+        { invitedBy: REQUESTER_ID, invitedByRole: 'SHOP_ADMIN' }
+      )
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'STAFF_ROLE_FORBIDDEN',
+    })
+  })
+
+  it('SHOP_MANAGER cannot create SHOP_ADMIN or SHOP_MANAGER (R16.11)', async () => {
+    for (const role of ['SHOP_ADMIN', 'SHOP_MANAGER']) {
+      await expect(
+        service.create(
+          { ...VALID_CREATE_PAYLOAD, role },
+          { invitedBy: REQUESTER_ID, invitedByRole: 'SHOP_MANAGER' }
+        )
+      ).rejects.toMatchObject({
+        statusCode: 403,
+        code: 'STAFF_ROLE_FORBIDDEN',
+      })
+    }
+  })
+
+  it('SHOP_STAFF cannot create any staff (R16.20)', async () => {
+    await expect(
+      service.create(
+        { ...VALID_CREATE_PAYLOAD, role: 'SHOP_VIEWER' },
+        { invitedBy: REQUESTER_ID, invitedByRole: 'SHOP_STAFF' }
+      )
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'STAFF_ROLE_FORBIDDEN',
+    })
+  })
+
+  it('HQ_MANAGER may create SHOP_ADMIN (R16.13)', async () => {
+    repo.findByUserAndShop.mockResolvedValueOnce(null)
+    repo.countActiveByShop.mockResolvedValueOnce(0)
+    repo.countActiveByUser.mockResolvedValueOnce(0)
+    repo.create.mockResolvedValueOnce({
+      ...MOCK_STAFF_RECORD,
+      role: 'SHOP_ADMIN',
+    })
+
+    const result = await service.create(
+      { ...VALID_CREATE_PAYLOAD, role: 'SHOP_ADMIN' },
+      { invitedBy: REQUESTER_ID, invitedByPlatformRole: 'HQ_MANAGER' }
+    )
+    expect(result.success).toBe(true)
   })
 })
 
@@ -286,7 +487,7 @@ describe('ShopStaffService.update()', () => {
   })
 
   it('returns STAFF_NOT_FOUND with consistent error shape when record missing', async () => {
-    repo.update.mockResolvedValueOnce(null)
+    repo.findById.mockResolvedValueOnce(null)
 
     const result = await service.update(
       STAFF_ID,
@@ -304,15 +505,16 @@ describe('ShopStaffService.update()', () => {
   })
 
   it('returns success and triggers cache invalidation on permission update', async () => {
+    repo.findById.mockResolvedValueOnce(MOCK_STAFF_RECORD)
     const updated = {
       ...MOCK_STAFF_RECORD,
-      permissions: ['view_financials'],
+      permissions: ['shop_financials.view'],
     }
     repo.update.mockResolvedValueOnce(updated)
 
     const result = await service.update(
       STAFF_ID,
-      { permissions: ['view_financials'] },
+      { permissions: ['shop_financials.view'] },
       SHOP_ID,
       REQUESTER_ID
     )
@@ -321,7 +523,7 @@ describe('ShopStaffService.update()', () => {
     expect(repo.update).toHaveBeenCalledWith(
       STAFF_ID,
       SHOP_ID,
-      { permissions: ['view_financials'] }
+      { permissions: ['shop_financials.view'] }
     )
     expect(invalidateStaffActiveCache).toHaveBeenCalledWith(
       TARGET_USER_ID,
@@ -362,14 +564,20 @@ describe('ShopStaffService.delete()', () => {
     const result = await service.delete(STAFF_ID, SHOP_ID, REQUESTER_ID)
 
     expect(result).toEqual({ success: true })
-    expect(repo.softDelete).toHaveBeenCalledWith(STAFF_ID, SHOP_ID)
+    // softDelete is invoked from inside the deactivate() transaction,
+    // so the third argument carries the pg client used for the BEGIN /
+    // soft-delete / COMMIT sequence (R28 AC#6 — atomic with the audit
+    // emit). We assert on the first two positional args only.
+    expect(repo.softDelete).toHaveBeenCalledTimes(1)
+    expect(repo.softDelete.mock.calls[0][0]).toBe(STAFF_ID)
+    expect(repo.softDelete.mock.calls[0][1]).toBe(SHOP_ID)
   })
 })
 
 // ═══════════════════════════════════════════════════════════════
-// shop-staff schema — Permissions JSON validation
-// Validates Requirement 2.4 (permissions JSON contains only valid values)
-// and Requirement 2.1 (role enum)
+// shop-staff schema — Permission_String / role validation
+// Validates R16.17 / R17.1 (canonical 37-string vocabulary) and
+// Requirement 2.1 / R16.8 (4 staff roles)
 // ═══════════════════════════════════════════════════════════════
 describe('createShopStaffSchema — permissions and role validation', () => {
   const VALID_BASE = {
@@ -378,18 +586,11 @@ describe('createShopStaffSchema — permissions and role validation', () => {
     role: 'SHOP_MANAGER',
   }
 
-  it('lists exactly the 9 permissions from Requirement 2.4', () => {
-    expect(VALID_PERMISSIONS).toEqual([
-      'manage_products',
-      'manage_orders',
-      'manage_inventory',
-      'view_financials',
-      'manage_financials',
-      'manage_staff',
-      'manage_settings',
-      'manage_customers',
-      'manage_riders',
-    ])
+  it('lists exactly the canonical 37 Permission_Strings', () => {
+    expect(PERMISSION_ENUM.length).toBe(37)
+    expect(PERMISSION_ENUM).toContain('shop_orders.view')
+    expect(PERMISSION_ENUM).toContain('shop_staff.create')
+    expect(PERMISSION_ENUM).toContain('reports.global_view')
   })
 
   it('lists exactly the 4 staff roles from Requirement 2.1', () => {
@@ -401,16 +602,13 @@ describe('createShopStaffSchema — permissions and role validation', () => {
     ])
   })
 
-  it('accepts a payload with no permissions and applies the [] default', () => {
+  it('accepts a payload with no permissions (omitted is allowed)', () => {
     const parsed = createShopStaffSchema.safeParse(VALID_BASE)
     expect(parsed.success).toBe(true)
-    if (parsed.success) {
-      expect(parsed.data.permissions).toEqual([])
-    }
   })
 
-  it('accepts every valid permission individually', () => {
-    for (const perm of VALID_PERMISSIONS) {
+  it('accepts every canonical permission individually', () => {
+    for (const perm of PERMISSION_ENUM) {
       const parsed = createShopStaffSchema.safeParse({
         ...VALID_BASE,
         permissions: [perm],
@@ -419,10 +617,10 @@ describe('createShopStaffSchema — permissions and role validation', () => {
     }
   })
 
-  it('accepts the full set of 9 valid permissions', () => {
+  it('accepts the full canonical permission set', () => {
     const parsed = createShopStaffSchema.safeParse({
       ...VALID_BASE,
-      permissions: VALID_PERMISSIONS,
+      permissions: PERMISSION_ENUM,
     })
     expect(parsed.success).toBe(true)
   })
@@ -431,8 +629,9 @@ describe('createShopStaffSchema — permissions and role validation', () => {
     'manage_everything',
     'admin',
     '',
-    'MANAGE_ORDERS', // case sensitive
-    'manage products', // space instead of underscore
+    'SHOP_ORDERS.VIEW', // case-sensitive
+    'manage products', // legacy R2 name no longer canonical
+    'manage_orders',
   ])('rejects invalid permission "%s"', (badPerm) => {
     const parsed = createShopStaffSchema.safeParse({
       ...VALID_BASE,
@@ -444,7 +643,7 @@ describe('createShopStaffSchema — permissions and role validation', () => {
   it('rejects when one entry in the permissions array is invalid', () => {
     const parsed = createShopStaffSchema.safeParse({
       ...VALID_BASE,
-      permissions: ['manage_orders', 'unknown_permission'],
+      permissions: ['shop_orders.view', 'unknown_permission'],
     })
     expect(parsed.success).toBe(false)
   })
@@ -466,6 +665,42 @@ describe('createShopStaffSchema — permissions and role validation', () => {
         .success
     ).toBe(false)
   })
+
+  it('accepts the new-user shape with email + name', () => {
+    const parsed = createShopStaffSchema.safeParse({
+      shop_id: SHOP_ID,
+      email: 'NewStaff@Example.com',
+      name: 'New Staff',
+      role: 'SHOP_VIEWER',
+      generate_temp_password: true,
+    })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) {
+      // Email should be lowercased by the schema transform.
+      expect(parsed.data.email).toBe('newstaff@example.com')
+    }
+  })
+
+  it('rejects new-user shape without email', () => {
+    const parsed = createShopStaffSchema.safeParse({
+      shop_id: SHOP_ID,
+      name: 'New Staff',
+      role: 'SHOP_VIEWER',
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('rejects a password that lacks letter+digit complexity', () => {
+    const parsed = createShopStaffSchema.safeParse({
+      shop_id: SHOP_ID,
+      email: 'a@b.com',
+      name: 'A B',
+      role: 'SHOP_VIEWER',
+      generate_temp_password: false,
+      password: 'aaaaaaaa', // letters only, no digit
+    })
+    expect(parsed.success).toBe(false)
+  })
 })
 
 describe('updateShopStaffSchema', () => {
@@ -479,9 +714,10 @@ describe('updateShopStaffSchema', () => {
     )
   })
 
-  it('accepts a permissions update alone', () => {
+  it('accepts a permissions update alone (canonical Permission_String)', () => {
     expect(
-      updateShopStaffSchema.safeParse({ permissions: ['manage_orders'] }).success
+      updateShopStaffSchema.safeParse({ permissions: ['shop_orders.view'] })
+        .success
     ).toBe(true)
   })
 

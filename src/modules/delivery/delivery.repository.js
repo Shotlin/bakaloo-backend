@@ -132,9 +132,14 @@ export class DeliveryRepository {
 
   async getAssignmentByOrderAndRider(orderId, riderId) {
     const { rows } = await query(
-      `SELECT da.id as assignment_id, da.*, o.order_number, o.user_id as customer_id, o.status as order_status
+      `SELECT da.id as assignment_id, da.*, o.order_number, o.user_id as customer_id, o.status as order_status,
+              o.shop_id,
+              ru.name as rider_name, ru.phone as rider_phone,
+              rp.current_lat as rider_lat, rp.current_lng as rider_lng
        FROM delivery_assignments da
        JOIN orders o ON o.id = da.order_id
+       LEFT JOIN users ru ON ru.id = da.rider_id
+       LEFT JOIN rider_profiles rp ON rp.user_id = da.rider_id
        WHERE da.order_id = $1 AND da.rider_id = $2
        AND da.status = ANY($3::text[])
        ORDER BY da.assigned_at DESC
@@ -867,6 +872,18 @@ export class DeliveryRepository {
     const { rows } = await query(
       'SELECT current_lat as lat, current_lng as lng FROM rider_profiles WHERE user_id = $1',
       [riderId]
+    )
+    return rows[0] || null
+  }
+
+  async getShopInfo(shopId) {
+    if (!shopId) return null
+    const { rows } = await query(
+      `SELECT id, name, address, phone, pickup_lat, pickup_lng
+       FROM shops
+       WHERE id = $1
+       LIMIT 1`,
+      [shopId]
     )
     return rows[0] || null
   }

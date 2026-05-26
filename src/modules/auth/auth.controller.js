@@ -167,4 +167,18 @@ export class AuthController {
 
     return reply.code(200).send(success(null, 'Account deleted successfully'))
   }
+
+  /**
+   * GET /my-shops — paginated active staff assignments for the requester.
+   * Requirements: R19.5
+   * Design: §5.4
+   */
+  async myShops(request, reply) {
+    const page = parseInt(request.query?.page, 10) || 1
+    const limit = Math.min(parseInt(request.query?.limit, 10) || 20, 100)
+
+    const result = await this.service.getMyShops(request.user.id, { page, limit })
+
+    return reply.code(200).send(success(result, 'Shop assignments fetched'))
+  }
 }

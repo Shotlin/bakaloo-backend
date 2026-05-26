@@ -1,7 +1,9 @@
 import { logger } from '../../config/logger.js'
+import { getClient } from '../../config/database.js'
 import { ShopFinancialsWriteRepository } from './shop-financials.write.repository.js'
 import { ShopFinancialsService } from './shop-financials.service.js'
 import { ShopFinancialsRepository } from './shop-financials.repository.js'
+import { TransactionWriterService } from '../shop-finance/transaction-writer.service.js'
 import {
   computeCommission as ffComputeCommission,
   computeNetRevenue as ffComputeNetRevenue,
@@ -45,6 +47,7 @@ export class SettlementService {
    * @param {ShopFinancialsWriteRepository} [deps.writeRepository]
    * @param {ShopFinancialsService} [deps.financialsService]
    * @param {ShopFinancialsRepository} [deps.financialsRepository]
+   * @param {TransactionWriterService} [deps.transactionWriter]
    */
   constructor(deps = {}) {
     this.writeRepo =
@@ -54,6 +57,8 @@ export class SettlementService {
       new ShopFinancialsService(
         deps.financialsRepository || new ShopFinancialsRepository()
       )
+    this.transactionWriter =
+      deps.transactionWriter || new TransactionWriterService()
   }
 
   // ────────────────────────────────────────────────────────
@@ -336,6 +341,9 @@ export class SettlementService {
         endUtc
       )
 
+      // Task 8.2: Insert per-order V2 transaction entries
+      await this._recordPerOrderTransactions(shopId, startUtc, endUtc, rate)
+
       // Refund flow lands later (out of scope for task 9.1 — see brief).
       const refundAmount = 0
       const platformCommission = SettlementService.computeCommission(
@@ -450,6 +458,70 @@ export class SettlementService {
   // ────────────────────────────────────────────────────────
   // Internal helpers
   // ────────────────────────────────────────────────────────
+
+  /**
+   * Task 8.2: Fetch individual delivered orders for the period and insert
+   * V2 transaction entries (ORDER_REVENUE, PLATFORM_COMMISSION, and
+   * conditional DELIVERY_FEE + RIDER_COST) per order in one transaction.
+   *
+   * Best-effort: failures are logged but do not abort the settlement.
+   * The financial aggregation (UPSERT) still runs from the aggregate query.
+   *
+   * @private
+   */
+  async _recordPerOrderTransactions(shopId, startUtc, endUtc, commissionRate) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      // Fetch delivered orders for this shop in the period (bounded by 500)
+      const { rows: orders } = await client.query(
+        `SELECT id, subtotal, delivery_fee, rider_id
+           FROM orders
+          WHERE shop_id = $1
+            AND status = 'DELIVERED'
+            AND delivered_at >= $2
+            AND delivered_at < $3
+          ORDER BY delivered_at ASC
+          LIMIT 500`,
+        [shopId, startUtc, endUtc]
+      )
+
+      for (const order of orders) {
+        const subtotal = Number(order.subtotal) || 0
+        if (subtotal < 0.01) continue
+
+        const commissionAmount = Math.round(subtotal * commissionRate) / 100
+        const deliveryFee = Number(order.delivery_fee) || 0
+        // Rider cost equals delivery fee in the standard model
+        const riderCost = deliveryFee
+
+        await this.transactionWriter.recordSettlementEntries(client, {
+          shopId,
+          orderId: order.id,
+          subtotal,
+          commissionAmount,
+          deliveryFee,
+          riderCost,
+          riderId: order.rider_id || null,
+        })
+      }
+
+      await client.query('COMMIT')
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch { /* ignore */ }
+      logger.warn(
+        {
+          shopId,
+          action: 'settlement_per_order_tx_failed',
+          err: err.message,
+        },
+        'Per-order transaction recording failed (non-fatal)'
+      )
+    } finally {
+      client.release()
+    }
+  }
 
   /** @private */
   async _runAggregateSettlement({

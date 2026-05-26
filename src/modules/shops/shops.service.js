@@ -1,8 +1,81 @@
 import { cacheGet, cacheSet, cacheDel, cacheDeletePattern } from '../../utils/cache.js'
 import { logger } from '../../config/logger.js'
+import { emit as emitAudit } from '../../utils/audit-log.js'
+import { allocationQueue } from '../../config/bullmq.js'
 
 const CACHE_PREFIX = 'bakaloo:shops:v1'
 const CACHE_TTL = 300 // 300 seconds
+
+/**
+ * Persisted shop columns used for the before/after diff that gates
+ * `shop_updated` audit emission. `updated_at` is intentionally excluded
+ * because the repository bumps it on every write — including it would
+ * cause the audit to fire even when no caller-supplied field actually
+ * changed (per design §12.2: "when any field besides `updated_at`
+ * changes"). `bank_account_number` is included so a real change still
+ * triggers the audit; the value itself is stripped from before/after
+ * snapshots by `audit-log.js` `redact()` (R28 AC#5) so the secret never
+ * reaches the audit row.
+ */
+const SHOP_AUDIT_COMPARE_FIELDS = Object.freeze([
+  'lat',
+  'lng',
+  'serviceable_pincodes',
+  'delivery_radius_km',
+  'name',
+  'slug',
+  'description',
+  'logo_url',
+  'banner_url',
+  'phone',
+  'email',
+  'address_line1',
+  'address_line2',
+  'city',
+  'state',
+  'pincode',
+  'is_active',
+  'is_verified',
+  'operating_hours',
+  'commission_rate',
+  'bank_account_number',
+  'bank_ifsc',
+  'bank_name',
+  'bank_holder_name',
+  'gst_number',
+  'pan_number',
+])
+
+/**
+ * Project a shop row to only the persisted columns we audit on, in a
+ * stable key order, so JSON.stringify comparison is deterministic
+ * regardless of how the underlying repository orders columns.
+ *
+ * @param {object} row
+ * @returns {Record<string, unknown>}
+ */
+function projectShopForAudit(row) {
+  const out = {}
+  for (const key of SHOP_AUDIT_COMPARE_FIELDS) {
+    out[key] = row?.[key] ?? null
+  }
+  return out
+}
+
+/**
+ * Returns true when at least one persisted column on `before` differs
+ * from `after` (JSON-stable comparison over the audit-relevant subset).
+ *
+ * @param {object} before
+ * @param {object} after
+ * @returns {boolean}
+ */
+function shopFieldsChanged(before, after) {
+  return (
+    JSON.stringify(projectShopForAudit(before)) !==
+    JSON.stringify(projectShopForAudit(after))
+  )
+}
 
 /**
  * Shops service — business logic with Redis caching
@@ -73,13 +146,25 @@ export class ShopsService {
 
   /**
    * Update shop by ID
-   * Regenerates slug if name changes
+   *
+   * Regenerates slug if name changes. After persisting, emits a
+   * `shop_updated` audit row whenever any persisted column on the
+   * `shops` row actually changed (R28 AC#9 / R28.9 / design §10 /
+   * design §12.2 — "when any field besides `updated_at` changes").
+   * Emission is fire-and-forget via `audit-log.js` `emit()` so request
+   * latency is unaffected; the helper redacts `bank_account_number`
+   * from the before/after JSON snapshots (R28 AC#5).
+   *
    * @param {string} id - Shop UUID
    * @param {object} data - Fields to update
    * @param {string} userId - Updater's user ID
+   * @param {object} [ctx] - Request context for the audit row
+   * @param {string|null} [ctx.ip] - Source IP from request.ip
+   * @param {string|null} [ctx.userAgent] - User-agent header
+   * @param {string|null} [ctx.actorRole] - Resolved HQ_Role or Shop_Role
    * @returns {Promise<{success: boolean, shop?: object, message?: string}>}
    */
-  async update(id, data, userId) {
+  async update(id, data, userId, { ip = null, userAgent = null, actorRole = null } = {}) {
     const existing = await this.repo.findById(id)
     if (!existing) {
       return { success: false, message: 'Shop not found', code: 'SHOP_NOT_FOUND' }
@@ -100,6 +185,56 @@ export class ShopsService {
     // Invalidate caches
     await cacheDel(`${CACHE_PREFIX}:${id}`)
     await cacheDeletePattern('bakaloo:shops:active:*')
+
+    // Task 13.3: Trigger allocation recompute when serviceable_pincodes
+    // or delivery_radius_km changes (Requirements 4.8, 4.9).
+    // Fire-and-forget — allocation recompute is a background job.
+    const pincodesChanged =
+      data.serviceable_pincodes !== undefined &&
+      JSON.stringify(data.serviceable_pincodes) !==
+        JSON.stringify(existing.serviceable_pincodes)
+    const radiusChanged =
+      data.delivery_radius_km !== undefined &&
+      data.delivery_radius_km !== existing.delivery_radius_km
+
+    if (pincodesChanged || radiusChanged) {
+      try {
+        await allocationQueue.add(
+          'recompute-by-shop',
+          { type: 'recompute-by-shop', shopId: id },
+          { jobId: `recompute-by-shop:${id}` }
+        )
+        logger.info(
+          { shopId: id, pincodesChanged, radiusChanged, action: 'allocation_recompute_enqueued' },
+          'Allocation recompute enqueued for shop area change'
+        )
+      } catch (err) {
+        logger.error(
+          { shopId: id, err: err.message, action: 'allocation_recompute_enqueue_failed' },
+          'Failed to enqueue allocation recompute'
+        )
+      }
+    }
+
+    // R28 AC#9 / design §10 / §12.2: emit `shop_updated` only when at
+    // least one persisted column actually changed. Skipping no-op
+    // updates keeps the audit trail signal-rich and avoids noisy rows
+    // for requests that submit identical values (e.g. idempotent
+    // dashboard saves). The redaction of `bank_account_number` from
+    // both snapshots happens inside `emitAudit`.
+    if (shopFieldsChanged(existing, shop)) {
+      emitAudit('shop_updated', {
+        actor_user_id: userId,
+        actor_role: actorRole,
+        actor_shop_id: id,
+        target_type: 'shop',
+        target_id: id,
+        before: existing,
+        after: shop,
+        ip_address: ip,
+        user_agent: userAgent,
+      })
+    }
 
     logger.info({ userId, shopId: id, action: 'shop_updated' }, 'Shop updated')
 

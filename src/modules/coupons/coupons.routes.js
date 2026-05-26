@@ -1,6 +1,7 @@
 import { CouponsController } from './coupons.controller.js'
 import { CouponsService } from './coupons.service.js'
 import { CouponsRepository } from './coupons.repository.js'
+import { requirePermission } from '../../middlewares/permission-check.js'
 import {
   validateCouponSchema,
   availableCouponsSchema,
@@ -13,6 +14,11 @@ import {
 /**
  * Coupons routes plugin
  * Prefix: /api/v1/coupons
+ *
+ * Task 9.2: Admin create route now uses requirePermission('shop_coupons.create')
+ * instead of the blanket authorize(['ADMIN']) so SHOP_ADMIN/SHOP_MANAGER with
+ * the permission can also create SHOP_COUPONs. Scope enforcement (PLATFORM vs
+ * SHOP) is handled in the service layer.
  */
 export default async function couponsRoutes(fastify) {
   const repository = new CouponsRepository()
@@ -41,21 +47,24 @@ export default async function couponsRoutes(fastify) {
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.listAll.bind(controller))
 
-  // POST / — Create coupon [ADMIN]
+  // POST / — Create coupon [HQ or shop staff with shop_coupons.create]
+  // Task 9.2: scope enforcement is in the service layer; the route gate
+  // uses requirePermission so both HQ_Users and shop staff with the
+  // canonical permission can reach the handler.
   fastify.post('/', {
     schema: createCouponSchema,
-    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    preHandler: [fastify.authenticate, requirePermission('shop_coupons.create')],
   }, controller.create.bind(controller))
 
-  // PUT /:id — Update coupon [ADMIN]
+  // PUT /:id — Update coupon [HQ or shop staff with shop_coupons.update]
   fastify.put('/:id', {
     schema: updateCouponSchema,
-    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    preHandler: [fastify.authenticate, requirePermission('shop_coupons.update')],
   }, controller.update.bind(controller))
 
-  // DELETE /:id — Delete coupon [ADMIN]
+  // DELETE /:id — Delete coupon [HQ or shop staff with shop_coupons.delete]
   fastify.delete('/:id', {
     schema: deleteCouponSchema,
-    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    preHandler: [fastify.authenticate, requirePermission('shop_coupons.delete')],
   }, controller.delete.bind(controller))
 }

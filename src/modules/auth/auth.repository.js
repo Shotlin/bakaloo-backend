@@ -1,4 +1,5 @@
 import { query } from '../../config/database.js'
+import { logger } from '../../config/logger.js'
 
 /**
  * Auth repository — all user-related database queries for authentication

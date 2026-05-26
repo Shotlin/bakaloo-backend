@@ -111,6 +111,7 @@ export default async function shopStaffRoutes(fastify) {
   }, controller.getOne.bind(controller))
 
   // PATCH /:id — Update staff role/permissions/is_active (Shop Admin / Super Admin)
+  // Canonical update method per design §6.3 / R29 AC#1.
   fastify.patch('/:id', {
     schema: {
       tags: ['Shop Staff'],
@@ -126,6 +127,35 @@ export default async function shopStaffRoutes(fastify) {
     },
     preHandler: writePreHandlers,
   }, controller.update.bind(controller))
+
+  // PUT /:id — Explicitly NOT supported. Returns 405 Method Not Allowed with
+  // `Allow: PATCH` header per R29 AC#7 / design §6.3. Wrapped in the same
+  // auth + write preHandlers as PATCH so unauthenticated callers still see
+  // 401/403 first (don't leak method support to unauthorized clients).
+  fastify.put('/:id', {
+    schema: {
+      tags: ['Shop Staff'],
+      summary: 'Use PATCH instead — PUT is not supported',
+      security: [{ bearerAuth: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+    preHandler: writePreHandlers,
+  }, async (request, reply) => {
+    return reply
+      .code(405)
+      .header('Allow', 'PATCH')
+      .send({
+        success: false,
+        message: 'Use PATCH /api/v1/shops/:shopId/staff/:staffId',
+        code: 'METHOD_NOT_ALLOWED',
+      })
+  })
 
   // DELETE /:id — Soft-delete (deactivate) staff (Shop Admin / Super Admin)
   fastify.delete('/:id', {
@@ -143,4 +173,40 @@ export default async function shopStaffRoutes(fastify) {
     },
     preHandler: writePreHandlers,
   }, controller.delete.bind(controller))
+
+  // POST /:id/reset-password — Reset staff password (Shop Admin / HQ User)
+  //
+  // Per design §6.3 / R20 AC#9: generates a new 12-char Temp_Password,
+  // sets `users.force_password_change=true`, bumps `session_version`
+  // (invalidating every previously issued JWT for the User), and emits
+  // a `staff_password_reset` audit row. The plaintext Temp_Password is
+  // returned in the response body EXACTLY ONCE.
+  //
+  // Rate-limited to the same 10/min/IP budget as the create-staff
+  // route to bound brute-force exposure on the staff-id surface.
+  // requirePermission('shop_staff.reset_password') would normally gate
+  // this; until the permission-check middleware is wired everywhere,
+  // we reuse `canWrite` (Shop Admin / Super Admin) which is a strict
+  // superset of the permission audience.
+  fastify.post('/:id/reset-password', {
+    schema: {
+      tags: ['Shop Staff'],
+      summary: 'Reset staff password [Shop Admin]',
+      security: [{ bearerAuth: [] }],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+    preHandler: writePreHandlers,
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '1 minute',
+      },
+    },
+  }, controller.resetPassword.bind(controller))
 }

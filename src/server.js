@@ -3,6 +3,7 @@ import { env } from './config/env.js'
 import { testConnection, closePool } from './config/database.js'
 import { closeRedis } from './config/redis.js'
 import { logger } from './config/logger.js'
+import { runPermissionAudit } from './utils/permission-audit.js'
 
 const start = async () => {
   try {
@@ -11,6 +12,30 @@ const start = async () => {
 
     // Build Fastify app
     const app = await buildApp()
+
+    // ─── BOOT-TIME PERMISSION AUDIT (R17 AC#9, task 2.7) ───────────
+    // After every plugin and module route has been registered, ensure
+    // each protected dashboard route declares a canonical Permission_String
+    // (design §4.5). `app.ready()` flushes all pending registrations so
+    // every onRoute hook callback has fired into `app.permissionAuditRoutes`.
+    // When STRICT_PERMISSION_AUDIT is true and any violation is found, abort
+    // boot with exit code 1 per R17 AC#9; otherwise log a warning so the
+    // misconfiguration stays visible while Phase C wires permissions in.
+    await app.ready()
+    const audit = runPermissionAudit({
+      collectedRoutes: app.permissionAuditRoutes,
+      strict: env.STRICT_PERMISSION_AUDIT,
+      logger,
+    })
+    if (!audit.ok) {
+      // Logged at error level inside runPermissionAudit. Close the
+      // half-built app to release sockets and DB clients before exit so
+      // graceful shutdown observers do not see a stuck process.
+      await app.close().catch(() => {})
+      await closePool().catch(() => {})
+      await closeRedis().catch(() => {})
+      process.exit(1)
+    }
 
     // Start listening
     await app.listen({ port: env.PORT, host: env.HOST })

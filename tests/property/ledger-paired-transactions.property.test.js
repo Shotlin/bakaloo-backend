@@ -554,9 +554,19 @@ describe('Property 12.5: Failure propagates so caller can ROLLBACK', () => {
           expect(inserts).toHaveLength(1)
           expect(inserts[0].type).toBe('ORDER_REVENUE')
 
-          // The service issued no queries directly on the caller's client —
-          // BEGIN/COMMIT/ROLLBACK belong to the caller (Req 7.9).
-          expect(client.query).not.toHaveBeenCalled()
+          // The service issued only the `transaction_posted` audit INSERT
+          // for the successful first ledger row on the caller's client
+          // (R24.13 / design §9.2). It must NOT issue BEGIN/COMMIT/ROLLBACK
+          // — those still belong to the caller (Req 7.9). Every query
+          // recorded on the client must therefore be the audit_logs insert.
+          for (const sql of client.calls) {
+            expect(sql).toMatch(/INSERT\s+INTO\s+audit_logs/i)
+            expect(sql).not.toMatch(/^\s*BEGIN\b/i)
+            expect(sql).not.toMatch(/^\s*COMMIT\b/i)
+            expect(sql).not.toMatch(/^\s*ROLLBACK\b/i)
+          }
+          // Exactly one audit row — paired with the one successful insert.
+          expect(client.query).toHaveBeenCalledTimes(1)
         }
       ),
       { numRuns: 100 }
@@ -595,6 +605,10 @@ describe('Property 12.5: Failure propagates so caller can ROLLBACK', () => {
           // Service stopped after the first throw — no second insert.
           expect(repo.insertEntry).toHaveBeenCalledTimes(1)
           expect(inserts).toHaveLength(0)
+          // The first insert threw BEFORE the audit emit ran, so no
+          // `transaction_posted` query reached the client. The caller still
+          // owns BEGIN/COMMIT/ROLLBACK (Req 7.9), so no other queries
+          // should appear on `client` either.
           expect(client.query).not.toHaveBeenCalled()
         }
       ),

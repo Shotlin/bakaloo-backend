@@ -91,6 +91,40 @@ const envSchema = z.object({
   LOG_PRETTY: booleanFromEnv.default(false),
   ENABLE_SWAGGER: booleanFromEnv.optional(),
 
+  // Boot-time guards
+  // STRICT_PERMISSION_AUDIT — when true, fail boot (exit 1) if any
+  // protected dashboard route lacks a canonical Permission_String per
+  // R17 AC#9 (multi-vendor design §4.5, task 2.7). Default false until
+  // Phase C tasks (3.x – 11.x) wire `requiredPermission` onto every
+  // protected route; flip to true once that work is complete.
+  STRICT_PERMISSION_AUDIT: booleanFromEnv.default(false),
+
+  // STRICT_SESSION_VERSION_CHECK — when true, the auth plugin (task 3.7)
+  // rejects any JWT that does not carry a `session_version` claim with
+  // 401 SESSION_INVALID per R20.8 (multi-vendor design §5.5). Default
+  // false so legacy in-flight tokens minted before migration 047 are
+  // accepted (the row-vs-claim comparison still runs whenever the claim
+  // IS present). Flip to true once all live tokens have rotated through
+  // the `session_version`-aware /login, /select-shop, and
+  // /change-password flows (tasks 3.2 / 3.3 / 3.5).
+  STRICT_SESSION_VERSION_CHECK: booleanFromEnv.default(false),
+
+  // MULTI_VENDOR_PRODUCT_APPROVAL — opt-in HQ approval workflow for
+  // newly created Shop_Products (R23.10, R23.11, R23.22, R23.23 /
+  // multi-vendor design §3.2.3 + §17.3). Default false preserves
+  // backward-compatible "born APPROVED" behaviour. When true:
+  //   1. The manual-create path persists Shop_Products with
+  //      `approval_status='PENDING'`.
+  //   2. The HQ approve/reject endpoints under
+  //      `/api/v1/admin/shop-products/:id/{approve,reject}` are
+  //      ENABLED. While the flag is OFF those endpoints reply
+  //      503 FEATURE_DISABLED so callers can detect the gate without
+  //      probing route existence.
+  //   3. Customer-facing product queries gain
+  //      `approval_status='APPROVED'` to the existing visibility filter
+  //      (design §17.3).
+  MULTI_VENDOR_PRODUCT_APPROVAL: booleanFromEnv.default(false),
+
   // 2Factor.in SMS OTP
   TWO_FACTOR_API_KEY: z.string().optional(),
   TWO_FACTOR_TEMPLATE: z.string().default('GroceryAppOTP'),

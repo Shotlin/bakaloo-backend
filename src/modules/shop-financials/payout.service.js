@@ -34,6 +34,7 @@ import { getClient } from '../../config/database.js'
 import { ShopFinancialsWriteRepository } from './shop-financials.write.repository.js'
 import { ShopFinancialsService } from './shop-financials.service.js'
 import { ShopFinancialsRepository } from './shop-financials.repository.js'
+import { emit as emitAudit } from '../../utils/audit-log.js'
 import {
   LedgerWriteService,
   ShopTransactionsService,
@@ -312,6 +313,18 @@ export class PayoutService {
           },
           'Payout held — missing bank details'
         )
+
+        // R28.4 — fire-and-forget audit for payout_held
+        emitAudit('payout_held', {
+          actor_user_id: null,
+          actor_role: null,
+          actor_shop_id: locked.shop_id,
+          target_type: 'shop_financial',
+          target_id: financialId,
+          before: { payout_status: locked.payout_status },
+          after: { payout_status: 'HELD', reason: 'missing bank details' },
+        })
+
         result = {
           financialId,
           shopId: locked.shop_id,
@@ -421,6 +434,21 @@ export class PayoutService {
         },
         'Payout paid'
       )
+
+      // R28.4 — fire-and-forget audit for payout_completed
+      emitAudit('payout_completed', {
+        actor_user_id: null,
+        actor_role: null,
+        actor_shop_id: paid.shop_id,
+        target_type: 'shop_financial',
+        target_id: financialId,
+        before: { payout_status: 'PROCESSING' },
+        after: {
+          payout_status: 'PAID',
+          payout_ref: disbursement?.payoutRef || null,
+          payout_amount: payoutAmount,
+        },
+      })
 
       result = {
         financialId,
@@ -545,6 +573,18 @@ export class PayoutService {
           },
           'Payout held — max attempts reached'
         )
+
+        // Task 8.11: emit payout_held audit for max-attempts case
+        emitAudit('payout_held', {
+          actor_user_id: null,
+          actor_role: null,
+          actor_shop_id: current.shop_id,
+          target_type: 'shop_financial',
+          target_id: financialId,
+          before: { payout_status: 'PROCESSING' },
+          after: { payout_status: 'HELD', reason: 'max_attempts', attempt_count: newAttempts },
+        })
+
         return {
           financialId,
           shopId: current.shop_id,
@@ -663,6 +703,18 @@ export class PayoutService {
         },
         'Admin payout transition'
       )
+
+      // R28.4 / Task 8.11 — fire-and-forget audit for payout state changes
+      const auditAction = opts.to === 'HELD' ? 'payout_held' : 'payout_released'
+      emitAudit(auditAction, {
+        actor_user_id: actorId,
+        actor_role: 'ADMIN',
+        actor_shop_id: null,
+        target_type: 'shop_financial',
+        target_id: financialId,
+        before: { payout_status: current.payout_status },
+        after: { payout_status: updated.payout_status, shop_id: updated.shop_id },
+      })
 
       return { ok: true, row: updated }
     } catch (err) {

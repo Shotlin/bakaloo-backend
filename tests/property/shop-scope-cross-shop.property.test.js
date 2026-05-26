@@ -1,11 +1,14 @@
 // Feature: multi-vendor-system, Property 17: Cross-Shop Access Rejection
-// **Validates: Requirements 2.9, 13.6**
+// **Validates: Requirements R17.5**
 //
 // Property:
 //   For any non-admin request where the JWT shop_id differs from the resource's
-//   shop_id, the platform must reject with HTTP 403 and code SHOP_SCOPE_MISMATCH.
-//   When they match, OR the caller is a Super Admin (role === 'ADMIN'),
-//   the request must pass.
+//   shop_id, the platform must reject with HTTP 403 and code
+//   CROSS_SHOP_ACCESS_DENIED (R17 AC#5). When they match, OR the caller is an
+//   HQ_User (role === 'ADMIN'), the request must pass.
+//
+//   The legacy alias ERROR_CODES.SHOP_SCOPE_MISMATCH continues to resolve to
+//   the same string value so older callers are unaffected.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fc from 'fast-check'
@@ -82,7 +85,7 @@ beforeEach(() => {
 // Property 17 — Pure decision (assertShopMatch)
 // ═══════════════════════════════════════════════════════════════
 describe('Property 17: Cross-Shop Access Rejection — assertShopMatch', () => {
-  it('rejects every non-admin request where jwtShopId !== resourceShopId with 403 SHOP_SCOPE_MISMATCH', () => {
+  it('rejects every non-admin request where jwtShopId !== resourceShopId with 403 CROSS_SHOP_ACCESS_DENIED', () => {
     fc.assert(
       fc.property(
         nonAdminRoleArb,
@@ -95,14 +98,14 @@ describe('Property 17: Cross-Shop Access Rejection — assertShopMatch', () => {
           })
           expect(decision.allowed).toBe(false)
           expect(decision.status).toBe(403)
-          expect(decision.code).toBe('SHOP_SCOPE_MISMATCH')
+          expect(decision.code).toBe('CROSS_SHOP_ACCESS_DENIED')
         }
       ),
       { numRuns: 100 }
     )
   })
 
-  it('rejects every non-admin request whose JWT carries no shop_id with 403 SHOP_SCOPE_MISMATCH', () => {
+  it('rejects every non-admin request whose JWT carries no shop_id with 403 CROSS_SHOP_ACCESS_DENIED', () => {
     fc.assert(
       fc.property(
         nonAdminRoleArb,
@@ -116,7 +119,7 @@ describe('Property 17: Cross-Shop Access Rejection — assertShopMatch', () => {
           })
           expect(decision.allowed).toBe(false)
           expect(decision.status).toBe(403)
-          expect(decision.code).toBe('SHOP_SCOPE_MISMATCH')
+          expect(decision.code).toBe('CROSS_SHOP_ACCESS_DENIED')
         }
       ),
       { numRuns: 100 }
@@ -178,7 +181,7 @@ describe('Property 17: Cross-Shop Access Rejection — assertShopMatch', () => {
 // Property 17 — Fastify preHandler integration (requireShopMatch)
 // ═══════════════════════════════════════════════════════════════
 describe('Property 17: Cross-Shop Access Rejection — requireShopMatch', () => {
-  it('non-admin: jwtShopId !== resourceShopId → reply.code(403) SHOP_SCOPE_MISMATCH', async () => {
+  it('non-admin: jwtShopId !== resourceShopId → reply.code(403) CROSS_SHOP_ACCESS_DENIED', async () => {
     await fc.assert(
       fc.asyncProperty(
         nonAdminRoleArb,
@@ -197,7 +200,7 @@ describe('Property 17: Cross-Shop Access Rejection — requireShopMatch', () => 
           expect(reply.statusCode).toBe(403)
           expect(reply.payload).toBeTruthy()
           expect(reply.payload.success).toBe(false)
-          expect(reply.payload.code).toBe('SHOP_SCOPE_MISMATCH')
+          expect(reply.payload.code).toBe('CROSS_SHOP_ACCESS_DENIED')
         }
       ),
       { numRuns: 100 }
@@ -255,7 +258,7 @@ describe('Property 17: Cross-Shop Access Rejection — requireShopMatch', () => 
     )
   })
 
-  it('non-admin without JWT shop scope but resource is shop-owned → 403 SHOP_SCOPE_MISMATCH', async () => {
+  it('non-admin without JWT shop scope but resource is shop-owned → 403 CROSS_SHOP_ACCESS_DENIED', async () => {
     await fc.assert(
       fc.asyncProperty(
         nonAdminRoleArb,
@@ -273,7 +276,7 @@ describe('Property 17: Cross-Shop Access Rejection — requireShopMatch', () => 
           await handler(req, reply)
 
           expect(reply.statusCode).toBe(403)
-          expect(reply.payload.code).toBe('SHOP_SCOPE_MISMATCH')
+          expect(reply.payload.code).toBe('CROSS_SHOP_ACCESS_DENIED')
         }
       ),
       { numRuns: 100 }

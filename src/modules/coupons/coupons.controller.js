@@ -1,5 +1,6 @@
 import { success, error } from '../../utils/apiResponse.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
+import { ERROR_CODES, httpStatusFor } from '../../constants/errors.js'
 
 /**
  * Coupons controller — thin HTTP layer
@@ -7,6 +8,22 @@ import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 export class CouponsController {
   constructor(service) {
     this.service = service
+  }
+
+  /**
+   * Extract actor context from request for audit and scope enforcement.
+   */
+  _actorCtx(request) {
+    return {
+      userId: request.user?.id ?? null,
+      role: request.user?.role ?? null,
+      platformRole: request.user?.platform_role ?? request.user?.platformRole ?? null,
+      shopRole: request.user?.shopRole ?? request.user?.shop_role ?? null,
+      shopId: request.shopId ?? request.user?.shopId ?? request.user?.shop_id ?? null,
+      permissions: request.user?.permissions ?? [],
+      ip: request.ip ?? null,
+      userAgent: request.headers?.['user-agent'] ?? null,
+    }
   }
 
   /** POST /validate */
@@ -17,7 +34,7 @@ export class CouponsController {
       request.body.cartTotal
     )
     if (!result.valid) {
-      return reply.code(400).send(error(result.message, 'INVALID_COUPON'))
+      return reply.code(400).send(error(result.message, result.code || 'INVALID_COUPON'))
     }
     return reply.code(200).send(success(result, 'Coupon is valid'))
   }
@@ -40,18 +57,23 @@ export class CouponsController {
     return reply.code(200).send(success(result.data, 'Coupons fetched', { pagination }))
   }
 
-  /** POST / — Admin */
+  /** POST / — Admin (task 9.2: scope enforcement) */
   async create(request, reply) {
-    const result = await this.service.create(request.body)
+    const actor = this._actorCtx(request)
+    const result = await this.service.create(request.body, actor)
+
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'DUPLICATE'))
+      const httpCode = httpStatusFor(result.code) || 400
+      return reply.code(httpCode).send(error(result.message, result.code || 'DUPLICATE'))
     }
     return reply.code(201).send(success(result.coupon, 'Coupon created'))
   }
 
   /** PUT /:id — Admin */
   async update(request, reply) {
-    const result = await this.service.update(request.params.id, request.body)
+    const actor = this._actorCtx(request)
+    const result = await this.service.update(request.params.id, request.body, actor)
+
     if (!result.success) {
       const code = result.message === 'Coupon not found' ? 404 : 400
       return reply.code(code).send(error(result.message, code === 404 ? 'NOT_FOUND' : 'DUPLICATE'))
@@ -61,7 +83,9 @@ export class CouponsController {
 
   /** DELETE /:id — Admin */
   async delete(request, reply) {
-    const result = await this.service.delete(request.params.id)
+    const actor = this._actorCtx(request)
+    const result = await this.service.delete(request.params.id, actor)
+
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }

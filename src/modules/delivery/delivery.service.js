@@ -350,6 +350,9 @@ export class DeliveryService {
       message: 'Your order is on its way!',
     }, [assignment.customer_id, riderId])
 
+    // Task 12.6: Emit Socket.IO events for OUT_FOR_DELIVERY transition
+    this._emitOutForDeliveryEvents(orderId, riderId, assignment)
+
     await this._queueNotification(
       assignment.customer_id,
       buildCustomerOrderEventNotification({
@@ -530,14 +533,14 @@ export class DeliveryService {
     return await this.repository.getDeliveryPayouts(riderId, { page, limit })
   }
 
-  async getStoreInfo() {
-    const store = await this.repository.getStoreSettings()
+  async getStoreInfo(shopId) {
+    const shop = await this.repository.getShopInfo(shopId)
     return {
-      name: store?.name || 'Bakaloo Store',
-      address: store?.address || '',
-      phone: store?.phone || '',
-      lat: Number(store?.lat) || 0,
-      lng: Number(store?.lng) || 0,
+      name: shop?.name || 'Bakaloo Store',
+      address: shop?.address || '',
+      phone: shop?.phone || '',
+      lat: Number(shop?.pickup_lat) || 0,
+      lng: Number(shop?.pickup_lng) || 0,
     }
   }
 
@@ -586,6 +589,31 @@ export class DeliveryService {
       }
     } catch (err) {
       logger.error({ err, orderId, riderId }, 'Failed to emit order expiry')
+    }
+  }
+
+  /**
+   * Task 12.6: Emit Socket.IO events on OUT_FOR_DELIVERY transition
+   * (a) customer channel — rider name, phone, live coords
+   * (b) shop dashboard channel scoped to shop_id
+   * (c) rider channel
+   * HQ_Users in HQ_MODE receive on global delivery channel
+   */
+  _emitOutForDeliveryEvents(orderId, riderId, assignment) {
+    try {
+      if (this.fastify?.emitOutForDelivery) {
+        this.fastify.emitOutForDelivery({
+          orderId,
+          shopId: assignment.shop_id || null,
+          customerId: assignment.customer_id || null,
+          riderId,
+          riderName: assignment.rider_name || null,
+          riderPhone: assignment.rider_phone || null,
+          orderNumber: assignment.order_number || null,
+        })
+      }
+    } catch (err) {
+      logger.error({ err, orderId, riderId }, 'Failed to emit OUT_FOR_DELIVERY events')
     }
   }
 

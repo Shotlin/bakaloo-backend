@@ -147,6 +147,28 @@ export class AdminRidersRepository {
     return profile
   }
 
+  async getApprovalStatus(riderId) {
+    const { rows: [profile] } = await query(
+      `SELECT user_id, is_approved,
+              COALESCE(approval_status, CASE WHEN is_approved THEN 'APPROVED' ELSE 'PENDING' END) AS approval_status
+       FROM rider_profiles
+       WHERE user_id = $1`,
+      [riderId]
+    )
+    return profile || null
+  }
+
+  async setApprovalStatus(riderId, status) {
+    const { rows: [profile] } = await query(
+      `UPDATE rider_profiles
+       SET approval_status = $1, is_approved = true, updated_at = NOW()
+       WHERE user_id = $2
+       RETURNING user_id, approval_status, is_approved`,
+      [status, riderId]
+    )
+    return profile || null
+  }
+
   async getDocuments(riderId) {
     const { rows } = await query(
       'SELECT * FROM rider_documents WHERE rider_id = $1 ORDER BY uploaded_at DESC',

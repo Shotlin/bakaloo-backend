@@ -176,6 +176,23 @@ export const scheduledOrdersQueue = new Queue('scheduled-orders', {
   },
 })
 
+/**
+ * Report pre-compute queue — caches results of slow reports (>100ms median)
+ * into Redis under deterministic keys (Requirements 14.6, design.md).
+ *
+ * Concurrency 2: report queries are read-only and can safely overlap.
+ * Retry 3× exponential backoff covers transient DB/Redis failures.
+ */
+export const reportPrecomputeQueue = new Queue('report-precompute', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 3000 },
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
+})
+
 // ─── WORKERS ─────────────────────────────────────────────
 
 const workers = []
@@ -351,7 +368,15 @@ export function startSettlementWorker(processor) {
 
   worker.on('failed', (job, err) => {
     logger.error(
-      { jobId: job?.id, name: job?.name, err: err.message },
+      {
+        jobId: job?.id,
+        name: job?.name,
+        err: err.message,
+        shop_id: job?.data?.shopId || null,
+        period_start: job?.data?.date || job?.data?.periodStart || null,
+        attempt: job?.attemptsMade,
+        action: 'settlement_job_failed',
+      },
       'Settlement job failed'
     )
   })
@@ -382,7 +407,15 @@ export function startPayoutWorker(processor) {
 
   worker.on('failed', (job, err) => {
     logger.error(
-      { jobId: job?.id, name: job?.name, err: err.message },
+      {
+        jobId: job?.id,
+        name: job?.name,
+        err: err.message,
+        financialId: job?.data?.financialId || null,
+        type: job?.data?.type || job?.name,
+        attempt: job?.attemptsMade,
+        action: 'payout_job_failed',
+      },
       'Payout job failed'
     )
   })
@@ -428,6 +461,44 @@ export function startStockNotificationsWorker(processor) {
 }
 
 /**
+ * Start report-precompute worker — runs slow report queries and caches
+ * results to Redis under deterministic keys (Requirements 14.6).
+ *
+ * Concurrency 2: report queries are read-only and can safely overlap
+ * without contention on shared rows.
+ */
+export function startReportPrecomputeWorker(processor) {
+  const worker = new Worker('report-precompute', processor, {
+    connection,
+    concurrency: 2,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug(
+      { jobId: job.id, name: job.name },
+      'Report-precompute job completed'
+    )
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      {
+        jobId: job?.id,
+        name: job?.name,
+        err: err.message,
+        reportType: job?.data?.reportType || null,
+        action: 'report_precompute_job_failed',
+      },
+      'Report-precompute job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Report-precompute worker started')
+  return worker
+}
+
+/**
  * Close all queues and workers (graceful shutdown)
  */
 export async function closeBullMQ() {
@@ -443,5 +514,6 @@ export async function closeBullMQ() {
   await settlementQueue.close()
   await payoutQueue.close()
   await stockNotificationsQueue.close()
+  await reportPrecomputeQueue.close()
   logger.info('BullMQ queues and workers closed')
 }

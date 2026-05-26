@@ -4,6 +4,14 @@ import { query } from '../../config/database.js'
  * Shops repository — all SQL queries for shops
  * NEVER uses SELECT * — always named columns
  * All queries use parameterized placeholders ($1, $2...)
+ *
+ * Note (R14.7 / design §3.3): Phase A migrations 039–047 do NOT add any new
+ * columns to the `shops` table itself. The new multi-vendor columns live on
+ * sibling tables and are projected by their own repositories:
+ *   - `orders.auto_assignment_status`  (migration 040) → orders repository
+ *   - `shop_products.approval_status`, `approved_at`, `approved_by`,
+ *     `rejection_reason` (migration 041) → shop-products repository
+ * Every SELECT in this file already enumerates columns explicitly per R14.7.
  */
 export class ShopsRepository {
   /**

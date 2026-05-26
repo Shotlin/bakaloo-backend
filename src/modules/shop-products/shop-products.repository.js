@@ -1,4 +1,63 @@
 import { query } from '../../config/database.js'
+import { ERROR_CODES, httpStatusFor } from '../../constants/errors.js'
+
+/**
+ * Stock_Movement_Type vocabulary — must stay in sync with the
+ * `chk_stock_movements_type` CHECK constraint in migration 042.
+ *
+ * @see Requirements R23.2, R23.4
+ */
+export const STOCK_MOVEMENT_TYPES = Object.freeze({
+  MANUAL_ADJUSTMENT: 'MANUAL_ADJUSTMENT',
+  ORDER_DEDUCTION: 'ORDER_DEDUCTION',
+  CANCELLATION_RESTORE: 'CANCELLATION_RESTORE',
+  DAMAGED_STOCK: 'DAMAGED_STOCK',
+  RETURN_STOCK: 'RETURN_STOCK',
+})
+
+const ALLOWED_STOCK_MOVEMENT_TYPES = new Set(Object.values(STOCK_MOVEMENT_TYPES))
+
+/**
+ * Stock_Movement_Source vocabulary — must stay in sync with the
+ * `chk_stock_movements_source` CHECK constraint in migration 042.
+ *
+ * @see Requirements R23.2, R23.4
+ */
+export const STOCK_MOVEMENT_SOURCES = Object.freeze({
+  DASHBOARD: 'DASHBOARD',
+  ORDER: 'ORDER',
+  JOB: 'JOB',
+  API: 'API',
+})
+
+const ALLOWED_STOCK_MOVEMENT_SOURCES = new Set(
+  Object.values(STOCK_MOVEMENT_SOURCES)
+)
+
+/**
+ * Build a typed error suitable for callers that translate `err.code` into an
+ * HTTP status via `httpStatusFor` (see `src/constants/errors.js`).
+ *
+ * The returned `Error` carries:
+ *   - `code`        — one of `ERROR_CODES`
+ *   - `statusCode`  — HTTP status (kept in sync with `httpStatusFor`)
+ *   - `details`     — structured context (e.g. `{ before, after }`) for logs
+ *
+ * Used by `applyStockChange` to surface STOCK_NEGATIVE_FORBIDDEN, validation
+ * errors on `type`/`source`, and product-not-found cases.
+ *
+ * @param {string} code      one of `ERROR_CODES.*`
+ * @param {string} message   human-readable message (no PII)
+ * @param {object} [details] structured context for logging
+ * @returns {Error & { code: string, statusCode: number, details?: object }}
+ */
+function applyStockChangeError(code, message, details) {
+  const err = new Error(message)
+  err.code = code
+  err.statusCode = httpStatusFor(code)
+  if (details) err.details = details
+  return err
+}
 
 /**
  * Shop Products repository — all SQL queries for shop_products
@@ -15,12 +74,18 @@ import { query } from '../../config/database.js'
 export class ShopProductsRepository {
   // ────────────────────────────────────────────────────────
   // Column projections — keep these in sync with the schema
+  //
+  // Approval columns (approval_status, approved_at, approved_by,
+  // rejection_reason) were added by migration 041_shop_products_approval.sql
+  // for R23 AC#10/AC#11/AC#22/AC#23 and are surfaced here per R14.7
+  // (named columns, never SELECT *) and design §3.3.
   // ────────────────────────────────────────────────────────
   static SELECT_COLUMNS = `
     id, shop_id, product_id,
     price, sale_price, cost_price,
     stock_quantity, low_stock_threshold, max_order_qty,
     is_available, sold_out_at,
+    approval_status, approved_at, approved_by, rejection_reason,
     deleted_at, created_at, updated_at
   `
 
@@ -157,6 +222,7 @@ export class ShopProductsRepository {
           sp.price, sp.sale_price, sp.cost_price,
           sp.stock_quantity, sp.low_stock_threshold, sp.max_order_qty,
           sp.is_available, sp.sold_out_at,
+          sp.approval_status, sp.approved_at, sp.approved_by, sp.rejection_reason,
           sp.deleted_at, sp.created_at, sp.updated_at,
           p.name AS product_name,
           -- products.images is JSONB (array of URLs). Take the first element
@@ -337,6 +403,492 @@ export class ShopProductsRepository {
        WHERE id = $2 AND shop_id = $3 AND deleted_at IS NULL
        RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
       [newStockQuantity, id, shopId]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Centralized stock-write entry point — every change to
+   * `shop_products.stock_quantity` MUST flow through this method so that
+   * exactly one `stock_movements` row is appended in the same transaction
+   * (R23.4, R23.14, design §8.1). This is the single insertion path
+   * referenced by every order / cancellation / manual-adjust / damage /
+   * return code path.
+   *
+   * Behavior (single transaction owned by the caller):
+   *   1. `SELECT … FOR UPDATE` on `shop_products` by id, returning
+   *      `shop_id`, `product_id`, and `stock_quantity` (the lock and the
+   *      current state). Serializes concurrent writers (R3.8, R23.14,
+   *      R11.7). Soft-deleted rows are not lockable.
+   *   2. Compute `quantity_after = quantity_before + delta`. Reject with
+   *      `STOCK_NEGATIVE_FORBIDDEN` (HTTP 409) if the result would go below
+   *      zero (R23.9). The DB CHECK constraint
+   *      `chk_shop_products_stock_quantity` is the final defence — the
+   *      service-level guard just gives callers a nicer error code than a
+   *      raw 23514.
+   *   3. Delegate the UPDATE to `applyStockUpdate()` so the
+   *      `is_available` / `sold_out_at` transition logic lives in exactly
+   *      one place (R11.1, R11.6, R11.8):
+   *        - new=0 → is_available=false, sold_out_at=NOW()
+   *        - new>0 AND prev was 0 → is_available=true, sold_out_at=NULL
+   *        - otherwise: leave is_available / sold_out_at unchanged
+   *   4. INSERT one row into the append-only `stock_movements` ledger
+   *      (R23.1, R23.2, R23.4) with `quantity_before`, `quantity_after`,
+   *      and the actor / source / order context.
+   *
+   * Caller contract:
+   *   - MUST pass a transactional client. The method throws a
+   *     `VALIDATION_ERROR` if `client` is missing — the plain pool query
+   *     helper cannot hold the row lock across the UPDATE + INSERT.
+   *   - Owns BEGIN / COMMIT / ROLLBACK. This method never opens or closes
+   *     a transaction; on any thrown error the caller MUST ROLLBACK so the
+   *     stock_movements INSERT is also rolled back (preserves the "exactly
+   *     one ledger row per stock change" invariant of R23.4).
+   *   - Passes `actor.userId` + `actor.shopRole` for DASHBOARD / API
+   *     sources; leaves them `null` for ORDER / JOB sources (system
+   *     writes).
+   *   - Populates `orderId` for `ORDER_DEDUCTION`, `CANCELLATION_RESTORE`,
+   *     and `RETURN_STOCK` so the order-detail "stock impact" view can
+   *     join via `idx_stock_movements_order` (design §3.2.4).
+   *   - Cache invalidation (`bakaloo:shop-products:*` SCAN) runs from the
+   *     service layer **after** COMMIT (R23.13).
+   *
+   * Validation:
+   *   - `type` must be one of MANUAL_ADJUSTMENT, ORDER_DEDUCTION,
+   *     CANCELLATION_RESTORE, DAMAGED_STOCK, RETURN_STOCK
+   *     (chk_stock_movements_type, migration 042).
+   *   - `source` must be one of DASHBOARD, ORDER, JOB, API
+   *     (chk_stock_movements_source, migration 042).
+   *   - `delta` must be a finite, non-zero integer.
+   *   Each is validated before issuing SQL so the caller gets a structured
+   *   `VALIDATION_ERROR` instead of a raw 23514 from PostgreSQL.
+   *
+   * Errors thrown (all carry `{ code, statusCode }` so callers can map to
+   * the API envelope via `httpStatusFor`):
+   *   - VALIDATION_ERROR (400)         — missing client, bad `type`,
+   *                                      `source`, or `delta`
+   *   - PRODUCT_NOT_FOUND (404)        — shop_product missing or
+   *                                      soft-deleted
+   *   - STOCK_NEGATIVE_FORBIDDEN (409) — resulting stock would be < 0
+   *
+   * @param {import('pg').PoolClient} client - Transactional client; caller
+   *   owns BEGIN/COMMIT/ROLLBACK. REQUIRED — throws if missing.
+   * @param {object} params
+   * @param {string} params.shopProductId - shop_products.id (UUID)
+   * @param {number} params.delta         - Signed integer delta (non-zero)
+   * @param {'MANUAL_ADJUSTMENT'|'ORDER_DEDUCTION'|'CANCELLATION_RESTORE'|'DAMAGED_STOCK'|'RETURN_STOCK'} params.type
+   * @param {'DASHBOARD'|'ORDER'|'JOB'|'API'} params.source
+   * @param {string|null} [params.reason]   - Optional free-text (≤500 chars)
+   * @param {{ userId: string|null, shopRole: string|null }|null} [params.actor]
+   *   Actor context. `userId` is a users.id (null for JOB/ORDER system
+   *   writes); `shopRole` is the actor's Shop_Staff_Record role at write
+   *   time (null when no human acted).
+   * @param {object|null} [params.metadata] - JSONB context (defaults to {})
+   * @param {string|null} [params.orderId]  - orders.id for ORDER_DEDUCTION /
+   *   CANCELLATION_RESTORE / RETURN_STOCK
+   * @returns {Promise<{ stockProduct: object, movement: object }>}
+   *   `stockProduct` is the updated `shop_products` row (full
+   *   SELECT_COLUMNS projection); `movement` is the inserted
+   *   `stock_movements` row.
+   *
+   * @see Requirements R23.4, R23.14, R11.1, R11.7, R11.8
+   *      (also: R3.8, R23.1, R23.2, R23.9, R11.6)
+   * @see Design §8.1 of .kiro/specs/multi-vendor-system/design.md
+   */
+  async applyStockChange(
+    client,
+    {
+      shopProductId,
+      delta,
+      type,
+      reason = null,
+      actor = null,
+      source,
+      metadata = null,
+      orderId = null,
+    } = {}
+  ) {
+    // 0a. Reject missing transaction client up front. Without a single
+    //     client holding BEGIN, the SELECT FOR UPDATE cannot serialize
+    //     concurrent writers (R23.14) and the UPDATE + INSERT cannot be
+    //     rolled back together (breaks R23.4).
+    if (!client || typeof client.query !== 'function') {
+      throw applyStockChangeError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'applyStockChange requires a transactional pg client',
+        { got: typeof client }
+      )
+    }
+
+    // 0b. Validate enum vocabulary BEFORE issuing SQL so callers get a
+    //     structured VALIDATION_ERROR instead of a raw 23514 from PostgreSQL
+    //     (chk_stock_movements_type / chk_stock_movements_source).
+    if (!ALLOWED_STOCK_MOVEMENT_TYPES.has(type)) {
+      throw applyStockChangeError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Invalid stock_movements.type: ${String(type)}`,
+        { allowed: Array.from(ALLOWED_STOCK_MOVEMENT_TYPES), got: type }
+      )
+    }
+    if (!ALLOWED_STOCK_MOVEMENT_SOURCES.has(source)) {
+      throw applyStockChangeError(
+        ERROR_CODES.VALIDATION_ERROR,
+        `Invalid stock_movements.source: ${String(source)}`,
+        { allowed: Array.from(ALLOWED_STOCK_MOVEMENT_SOURCES), got: source }
+      )
+    }
+    if (
+      typeof delta !== 'number' ||
+      !Number.isFinite(delta) ||
+      !Number.isInteger(delta) ||
+      delta === 0
+    ) {
+      throw applyStockChangeError(
+        ERROR_CODES.VALIDATION_ERROR,
+        'stock_movements.quantity_delta must be a non-zero finite integer',
+        { got: delta }
+      )
+    }
+
+    const actorUserId = actor?.userId ?? null
+    const actorShopRole = actor?.shopRole ?? null
+
+    // 1. SELECT FOR UPDATE on shop_products by id — the lock and the
+    //    current state. We resolve `shop_id` from the row itself so the
+    //    caller only has to supply the shop_product id (centralization
+    //    benefit: callers can't accidentally pass a mismatched shop_id).
+    //    Soft-deleted rows are excluded so the ledger never accrues
+    //    movements against a row a vendor has already retired.
+    const lockResult = await client.query(
+      `SELECT id, shop_id, product_id, stock_quantity
+         FROM shop_products
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [shopProductId]
+    )
+    if (lockResult.rows.length === 0) {
+      throw applyStockChangeError(
+        ERROR_CODES.PRODUCT_NOT_FOUND,
+        'Shop product not found',
+        { shopProductId }
+      )
+    }
+    const locked = lockResult.rows[0]
+    const shopId = locked.shop_id
+    const productId = locked.product_id
+    const before = Number(locked.stock_quantity)
+    const after = before + delta
+
+    // 2. Reject negative resulting stock (R23.9). The DB CHECK constraint
+    //    chk_shop_products_stock_quantity is the final defence.
+    if (after < 0) {
+      throw applyStockChangeError(
+        ERROR_CODES.STOCK_NEGATIVE_FORBIDDEN,
+        'Resulting stock_quantity cannot be negative',
+        { before, delta, after, shopProductId, shopId }
+      )
+    }
+
+    // 3. Delegate the UPDATE to applyStockUpdate so the
+    //    is_available / sold_out_at transitions live in one place
+    //    (R11.1, R11.6, R11.8). The same FOR UPDATE lock above guards
+    //    this UPDATE from concurrent writers.
+    const stockProduct = await this.applyStockUpdate(
+      client,
+      shopProductId,
+      shopId,
+      after
+    )
+    if (!stockProduct) {
+      // Defensive — the FOR UPDATE lock is held for the duration of the
+      // transaction so the row should still be present and not
+      // soft-deleted. If we ever hit this branch it indicates a logic
+      // error rather than a user-facing condition.
+      throw applyStockChangeError(
+        ERROR_CODES.PRODUCT_NOT_FOUND,
+        'Shop product not found during stock update',
+        { shopProductId, shopId }
+      )
+    }
+
+    // 4. INSERT stock_movements (append-only ledger, R23.1, R23.4). One
+    //    row per stock change, written on the same client so it commits
+    //    atomically with the shop_products UPDATE. Application role holds
+    //    INSERT+SELECT only — see migration 042 COMMENT ON TABLE.
+    const movementResult = await client.query(
+      `INSERT INTO stock_movements (
+         shop_id, shop_product_id, product_id, type, quantity_delta,
+         quantity_before, quantity_after, reason, order_id, actor_user_id,
+         actor_shop_role, source, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id, shop_id, shop_product_id, product_id, type,
+                 quantity_delta, quantity_before, quantity_after, reason,
+                 order_id, actor_user_id, actor_shop_role, source,
+                 metadata, created_at`,
+      [
+        shopId,
+        shopProductId,
+        productId,
+        type,
+        delta,
+        before,
+        after,
+        reason ?? null,
+        orderId ?? null,
+        actorUserId,
+        actorShopRole,
+        source,
+        JSON.stringify(metadata ?? {}),
+      ]
+    )
+
+    return {
+      stockProduct,
+      movement: movementResult.rows[0],
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Bulk price update — price-only writes (R23.12)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Update price / sale_price / cost_price on a single shop_product
+   * inside an open transaction. Caller MUST have already locked the row
+   * via {@link findByIdForUpdate} so the before/after snapshot is
+   * race-free with concurrent writers (R23.12, design §8.1).
+   *
+   * Stock fields are intentionally untouched — the bulk endpoint NEVER
+   * invokes the stock_movements ledger (design §8.1 explicitly: "Bulk
+   * price update never invokes [applyStockChange]; price-only changes
+   * don't write stock_movements per R23 AC#12"). The DB CHECK constraint
+   * on `sale_price < price` is the final defence; the schema-layer Zod
+   * refinement is the friendly first layer.
+   *
+   * Returns null when the row was deleted between the lock and this
+   * UPDATE (defensive — should be impossible while the FOR UPDATE lock
+   * is held).
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} shopProductId
+   * @param {string} shopId
+   * @param {{ price?: number, sale_price?: number, cost_price?: number }} prices
+   * @returns {Promise<object|null>}
+   */
+  async applyPriceUpdate(client, shopProductId, shopId, prices) {
+    const fields = []
+    const params = []
+    let idx = 1
+
+    if (prices.price !== undefined) {
+      fields.push(`price = $${idx++}`)
+      params.push(prices.price)
+    }
+    if (prices.sale_price !== undefined) {
+      fields.push(`sale_price = $${idx++}`)
+      params.push(prices.sale_price)
+    }
+    if (prices.cost_price !== undefined) {
+      fields.push(`cost_price = $${idx++}`)
+      params.push(prices.cost_price)
+    }
+
+    if (fields.length === 0) {
+      // No-op caller; surface the locked row unchanged.
+      const { rows } = await client.query(
+        `SELECT ${ShopProductsRepository.SELECT_COLUMNS}
+           FROM shop_products
+          WHERE id = $1 AND shop_id = $2 AND deleted_at IS NULL`,
+        [shopProductId, shopId]
+      )
+      return rows[0] || null
+    }
+
+    fields.push('updated_at = NOW()')
+    params.push(shopProductId, shopId)
+
+    const { rows } = await client.query(
+      `UPDATE shop_products SET ${fields.join(', ')}
+        WHERE id = $${idx} AND shop_id = $${idx + 1} AND deleted_at IS NULL
+        RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
+      params
+    )
+    return rows[0] || null
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Stock movements ledger reads (R23.5)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * List rows from the append-only `stock_movements` ledger for a shop,
+   * optionally filtered by product, type, actor, or date range.
+   *
+   * Pagination is default 20 / max 100 (caller responsibility — the Zod
+   * schema enforces those bounds before reaching the repo). Sort is
+   * always `created_at DESC` per R23.5; the supporting indexes are
+   * `idx_stock_movements_shop_created` (default) and
+   * `idx_stock_movements_type` (when type is present) — see migration
+   * 042.
+   *
+   * Joined with `products` (LEFT JOIN — products are FK NOT NULL but the
+   * left join avoids a hard failure if a master row is ever archived) so
+   * the response includes `product_name` for the dashboard without an
+   * N+1 lookup.
+   *
+   * Validates: Requirement R23.5
+   *
+   * @param {object} filters
+   * @param {string} filters.shopId         — required shop scope
+   * @param {string} [filters.productId]    — filter to one shop_product
+   *                                          (uses idx_stock_movements_shop_product)
+   * @param {string} [filters.type]         — filter on Stock_Movement_Type
+   * @param {string} [filters.actorUserId]  — filter on actor (uses
+   *                                          idx_stock_movements_actor partial)
+   * @param {Date}   [filters.fromDate]     — created_at >= fromDate
+   * @param {Date}   [filters.toDate]       — created_at <= toDate
+   * @param {number} [filters.page=1]
+   * @param {number} [filters.limit=20]     — caller-bounded to ≤100
+   * @returns {Promise<{items: Array, total: number}>}
+   */
+  async findStockMovements({
+    shopId,
+    productId,
+    type,
+    actorUserId,
+    fromDate,
+    toDate,
+    page = 1,
+    limit = 20,
+  }) {
+    const offset = (page - 1) * limit
+    const conditions = ['sm.shop_id = $1']
+    const params = [shopId]
+    let idx = 2
+
+    if (productId) {
+      conditions.push(`sm.shop_product_id = $${idx++}`)
+      params.push(productId)
+    }
+    if (type) {
+      conditions.push(`sm.type = $${idx++}`)
+      params.push(type)
+    }
+    if (actorUserId) {
+      conditions.push(`sm.actor_user_id = $${idx++}`)
+      params.push(actorUserId)
+    }
+    if (fromDate) {
+      conditions.push(`sm.created_at >= $${idx++}`)
+      params.push(fromDate)
+    }
+    if (toDate) {
+      conditions.push(`sm.created_at <= $${idx++}`)
+      params.push(toDate)
+    }
+
+    const where = conditions.join(' AND ')
+
+    const [dataResult, countResult] = await Promise.all([
+      query(
+        `SELECT
+            sm.id, sm.shop_id, sm.shop_product_id, sm.product_id,
+            sm.type, sm.quantity_delta, sm.quantity_before, sm.quantity_after,
+            sm.reason, sm.order_id, sm.actor_user_id, sm.actor_shop_role,
+            sm.source, sm.metadata, sm.created_at,
+            p.name AS product_name
+           FROM stock_movements sm
+           LEFT JOIN products p ON p.id = sm.product_id
+          WHERE ${where}
+          ORDER BY sm.created_at DESC
+          LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...params, limit, offset]
+      ),
+      query(
+        `SELECT COUNT(*)::int AS total
+           FROM stock_movements sm
+          WHERE ${where}`,
+        params
+      ),
+    ])
+
+    return {
+      items: dataResult.rows,
+      total: countResult.rows[0]?.total || 0,
+    }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Approval workflow — HQ-only (R23.10, R23.11)
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Lock a shop_product row by id (no shop scope) — used by HQ approve /
+   * reject endpoints which act across shops. Returns the canonical
+   * column projection plus the joined product_name for audit context.
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} id
+   * @returns {Promise<object|null>}
+   */
+  async findByIdForApprovalUpdate(client, id) {
+    const { rows } = await client.query(
+      `SELECT ${ShopProductsRepository.SELECT_COLUMNS}
+         FROM shop_products
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [id]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Set a shop_product to APPROVED inside an open transaction. Caller
+   * MUST have locked the row via {@link findByIdForApprovalUpdate}.
+   * Clears `rejection_reason` so a previously rejected row that gets
+   * approved doesn't carry the stale reason forward.
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} id
+   * @param {string} approverUserId
+   * @returns {Promise<object|null>}
+   */
+  async setApproved(client, id, approverUserId) {
+    const { rows } = await client.query(
+      `UPDATE shop_products
+          SET approval_status = 'APPROVED',
+              approved_at = NOW(),
+              approved_by = $2,
+              rejection_reason = NULL,
+              updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
+      [id, approverUserId]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Set a shop_product to REJECTED inside an open transaction. Caller
+   * MUST have locked the row via {@link findByIdForApprovalUpdate}.
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} id
+   * @param {string} approverUserId
+   * @param {string} reason — caller-validated 10-500 char string
+   * @returns {Promise<object|null>}
+   */
+  async setRejected(client, id, approverUserId, reason) {
+    const { rows } = await client.query(
+      `UPDATE shop_products
+          SET approval_status = 'REJECTED',
+              approved_at = NOW(),
+              approved_by = $2,
+              rejection_reason = $3,
+              updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
+      [id, approverUserId, reason]
     )
     return rows[0] || null
   }

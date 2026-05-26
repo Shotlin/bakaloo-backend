@@ -71,6 +71,26 @@ export class AdminRidersController {
     return success(profile, is_approved ? 'Rider approved' : 'Rider unapproved')
   }
 
+  /**
+   * Task 12.4: POST /api/v1/admin/riders/:riderId/approve
+   * Transitions approval_status from PENDING → APPROVED
+   */
+  async approveRiderStatus(request, reply) {
+    try {
+      const result = await svc.transitionApprovalStatus(request.params.id, request.user.id, request.ip)
+      if (!result) {
+        return reply.code(404).send(error('Rider profile not found', 'PRODUCT_NOT_FOUND'))
+      }
+      if (result.conflict) {
+        return reply.code(409).send(error(result.message, 'ORDER_STATE_INVALID'))
+      }
+      return success(result, 'Rider approved')
+    } catch (err) {
+      request.log.error({ err, riderId: request.params.id }, 'Failed to approve rider')
+      throw err
+    }
+  }
+
   async getDocuments(request, reply) {
     try {
       const data = await svc.getDocuments(request.params.id)

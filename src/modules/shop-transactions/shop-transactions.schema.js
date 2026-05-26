@@ -15,27 +15,43 @@ import { z } from 'zod'
  */
 
 // ─── Allowed enum values (mirror DB CHECK constraints) ──
+// V2 types (R24.1) + legacy types preserved for read-back (R24.15)
 export const TRANSACTION_TYPES = [
   'ORDER_REVENUE',
+  'PLATFORM_COMMISSION',
+  'DELIVERY_FEE',
+  'RIDER_COST',
+  'COUPON_DISCOUNT',
+  'TAX',
+  'REFUND',
+  'PAYOUT',
+  'ADJUSTMENT',
+  // Legacy (read-only, still accepted by DB CHECK)
   'COMMISSION_DEBIT',
   'DELIVERY_COST',
   'REFUND_DEBIT',
   'PAYOUT_CREDIT',
-  'ADJUSTMENT',
   'EXPENSE',
 ]
 
-export const REFERENCE_TYPES = ['ORDER', 'PAYOUT', 'ADJUSTMENT', 'EXPENSE']
+export const REFERENCE_TYPES = ['ORDER', 'PAYOUT', 'ADJUSTMENT', 'EXPENSE', 'REFUND', 'COUPON', 'TAX']
 
 // Credits add to the running balance (Requirement 7.7)
 export const CREDIT_TYPES = new Set([
   'ORDER_REVENUE',
+  'DELIVERY_FEE',
   'PAYOUT_CREDIT',
   'ADJUSTMENT',
 ])
 
 // Debits subtract from the running balance (Requirement 7.7)
 export const DEBIT_TYPES = new Set([
+  'PLATFORM_COMMISSION',
+  'RIDER_COST',
+  'COUPON_DISCOUNT',
+  'TAX',
+  'REFUND',
+  'PAYOUT',
   'COMMISSION_DEBIT',
   'DELIVERY_COST',
   'REFUND_DEBIT',

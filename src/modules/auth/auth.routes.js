@@ -9,6 +9,7 @@ import {
   refreshTokenSchema,
   logoutSchema,
   deleteAccountSchema,
+  myShopsSchema,
 } from './auth.schema.js'
 
 /**
@@ -80,6 +81,20 @@ export default async function authRoutes(fastify) {
       },
     },
   }, controller.logout.bind(controller))
+
+  // GET /my-shops — paginated active staff assignments for the requester [AUTH]
+  // Requirements: R19.5
+  // Design: §5.4
+  fastify.get('/my-shops', {
+    preHandler: [fastify.authenticate],
+    schema: myShopsSchema,
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: '1 minute',
+      },
+    },
+  }, controller.myShops.bind(controller))
 
   // DELETE /account — Delete user account [AUTH]
   fastify.delete('/account', {

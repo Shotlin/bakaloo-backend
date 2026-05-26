@@ -457,6 +457,40 @@ export class AuthService {
     }
   }
 
+  /**
+   * Get paginated active shop assignments for the authenticated user
+   * (used by `GET /api/v1/auth/my-shops`).
+   *
+   * No permission check beyond `fastify.authenticate` — the route returns
+   * the requester's own assignments only. Bounds (`page >= 1`,
+   * `1 <= limit <= 100`) are enforced by the JSON-Schema querystring
+   * validator on the route; the service re-clamps defensively so any
+   * direct in-process caller stays within bounds.
+   *
+   * Requirements: R19.5
+   * Design: §5.4
+   *
+   * @param {string} userId
+   * @param {{ page?: number, limit?: number }} pagination
+   * @returns {Promise<{ items: Array<object>, page: number, limit: number, total: number }>}
+   */
+  async getMyShops(userId, { page = 1, limit = 20 } = {}) {
+    const safePage = Math.max(1, Math.floor(Number(page) || 1))
+    const safeLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)))
+
+    const { items, total } = await this.repo.loadActiveShopAssignmentsPaginated(
+      userId,
+      { page: safePage, limit: safeLimit }
+    )
+
+    return {
+      items,
+      page: safePage,
+      limit: safeLimit,
+      total,
+    }
+  }
+
   async _queueBacklogAssignScan(source) {
     try {
       await orderQueue.add(

@@ -13,6 +13,7 @@ import {
   startPayoutWorker,
   startScheduledOrderWorker,
   startStockNotificationsWorker,
+  startReportPrecomputeWorker,
 } from '../config/bullmq.js'
 
 export async function startWorkerRuntime() {
@@ -44,6 +45,14 @@ export async function startWorkerRuntime() {
     '../workers/stock-notifications.worker.js'
   )
 
+  const { createReportPrecomputeProcessor } = await import(
+    '../workers/report-precompute.worker.js'
+  )
+
+  const { startEventLoopMonitor } = await import(
+    '../utils/event-loop-monitor.js'
+  )
+
   startNotificationWorker(processNotificationJob)
   startOrderWorker(processOrderJob)
   startSmsWorker(processSmsJob)
@@ -62,6 +71,13 @@ export async function startWorkerRuntime() {
   // when its Shop_Product transitions from stock 0 → positive
   // (Requirements 3.4, 11.6).
   startStockNotificationsWorker(createStockNotificationsProcessor())
+  // Report-precompute worker (task 13.4) — runs slow report queries
+  // (>100ms median) and caches results to Redis under deterministic keys.
+  startReportPrecomputeWorker(createReportPrecomputeProcessor())
+
+  // Event-loop blocking detector (task 13.6) — logs warning when
+  // the event loop is blocked for >100ms.
+  startEventLoopMonitor()
 
   try {
     await scheduleSettlementCron(settlementQueue)

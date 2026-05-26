@@ -9,6 +9,30 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+// `audit-log` opens a pg pool when imported — replace it with a no-op
+// mock so unit tests do not require a live database connection.
+vi.mock('../../../src/utils/audit-log.js', () => ({
+  emit: vi.fn(),
+  emitInTx: vi.fn(),
+}))
+
+// `getClient()` is called by `deactivate()` to run an atomic tx around
+// the soft-delete + audit emit (task 5.4 / R28 AC#6). Hand back a fake
+// pg client that accepts BEGIN/COMMIT/ROLLBACK so the transaction
+// wrapper resolves without a real Postgres.
+vi.mock('../../../src/config/database.js', () => {
+  const makeFakeClient = () => ({
+    query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
+    release: vi.fn(),
+  })
+  return {
+    pool: { query: vi.fn() },
+    query: vi.fn(),
+    getClient: vi.fn(async () => makeFakeClient()),
+    closePool: vi.fn(),
+  }
+})
+
 import { ShopStaffService } from '../../../src/modules/shop-staff/shop-staff.service.js'
 import { invalidateStaffActiveCache } from '../../../src/middlewares/shop-scope.js'
 
@@ -42,6 +66,15 @@ beforeEach(() => {
 describe('ShopStaffService.update — cache invalidation', () => {
   it('invalidates staff-active cache after a successful update', async () => {
     const repo = makeRepoMock()
+    // The service reads the existing record before applying the patch
+    // so the audit before-snapshot captures the pre-mutation state.
+    repo.findById.mockResolvedValueOnce({
+      id: STAFF_ID,
+      user_id: TARGET_USER_ID,
+      shop_id: SHOP_ID,
+      role: 'SHOP_VIEWER',
+      is_active: true,
+    })
     repo.update.mockResolvedValueOnce({
       id: STAFF_ID,
       user_id: TARGET_USER_ID,
@@ -66,8 +99,34 @@ describe('ShopStaffService.update — cache invalidation', () => {
     )
   })
 
-  it('does NOT invalidate the cache when the update fails (record missing)', async () => {
+  it('does NOT invalidate the cache when the record is missing (pre-update lookup)', async () => {
     const repo = makeRepoMock()
+    // findById returns null → service short-circuits with STAFF_NOT_FOUND
+    // BEFORE calling repo.update, so the cache is never touched.
+    repo.findById.mockResolvedValueOnce(null)
+    const service = new ShopStaffService(repo)
+
+    const result = await service.update(
+      STAFF_ID,
+      { is_active: false },
+      SHOP_ID,
+      REQUESTER_ID
+    )
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('STAFF_NOT_FOUND')
+    expect(repo.update).not.toHaveBeenCalled()
+    expect(invalidateStaffActiveCache).not.toHaveBeenCalled()
+  })
+
+  it('does NOT invalidate the cache when the UPDATE itself reports zero rows', async () => {
+    const repo = makeRepoMock()
+    repo.findById.mockResolvedValueOnce({
+      id: STAFF_ID,
+      user_id: TARGET_USER_ID,
+      shop_id: SHOP_ID,
+    })
+    // Race condition: row deleted between findById and update.
     repo.update.mockResolvedValueOnce(null)
     const service = new ShopStaffService(repo)
 

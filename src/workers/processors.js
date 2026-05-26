@@ -7,6 +7,7 @@ import { orderQueue } from '../config/bullmq.js'
 import { getSocketIo } from '../plugins/socketio.plugin.js'
 import { cacheDeletePattern } from '../utils/cache.js'
 import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/theme-cache.js'
+import { emit as emitAudit } from '../utils/audit-log.js'
 
 const DEFAULT_RIDER_EARNING = 25
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED']
@@ -447,7 +448,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
 
   const { rows: orderRows } = await query(
     `SELECT o.id, o.order_number, o.status, o.rider_id, o.total_amount, o.payment_method,
-            o.delivery_fee,
+            o.delivery_fee, o.shop_id,
             o.items, o.delivery_address, o.created_at,
             u.name AS customer_name, u.phone AS customer_phone
      FROM orders o
@@ -483,19 +484,51 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
     )
   }
 
-  const store = await getStoreSettings()
-  if (!store.lat || !store.lng) {
-    logger.warn({ orderId }, 'Auto-assign skipped: store coordinates not configured')
-    return { assigned: false, reason: 'STORE_COORDS_MISSING' }
+  // Task 12.1/12.2: Read pickup coordinates from the order's shop row
+  const store = await getShopInfoForOrder(order.shop_id)
+  if (!store || !Number.isFinite(store.pickup_lat) || !Number.isFinite(store.pickup_lng)) {
+    // Task 12.3: Missing shop coordinates → MANUAL_REQUIRED
+    logger.warn({ orderId, shopId: order.shop_id }, 'Auto-assign skipped: shop coordinates missing')
+    await query(
+      `UPDATE orders SET auto_assignment_status = 'MANUAL_REQUIRED', updated_at = NOW() WHERE id = $1`,
+      [orderId]
+    )
+    const io = getSocketIo()
+    if (io) {
+      io.to('hq:global').emit('order.auto_assignment_failed', {
+        orderId,
+        orderNumber: order.order_number,
+        shopId: order.shop_id || null,
+        reason: 'SHOP_COORDS_MISSING',
+        timestamp: new Date().toISOString(),
+      })
+    }
+    emitAudit('auto_assignment_failed', {
+      actor_user_id: null,
+      actor_role: null,
+      actor_shop_id: order.shop_id || null,
+      target_type: 'order',
+      target_id: orderId,
+      before: null,
+      after: { reason: 'SHOP_COORDS_MISSING', source },
+    })
+    return { assigned: false, reason: 'SHOP_COORDS_MISSING' }
   }
 
+  // Task 12.2: Select riders with status AVAILABLE, is_active=true, no non-terminal assignment
   const { rows: candidateRiders } = await query(
-    `SELECT rp.user_id, rp.current_lat, rp.current_lng
+    `SELECT rp.user_id, rp.current_lat, rp.current_lng, rp.last_active_at
      FROM rider_profiles rp
      JOIN users u ON u.id = rp.user_id
      WHERE rp.is_approved = true
+       AND rp.is_online = true
        AND u.is_active = true
-     ORDER BY rp.rating DESC, rp.total_deliveries DESC
+       AND NOT EXISTS (
+         SELECT 1 FROM delivery_assignments da
+         WHERE da.rider_id = rp.user_id
+           AND da.status IN ('ASSIGNED', 'ACCEPTED', 'IN_TRANSIT')
+       )
+     ORDER BY rp.last_active_at ASC NULLS LAST
      LIMIT 10000`
   )
 
@@ -522,7 +555,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
 
     let distance = null
     if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      const resolvedDistance = haversineDistanceKm(store.lat, store.lng, lat, lng)
+      const resolvedDistance = haversineDistanceKm(store.pickup_lat, store.pickup_lng, lat, lng)
       if (Number.isFinite(resolvedDistance)) {
         distance = resolvedDistance
       }
@@ -675,6 +708,22 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
   }
 
   if (!assignments.length) {
+    // R28.4 — fire-and-forget audit for auto_assignment_failed
+    emitAudit('auto_assignment_failed', {
+      actor_user_id: null,
+      actor_role: null,
+      actor_shop_id: order.shop_id || null,
+      target_type: 'order',
+      target_id: orderId,
+      before: null,
+      after: {
+        reason: hasOpenAssignedOffers
+          ? 'OFFERS_ALREADY_SYNCHRONIZED'
+          : 'NO_ELIGIBLE_RIDER_OFFERS_CREATED',
+        source,
+      },
+    })
+
     return {
       assigned: false,
       reason: hasOpenAssignedOffers
@@ -771,6 +820,24 @@ async function cancelStaleAssignedOffers(orderId) {
   return 0
 }
 
+async function getShopInfoForOrder(shopId) {
+  if (!shopId) return null
+  const { rows } = await query(
+    `SELECT id, name, address, phone, pickup_lat, pickup_lng
+     FROM shops
+     WHERE id = $1
+     LIMIT 1`,
+    [shopId]
+  )
+  const row = rows[0]
+  if (!row) return null
+  return {
+    ...row,
+    pickup_lat: toNumber(row.pickup_lat),
+    pickup_lng: toNumber(row.pickup_lng),
+  }
+}
+
 async function getStoreSettings() {
   const { rows } = await query(
     `SELECT key, value
@@ -859,8 +926,8 @@ function buildAssignedPayload({
       address: store.address,
       landmark: '',
       phone: store.phone,
-      lat: store.lat,
-      lng: store.lng,
+      lat: store.pickup_lat,
+      lng: store.pickup_lng,
     },
   }
 }

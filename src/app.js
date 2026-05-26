@@ -3,6 +3,7 @@ import { env } from './config/env.js'
 import { query } from './config/database.js'
 import { redis } from './config/redis.js'
 import { sanitize } from './middlewares/sanitize.js'
+import { installRouteCollector } from './utils/permission-audit.js'
 
 /**
  * Build and configure the Fastify application
@@ -46,6 +47,13 @@ export const buildApp = async () => {
 
   // ─── GLOBAL HOOKS ──────────────────────────────────────
   app.addHook('onRequest', sanitize)
+
+  // ─── PERMISSION AUDIT ROUTE COLLECTOR (R17 AC#9, design §4.5) ────
+  // Install BEFORE any module routes register so the `onRoute` hook fires
+  // for every dashboard endpoint. The collected array is exposed via
+  // `app.permissionAuditRoutes` so `src/server.js` can run the audit
+  // after `app.ready()` and decide whether to abort boot per task 2.7.
+  app.decorate('permissionAuditRoutes', installRouteCollector(app))
 
   // ─── MODULE ROUTES ─────────────────────────────────────
 
@@ -159,6 +167,33 @@ export const buildApp = async () => {
     prefix: '/api/v1/shop-products',
   })
 
+  // Shop Products — nested per-shop write surface (R23.8, R23.12)
+  // adjust-stock + bulk-price-update mounted at /api/v1/shops/:shopId/products
+  // so the dashboard's canonical Store_Mode URL pattern resolves without a
+  // separate URL rewrite layer (design §6.4). Same controller and service
+  // as the /api/v1/shop-products mount; permission gating lives on each
+  // route via requirePermission().
+  {
+    const { shopProductsNestedRoutes, shopStockMovementsRoutes, shopProductsAdminRoutes } =
+      await import('./modules/shop-products/shop-products.routes.js')
+    await app.register(shopProductsNestedRoutes, {
+      prefix: '/api/v1/shops/:shopId/products',
+    })
+    // Stock-movements ledger reader (R23.5)
+    await app.register(shopStockMovementsRoutes, {
+      prefix: '/api/v1/shops/:shopId/stock-movements',
+    })
+    // HQ-only admin approve/reject (R23.10, R23.11) — feature-flagged
+    await app.register(shopProductsAdminRoutes, {
+      prefix: '/api/v1/admin/shop-products',
+    })
+  }
+
+  // Shop Orders — store-scoped order operations (multi-vendor R22)
+  await app.register(import('./modules/shop-orders/routes.js'), {
+    prefix: '/api/v1/shop-orders',
+  })
+
   // Shop Transactions — read-only append-only ledger
   // (write side is exposed as LedgerWriteService for orders/refunds/payouts)
   await app.register(
@@ -181,6 +216,22 @@ export const buildApp = async () => {
     }
   )
 
+  // Shop Finance — store-scoped finance endpoints (task 8.8)
+  await app.register(
+    import('./modules/shop-finance/routes.js'),
+    {
+      prefix: '/api/v1/shop-finance',
+    }
+  )
+
+  // Admin Finance — HQ-scoped finance endpoints (task 8.9)
+  await app.register(
+    import('./modules/admin/finance/routes.js'),
+    {
+      prefix: '/api/v1/admin/finance',
+    }
+  )
+
   // Bulk Orders — large multi-vendor scheduled-delivery orders
   // (registered after shop-financials; scheduled-orders comes online in 10.2)
   await app.register(import('./modules/bulk-orders/bulk-orders.routes.js'), {
@@ -193,6 +244,36 @@ export const buildApp = async () => {
     import('./modules/scheduled-orders/scheduled-orders.routes.js'),
     {
       prefix: '/api/v1/scheduled-orders',
+    }
+  )
+
+  // Audit Logs — read-only endpoints (tasks 10.2, 10.3)
+  {
+    const { adminAuditLogsRoutes, shopAuditLogsRoutes } =
+      await import('./modules/audit-logs/audit-logs.routes.js')
+    // HQ-only reader (task 10.2)
+    await app.register(adminAuditLogsRoutes, {
+      prefix: '/api/v1/admin/audit-logs',
+    })
+    // Shop-scoped reader (task 10.3)
+    await app.register(shopAuditLogsRoutes, {
+      prefix: '/api/v1/shop-audit-logs',
+    })
+  }
+
+  // Admin Reports — HQ-scoped global reports (task 11.1)
+  await app.register(
+    import('./modules/admin/reports/routes.js'),
+    {
+      prefix: '/api/v1/admin/reports',
+    }
+  )
+
+  // Shop Reports — shop-scoped reports (task 11.2)
+  await app.register(
+    import('./modules/shop-reports/routes.js'),
+    {
+      prefix: '/api/v1/shop-reports',
     }
   )
 

@@ -84,7 +84,16 @@ export class ShopsController {
     const result = await this.service.update(
       paramsParsed.data.id,
       bodyParsed.data,
-      request.user.id
+      request.user.id,
+      {
+        ip: request.ip,
+        userAgent: request.headers['user-agent'] || null,
+        actorRole:
+          request.user?.platform_role ||
+          request.user?.shopRole ||
+          request.user?.role ||
+          null,
+      }
     )
 
     if (!result.success) {
