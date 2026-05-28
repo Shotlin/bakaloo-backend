@@ -16,13 +16,13 @@ const booleanFromEnv = z.preprocess((value) => {
 const envSchema = z.object({
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  PORT: z.coerce.number().default(3000),
+  PORT: z.coerce.number().default(4500),
   HOST: z.string().default('0.0.0.0'),
   API_VERSION: z.string().default('v1'),
   APP_NAME: z.string().default('GroceryApp'),
   FRONTEND_URL: z.string().url().optional(),
   ADMIN_URL: z.string().url().optional(),
-  CORS_ORIGINS: z.string().default('http://localhost:3001,http://localhost:3002'),
+  CORS_ORIGINS: z.string().default('http://localhost:4501,http://localhost:3001,http://localhost:3002'),
 
   // JWT
   JWT_ACCESS_SECRET: z.string().min(32),
