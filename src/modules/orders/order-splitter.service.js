@@ -306,6 +306,21 @@ export class OrderSplitterService {
       const orderItems = items.map((item) => ({
         productId: item.productId,
         shopId,
+        // Phase 3: track exact shop_product_id so order items can be
+        // audited back to the precise per-shop SKU that was fulfilled.
+        // Falls back to null for legacy callers (preserves backwards
+        // compatibility — the column on order_items is nullable).
+        shopProductId: item.shopProductId || null,
+        // Phase 3: option/family/badge metadata propagated into the
+        // order JSONB so customers and shop dashboards can see the
+        // selected option ("Tomato 500g") without rejoining products.
+        productFamilyId: item.productFamilyId || null,
+        familyName: item.familyName || null,
+        optionLabel: item.optionLabel || null,
+        netQuantity: item.netQuantity || null,
+        thumbnailUrl: item.thumbnailUrl || null,
+        foodType: item.foodType || 'NONE',
+        originTag: item.originTag || 'NONE',
         name: item.name,
         price: Number(item.salePrice ?? item.price ?? 0),
         quantity: item.quantity,

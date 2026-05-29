@@ -67,11 +67,28 @@ export class OrdersRepository {
     )
 
     // Insert denormalized order items
+    // Phase 3: also persist shop_product_id and shop_id so order items
+    // can be audited back to the exact per-shop SKU that fulfilled the
+    // line. Both columns are NULLABLE on order_items (migration 049),
+    // so legacy callers that don't pass shop_product_id continue to
+    // work; new orders created via OrderSplitter populate both.
     for (const item of items) {
       await client.query(
-        `INSERT INTO order_items (order_id, product_id, name, price, quantity, unit, total)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [rows[0].id, item.productId, item.name, item.price, item.quantity, item.unit, item.total]
+        `INSERT INTO order_items
+           (order_id, product_id, name, price, quantity, unit, total,
+            shop_product_id, shop_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          rows[0].id,
+          item.productId,
+          item.name,
+          item.price,
+          item.quantity,
+          item.unit,
+          item.total,
+          item.shopProductId || null,
+          item.shopId || rows[0].shop_id || null,
+        ]
       )
     }
 
@@ -405,10 +422,13 @@ export class OrdersRepository {
 
   /**
    * Get order items from order_items table
+   * Phase 3: surfaces shop_product_id and shop_id for audit/UI parity
+   * with the JSONB items column.
    */
   async getOrderItems(orderId) {
     const { rows } = await query(
-      `SELECT product_id, name, price, quantity, unit, total
+      `SELECT product_id, name, price, quantity, unit, total,
+              shop_product_id, shop_id
        FROM order_items
        WHERE order_id = $1`,
       [orderId]

@@ -118,6 +118,19 @@ export class ProductsController {
     return reply.code(200).send(success(products, 'Related products'))
   }
 
+  /** GET /:id/options — All purchasable options for a product family */
+  async getOptions(request, reply) {
+    const customerContext = resolveCustomerContext(request)
+    const result = await this.service.getProductOptions(
+      request.params.id,
+      customerContext
+    )
+    if (!result) {
+      return reply.code(404).send(error('Product not found', 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(result, 'Product options fetched'))
+  }
+
   /** POST / — Create product */
   async create(request, reply) {
     const result = await this.service.create(request.body)

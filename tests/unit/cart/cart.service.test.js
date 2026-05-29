@@ -64,6 +64,8 @@ function makeRepoMock() {
     findShopProductForUser: vi.fn(),
     findShopProductsForProduct: vi.fn().mockResolvedValue([]),
     findShopProductsForCart: vi.fn().mockResolvedValue([]),
+    // Phase 3: shop_product_id-based lookup
+    findShopProductByIdForUser: vi.fn(),
   }
 }
 
@@ -810,5 +812,305 @@ describe('CartService.validateCart', () => {
     const flattened = []
     for (const [, lines] of result.groupedByShop) flattened.push(...lines)
     expect(flattened).toHaveLength(result.items.length)
+  })
+})
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 3: shopProductId identity (option popup payload)
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('CartService.addItem — shopProductId identity (Phase 3)', () => {
+  it('resolves productId/shopId from shopProductId and adds an item', async () => {
+    const repo = makeRepoMock()
+    const sp = makeSpRow({ shop_product_id: SP_A1 })
+    repo.findShopProductByIdForUser.mockResolvedValue(sp)
+    repo.findShopProductsForCart.mockResolvedValue([sp])
+
+    const service = new CartService(repo)
+    const result = await service.addItem(USER_ID, {
+      shopProductId: SP_A1,
+      quantity: 2,
+    })
+
+    expect(result.success).toBe(true)
+    expect(repo.findShopProductByIdForUser).toHaveBeenCalledWith(USER_ID, SP_A1)
+    // Legacy product/shop lookups should NOT be hit when shopProductId is provided
+    expect(repo.findShopProductsForProduct).not.toHaveBeenCalled()
+    expect(repo.findShopProductForUser).not.toHaveBeenCalled()
+
+    const saved = repo.saveCart.mock.calls[0][1]
+    expect(saved).toEqual([{ productId: PROD_1, shopId: SHOP_A, quantity: 2 }])
+  })
+
+  it('rejects mismatched productId vs shopProductId with CART_ITEM_IDENTITY_CONFLICT', async () => {
+    const repo = makeRepoMock()
+    repo.findShopProductByIdForUser.mockResolvedValue(
+      makeSpRow({ shop_product_id: SP_A1 })
+    )
+
+    const service = new CartService(repo)
+    const result = await service.addItem(USER_ID, {
+      shopProductId: SP_A1,
+      productId: PROD_2, // does not match the resolved product_id (PROD_1)
+      quantity: 1,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('CART_ITEM_IDENTITY_CONFLICT')
+    expect(repo.saveCart).not.toHaveBeenCalled()
+  })
+
+  it('rejects mismatched shopId vs shopProductId with CART_ITEM_IDENTITY_CONFLICT', async () => {
+    const repo = makeRepoMock()
+    repo.findShopProductByIdForUser.mockResolvedValue(makeSpRow())
+
+    const service = new CartService(repo)
+    const result = await service.addItem(USER_ID, {
+      shopProductId: SP_A1,
+      shopId: SHOP_B, // does not match the resolved shop_id (SHOP_A)
+      quantity: 1,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('CART_ITEM_IDENTITY_CONFLICT')
+    expect(repo.saveCart).not.toHaveBeenCalled()
+  })
+
+  it('returns SHOP_NOT_AVAILABLE when shopProductId is unknown to user', async () => {
+    const repo = makeRepoMock()
+    repo.findShopProductByIdForUser.mockResolvedValue(null)
+
+    const service = new CartService(repo)
+    const result = await service.addItem(USER_ID, {
+      shopProductId: SP_A1,
+      quantity: 1,
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('SHOP_NOT_AVAILABLE')
+  })
+})
+
+describe('CartService — multi-option same family stays as separate cart lines (Phase 3)', () => {
+  it('adding two different products in the same family keeps two cart lines', async () => {
+    const repo = makeRepoMock()
+    // Tomato 500g and Tomato 1kg — same family, different products
+    const tomato500g = makeSpRow({
+      shop_product_id: SP_A1,
+      product_id: PROD_1,
+      product_family_id: 'fam-tomato',
+      option_label: '500g',
+      family_name: 'Tomato',
+      name: 'Tomato 500g',
+    })
+    const tomato1kg = makeSpRow({
+      shop_product_id: SP_A2,
+      product_id: PROD_2,
+      product_family_id: 'fam-tomato',
+      option_label: '1kg',
+      family_name: 'Tomato',
+      name: 'Tomato 1kg',
+    })
+
+    // First add: 500g (auto-resolve via single-shop allocation)
+    repo.findShopProductsForProduct.mockResolvedValueOnce([tomato500g])
+    repo.findShopProductForUser.mockResolvedValueOnce(tomato500g)
+    repo.findShopProductsForCart.mockResolvedValue([tomato500g])
+
+    const service = new CartService(repo)
+    await service.addItem(USER_ID, { productId: PROD_1, quantity: 1 })
+
+    // Second add: 1kg — saved cart has the 500g already
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForProduct.mockResolvedValueOnce([tomato1kg])
+    repo.findShopProductForUser.mockResolvedValueOnce(tomato1kg)
+    repo.findShopProductsForCart.mockResolvedValue([tomato500g, tomato1kg])
+
+    await service.addItem(USER_ID, { productId: PROD_2, quantity: 1 })
+
+    // saveCart was called twice; the second call must contain BOTH lines.
+    const lastSave = repo.saveCart.mock.calls.at(-1)[1]
+    expect(lastSave).toHaveLength(2)
+    expect(lastSave).toEqual(
+      expect.arrayContaining([
+        { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+        { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+      ])
+    )
+  })
+
+  it('adding the same option twice increments the same cart line', async () => {
+    const repo = makeRepoMock()
+    const tomato500g = makeSpRow({ shop_product_id: SP_A1 })
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+    ])
+    repo.findShopProductsForProduct.mockResolvedValue([tomato500g])
+    repo.findShopProductForUser.mockResolvedValue(tomato500g)
+    repo.findShopProductsForCart.mockResolvedValue([tomato500g])
+
+    const service = new CartService(repo)
+    const result = await service.addItem(USER_ID, {
+      productId: PROD_1,
+      quantity: 3,
+    })
+
+    expect(result.success).toBe(true)
+    const saved = repo.saveCart.mock.calls[0][1]
+    expect(saved).toEqual([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 5 },
+    ])
+  })
+})
+
+describe('CartService.updateItem / removeItem — exact option identity (Phase 3)', () => {
+  it('updateItem with shopProductId targets only the matching line', async () => {
+    const repo = makeRepoMock()
+    const tomato500g = makeSpRow({
+      shop_product_id: SP_A1,
+      product_id: PROD_1,
+      name: 'Tomato 500g',
+    })
+    const tomato1kg = makeSpRow({
+      shop_product_id: SP_A2,
+      product_id: PROD_2,
+      name: 'Tomato 1kg',
+    })
+
+    // Cart already has both options
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+    ])
+    // shopProductId resolves to PROD_1 / SHOP_A (the 500g)
+    repo.findShopProductByIdForUser.mockResolvedValue(tomato500g)
+    repo.findShopProductForUser.mockResolvedValue(tomato500g)
+    repo.findShopProductsForCart.mockResolvedValue([tomato500g, tomato1kg])
+
+    const service = new CartService(repo)
+    const result = await service.updateItem(USER_ID, PROD_1, 5, null, SP_A1)
+
+    expect(result.success).toBe(true)
+    const saved = repo.saveCart.mock.calls[0][1]
+    // 500g updated to 5; 1kg untouched at 1
+    expect(saved).toEqual([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 5 },
+      { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+    ])
+  })
+
+  it('removeItem with shopProductId removes only the matching line', async () => {
+    const repo = makeRepoMock()
+    const tomato500g = makeSpRow({
+      shop_product_id: SP_A1,
+      product_id: PROD_1,
+    })
+    const tomato1kg = makeSpRow({
+      shop_product_id: SP_A2,
+      product_id: PROD_2,
+    })
+
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductByIdForUser.mockResolvedValue(tomato1kg)
+    repo.findShopProductsForCart.mockResolvedValue([tomato500g])
+
+    const service = new CartService(repo)
+    const result = await service.removeItem(USER_ID, PROD_2, null, SP_A2)
+
+    expect(result.success).toBe(true)
+    const saved = repo.saveCart.mock.calls[0][1]
+    // Only 500g remains
+    expect(saved).toEqual([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+    ])
+  })
+
+  it('updateItem with productId-only and ambiguous match returns CART_ITEM_AMBIGUOUS', async () => {
+    const repo = makeRepoMock()
+    // Two cart lines with the SAME productId but different shops
+    // (shouldn't normally happen but defends against bad data).
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+      { productId: PROD_1, shopId: SHOP_B, quantity: 1 },
+    ])
+
+    const service = new CartService(repo)
+    const result = await service.updateItem(USER_ID, PROD_1, 5)
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('CART_ITEM_AMBIGUOUS')
+    expect(repo.saveCart).not.toHaveBeenCalled()
+  })
+})
+
+describe('CartService._formatLine — option metadata enrichment (Phase 3)', () => {
+  it('exposes optionLabel, familyName, foodType, originTag, customBadges, displayDeliveryMinutes', () => {
+    const repo = makeRepoMock()
+    const service = new CartService(repo)
+
+    const sp = makeSpRow({
+      product_family_id: 'fam-tomato',
+      family_name: 'Tomato',
+      option_label: '500g',
+      net_quantity: '500g',
+      food_type: 'VEG',
+      origin_tag: 'LOCAL',
+      custom_badges: ['Bestseller', 'Organic'],
+      display_delivery_minutes: 10,
+      sp_sale_price: 80,
+      sp_price: 100,
+    })
+
+    const line = service._formatLine(
+      sp,
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      80,
+      160
+    )
+
+    expect(line.productFamilyId).toBe('fam-tomato')
+    expect(line.familyName).toBe('Tomato')
+    expect(line.optionLabel).toBe('500g')
+    expect(line.netQuantity).toBe('500g')
+    expect(line.foodType).toBe('VEG')
+    expect(line.originTag).toBe('LOCAL')
+    expect(line.customBadges).toEqual(['Bestseller', 'Organic'])
+    expect(line.displayDeliveryMinutes).toBe(10)
+    expect(line.shopProductId).toBe(SP_A1)
+    expect(line.effectivePrice).toBe(80)
+    // (100 - 80) / 100 = 20%
+    expect(line.discountPercent).toBe(20)
+    expect(line.discountAmount).toBe(20)
+    expect(line.isAvailable).toBe(true)
+  })
+
+  it('falls back to safe defaults when option/family fields are missing', () => {
+    const repo = makeRepoMock()
+    const service = new CartService(repo)
+    // Legacy product without family/option fields
+    const sp = makeSpRow()
+
+    const line = service._formatLine(
+      sp,
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+      100,
+      100
+    )
+
+    expect(line.productFamilyId).toBeNull()
+    expect(line.familyName).toBeNull()
+    expect(line.optionLabel).toBeNull()
+    expect(line.foodType).toBe('NONE')
+    expect(line.originTag).toBe('NONE')
+    expect(line.customBadges).toEqual([])
+    expect(line.displayDeliveryMinutes).toBeNull()
+    expect(line.discountAmount).toBe(0)
+    expect(line.discountPercent).toBe(0)
   })
 })

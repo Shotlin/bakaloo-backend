@@ -17,6 +17,7 @@ export const listProductsSchema = {
       minPrice: { type: 'number', minimum: 0 },
       maxPrice: { type: 'number', minimum: 0 },
       inStock: { type: 'boolean' },
+      groupOptions: { type: 'boolean', default: false },
     },
   },
   response: {
@@ -169,6 +170,14 @@ export const createProductSchema = {
       avgRating: { type: 'number', minimum: 0, maximum: 5 },
       ratingCount: { type: 'integer', minimum: 0 },
       isAuthentic: { type: 'boolean', default: true },
+      productFamilyId: { type: 'string', format: 'uuid' },
+      optionLabel: { type: 'string', maxLength: 100 },
+      optionSortOrder: { type: 'integer', minimum: 0, default: 0 },
+      isDefaultOption: { type: 'boolean', default: false },
+      foodType: { type: 'string', enum: ['VEG', 'NON_VEG', 'EGG', 'NONE'], default: 'NONE' },
+      originTag: { type: 'string', enum: ['IMPORTED', 'LOCAL', 'NONE'], default: 'NONE' },
+      customBadges: { type: 'array', items: { type: 'string', maxLength: 50 }, default: [] },
+      displayDeliveryMinutes: { type: 'integer', minimum: 1, maximum: 180 },
       variants: {
         type: 'array',
         items: {
@@ -256,6 +265,14 @@ export const updateProductSchema = {
       avgRating: { type: 'number', minimum: 0, maximum: 5 },
       ratingCount: { type: 'integer', minimum: 0 },
       isAuthentic: { type: 'boolean', default: true },
+      productFamilyId: { type: 'string', format: 'uuid' },
+      optionLabel: { type: 'string', maxLength: 100 },
+      optionSortOrder: { type: 'integer', minimum: 0, default: 0 },
+      isDefaultOption: { type: 'boolean', default: false },
+      foodType: { type: 'string', enum: ['VEG', 'NON_VEG', 'EGG', 'NONE'], default: 'NONE' },
+      originTag: { type: 'string', enum: ['IMPORTED', 'LOCAL', 'NONE'], default: 'NONE' },
+      customBadges: { type: 'array', items: { type: 'string', maxLength: 50 }, default: [] },
+      displayDeliveryMinutes: { type: 'integer', minimum: 1, maximum: 180 },
       variants: {
         type: 'array',
         items: {

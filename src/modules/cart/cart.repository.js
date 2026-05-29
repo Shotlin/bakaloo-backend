@@ -90,6 +90,9 @@ export class CartRepository {
    * surface a precise error code (OUT_OF_STOCK / SHOP_PRODUCT_UNAVAILABLE)
    * to the caller.
    *
+   * Phase 3: extended SELECT projection to include option/family/badge
+   * fields used by the multi-option cart enrichment response.
+   *
    * @param {string} userId
    * @param {string} productId
    * @param {string} shopId
@@ -112,11 +115,20 @@ export class CartRepository {
               p.is_active      AS product_active,
               p.price          AS product_price,
               p.sale_price     AS product_sale_price,
+              p.product_family_id,
+              p.option_label,
+              p.net_quantity,
+              p.food_type,
+              p.origin_tag,
+              p.custom_badges,
+              p.display_delivery_minutes,
+              pf.name          AS family_name,
               s.name           AS shop_name,
               s.is_active      AS shop_active
          FROM shop_products sp
          JOIN products p ON p.id = sp.product_id
          JOIN shops    s ON s.id = sp.shop_id
+         LEFT JOIN product_families pf ON pf.id = p.product_family_id
          JOIN user_shop_allocations a
            ON a.shop_id = sp.shop_id
           AND a.user_id = $1
@@ -174,6 +186,66 @@ export class CartRepository {
   }
 
   /**
+   * Phase 3: resolve a shop_product row by its id (the per-shop SKU id),
+   * scoped to the customer's active allocations. Used when the Flutter
+   * option popup sends `shopProductId` directly so the cart service can
+   * derive (productId, shopId) without ambiguity.
+   *
+   * Returns the same enriched shape as `findShopProductForUser` so the
+   * service can run identical validation regardless of which identity the
+   * caller provided. NULL is returned when:
+   *   - the shop_product is missing or soft-deleted
+   *   - the shop is inactive or soft-deleted
+   *   - the shop is not in the customer's allocations
+   *
+   * @param {string} userId
+   * @param {string} shopProductId
+   * @returns {Promise<object|null>}
+   */
+  async findShopProductByIdForUser(userId, shopProductId) {
+    const { rows } = await query(
+      `SELECT sp.id            AS shop_product_id,
+              sp.shop_id,
+              sp.product_id,
+              sp.price         AS sp_price,
+              sp.sale_price    AS sp_sale_price,
+              sp.stock_quantity,
+              sp.max_order_qty,
+              sp.is_available,
+              p.name,
+              p.slug,
+              p.unit,
+              p.thumbnail_url,
+              p.is_active      AS product_active,
+              p.price          AS product_price,
+              p.sale_price     AS product_sale_price,
+              p.product_family_id,
+              p.option_label,
+              p.net_quantity,
+              p.food_type,
+              p.origin_tag,
+              p.custom_badges,
+              p.display_delivery_minutes,
+              pf.name          AS family_name,
+              s.name           AS shop_name,
+              s.is_active      AS shop_active
+         FROM shop_products sp
+         JOIN products p ON p.id = sp.product_id
+         JOIN shops    s ON s.id = sp.shop_id
+         LEFT JOIN product_families pf ON pf.id = p.product_family_id
+         JOIN user_shop_allocations a
+           ON a.shop_id = sp.shop_id
+          AND a.user_id = $1
+        WHERE sp.id          = $2
+          AND sp.deleted_at IS NULL
+          AND s.is_active    = true
+          AND s.deleted_at  IS NULL`,
+      [userId, shopProductId]
+    )
+    return rows[0] || null
+  }
+
+  /**
    * Batch-load shop_product rows for a list of (productId, shopId) pairs
    * within the user's allocations. Used for cart enrichment and re-validation
    * at checkout (Requirement 12.3). Returns rows keyed by `${productId}:${shopId}`.
@@ -210,11 +282,20 @@ export class CartRepository {
               p.is_active      AS product_active,
               p.price          AS product_price,
               p.sale_price     AS product_sale_price,
+              p.product_family_id,
+              p.option_label,
+              p.net_quantity,
+              p.food_type,
+              p.origin_tag,
+              p.custom_badges,
+              p.display_delivery_minutes,
+              pf.name          AS family_name,
               s.name           AS shop_name,
               s.is_active      AS shop_active
          FROM shop_products sp
          JOIN products p ON p.id = sp.product_id
          JOIN shops    s ON s.id = sp.shop_id
+         LEFT JOIN product_families pf ON pf.id = p.product_family_id
          JOIN targets  t
            ON t.product_id = sp.product_id
           AND t.shop_id    = sp.shop_id

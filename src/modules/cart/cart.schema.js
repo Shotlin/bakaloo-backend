@@ -7,12 +7,24 @@ const cartItemResponse = {
   properties: {
     productId:    { type: 'string' },
     shopId:       { type: 'string' },
+    shopProductId:{ type: ['string', 'null'] },
+    productFamilyId: { type: ['string', 'null'] },
+    familyName:   { type: ['string', 'null'] },
+    optionLabel:  { type: ['string', 'null'] },
+    netQuantity:  { type: ['string', 'null'] },
+    foodType:     { type: ['string', 'null'] },
+    originTag:    { type: ['string', 'null'] },
+    customBadges: { type: ['array', 'null'], items: { type: 'string' } },
+    displayDeliveryMinutes: { type: ['integer', 'null'] },
     shopName:     { type: ['string', 'null'] },
     name:         { type: 'string' },
     slug:         { type: 'string' },
     price:        { type: 'number' },
     originalPrice:{ type: ['number', 'null'] },
     salePrice:    { type: ['number', 'null'] },
+    effectivePrice:{ type: 'number' },
+    discountAmount:{ type: 'number' },
+    discountPercent:{ type: 'integer' },
     quantity:     { type: 'integer' },
     unit:         { type: 'string' },
     image:        { type: ['string', 'null'] },
@@ -22,6 +34,7 @@ const cartItemResponse = {
     subtotal:     { type: 'number' },
     lineTotal:    { type: 'number' },
     inStock:      { type: 'boolean' },
+    isAvailable:  { type: 'boolean' },
   },
 }
 
@@ -68,12 +81,17 @@ export const addItemSchema = {
   summary: 'Add item to cart',
   body: {
     type: 'object',
-    required: ['productId', 'quantity'],
+    required: ['quantity'],
     properties: {
-      productId: { type: 'string', format: 'uuid' },
-      shopId:    { type: 'string', format: 'uuid' },
-      quantity:  { type: 'integer', minimum: 1, maximum: 10000 },
+      productId:     { type: 'string', format: 'uuid' },
+      shopId:        { type: 'string', format: 'uuid' },
+      shopProductId: { type: 'string', format: 'uuid' },
+      quantity:      { type: 'integer', minimum: 1, maximum: 10000 },
     },
+    anyOf: [
+      { required: ['productId'] },
+      { required: ['shopProductId'] },
+    ],
   },
   response: { 200: cartResponse },
 }
@@ -92,8 +110,9 @@ export const updateItemSchema = {
     type: 'object',
     required: ['quantity'],
     properties: {
-      quantity: { type: 'integer', minimum: 1, maximum: 10000 },
-      shopId:   { type: 'string', format: 'uuid' },
+      quantity:      { type: 'integer', minimum: 1, maximum: 10000 },
+      shopId:        { type: 'string', format: 'uuid' },
+      shopProductId: { type: 'string', format: 'uuid' },
     },
   },
   response: { 200: cartResponse },
@@ -112,7 +131,8 @@ export const removeItemSchema = {
   querystring: {
     type: 'object',
     properties: {
-      shopId: { type: 'string', format: 'uuid' },
+      shopId:        { type: 'string', format: 'uuid' },
+      shopProductId: { type: 'string', format: 'uuid' },
     },
   },
   response: { 200: cartResponse },

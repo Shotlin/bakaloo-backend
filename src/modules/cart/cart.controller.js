@@ -25,8 +25,9 @@ export class CartController {
   /** POST /items */
   async addItem(request, reply) {
     const result = await this.service.addItem(request.user.id, {
-      productId: request.body.productId,
+      productId: request.body.productId || null,
       shopId: request.body.shopId || null,
+      shopProductId: request.body.shopProductId || null,
       quantity: request.body.quantity,
     })
     if (!result.success) {
@@ -41,7 +42,8 @@ export class CartController {
       request.user.id,
       request.params.productId,
       request.body.quantity,
-      request.body.shopId || null
+      request.body.shopId || null,
+      request.body.shopProductId || null
     )
     if (!result.success) {
       return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
@@ -54,7 +56,8 @@ export class CartController {
     const result = await this.service.removeItem(
       request.user.id,
       request.params.productId,
-      request.query?.shopId || null
+      request.query?.shopId || null,
+      request.query?.shopProductId || null
     )
     if (!result.success) {
       return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))

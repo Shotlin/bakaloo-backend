@@ -203,6 +203,11 @@ export const buildApp = async () => {
     }
   )
 
+  // Product Families — option grouping for multi-option products
+  await app.register(import('./modules/product-families/product-families.routes.js'), {
+    prefix: '/api/v1/admin/product-families',
+  })
+
   // Allocation — user-shop allocation (pincode + haversine)
   await app.register(import('./modules/allocation/allocation.routes.js'), {
     prefix: '/api/v1/allocation',

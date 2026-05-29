@@ -102,6 +102,7 @@ export class ProductsRepository {
     maxPrice,
     inStock,
     allocatedShopIds = null,
+    groupOptions = false,
   }) {
     const offset = (page - 1) * limit
     const conditions = []
@@ -172,15 +173,97 @@ export class ProductsRepository {
     const orderBy = sortMap[sort] || 'p.created_at DESC'
     const where = conditions.length > 0 ? conditions.join(' AND ') : '1=1'
 
+    // option_count: number of active siblings in same family (or 1 if standalone)
+    const optionCountExpr = `COALESCE(
+      (SELECT COUNT(*)::int FROM products sib
+       WHERE sib.product_family_id = p.product_family_id
+         AND sib.product_family_id IS NOT NULL
+         AND sib.is_active = true), 1)`
+
+    if (groupOptions) {
+      // When grouping, pick one representative per product_family_id:
+      // prefer is_default_option, then lowest option_sort_order, then lowest price.
+      // Standalone products (NULL family) always appear.
+      const { rows } = await query(
+        `WITH ranked AS (
+          SELECT
+            p.id, p.name, p.slug, p.price, p.sale_price,
+            p.stock_quantity, p.unit, p.thumbnail_url,
+            p.is_active, p.is_featured, p.total_sold,
+            p.sku, p.barcode, p.low_stock_threshold, p.category_id,
+            p.product_family_id, p.option_label, p.option_sort_order,
+            p.is_default_option, p.food_type, p.origin_tag,
+            p.custom_badges, p.display_delivery_minutes,
+            p.avg_rating, p.rating_count, p.net_quantity,
+            c.name AS category_name,
+            pf.name AS family_name,
+            ${optionCountExpr} AS option_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY COALESCE(p.product_family_id, p.id)
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+            ) AS rn
+          FROM products p
+          LEFT JOIN categories c ON c.id = p.category_id
+          LEFT JOIN product_families pf ON pf.id = p.product_family_id
+          WHERE ${where}
+        )
+        SELECT id, name, slug, price, sale_price,
+               stock_quantity, unit, thumbnail_url,
+               is_active, is_featured, total_sold,
+               sku, barcode, low_stock_threshold, category_id,
+               product_family_id, option_label, option_sort_order,
+               is_default_option, food_type, origin_tag,
+               custom_badges, display_delivery_minutes,
+               avg_rating, rating_count, net_quantity,
+               category_name, family_name, option_count
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY ${orderBy.replace(/p\./g, '')}
+        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+        [...params, limit, offset]
+      )
+
+      const { rows: countRows } = await query(
+        `WITH ranked AS (
+          SELECT p.id,
+            ROW_NUMBER() OVER (
+              PARTITION BY COALESCE(p.product_family_id, p.id)
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+            ) AS rn
+          FROM products p
+          WHERE ${where}
+        )
+        SELECT COUNT(*)::int AS total FROM ranked WHERE rn = 1`,
+        params
+      )
+
+      return {
+        data: rows,
+        pagination: {
+          page,
+          limit,
+          total: countRows[0]?.total || 0,
+          totalPages: Math.ceil((countRows[0]?.total || 0) / limit),
+        },
+      }
+    }
+
     const { rows } = await query(
       `SELECT
         p.id, p.name, p.slug, p.price, p.sale_price,
         p.stock_quantity, p.unit, p.thumbnail_url,
         p.is_active, p.is_featured, p.total_sold,
         p.sku, p.barcode, p.low_stock_threshold, p.category_id,
-        c.name AS category_name
+        p.product_family_id, p.option_label, p.option_sort_order,
+        p.is_default_option, p.food_type, p.origin_tag,
+        p.custom_badges, p.display_delivery_minutes,
+        p.avg_rating, p.rating_count, p.net_quantity,
+        c.name AS category_name,
+        pf.name AS family_name,
+        ${optionCountExpr} AS option_count
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE ${where}
        ORDER BY ${orderBy}
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
@@ -251,10 +334,16 @@ export class ProductsRepository {
           c.name AS category_name,
           p.is_featured,
           p.total_sold,
+          p.product_family_id, p.option_label, p.option_sort_order,
+          p.is_default_option, p.food_type, p.origin_tag,
+          p.custom_badges, p.display_delivery_minutes,
+          p.avg_rating, p.rating_count, p.net_quantity,
+          pf.name AS family_name,
           ts_rank(p.search_vector, to_tsquery('simple', $1)) AS rank,
           1 AS source
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN product_families pf ON pf.id = p.product_family_id
         WHERE p.is_active = true
           AND p.search_vector @@ to_tsquery('simple', $1)
           ${visClause}
@@ -272,10 +361,16 @@ export class ProductsRepository {
           c.name AS category_name,
           p.is_featured,
           p.total_sold,
+          p.product_family_id, p.option_label, p.option_sort_order,
+          p.is_default_option, p.food_type, p.origin_tag,
+          p.custom_badges, p.display_delivery_minutes,
+          p.avg_rating, p.rating_count, p.net_quantity,
+          pf.name AS family_name,
           0.1 AS rank,
           2 AS source
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN product_families pf ON pf.id = p.product_family_id
         WHERE p.is_active = true
           AND p.id NOT IN (SELECT id FROM fts)
           AND (
@@ -302,6 +397,11 @@ export class ProductsRepository {
         category_name,
         is_featured,
         total_sold,
+        product_family_id, option_label, option_sort_order,
+        is_default_option, food_type, origin_tag,
+        custom_badges, display_delivery_minutes,
+        avg_rating, rating_count, net_quantity,
+        family_name,
         rank
       FROM combined
       ORDER BY source ASC, rank DESC, total_sold DESC, name ASC
@@ -417,9 +517,15 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
-              c.name AS category_name, p.total_sold
+              c.name AS category_name, p.total_sold,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              p.avg_rating, p.rating_count, p.net_quantity,
+              pf.name AS family_name
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.is_active = true AND p.is_featured = true
          ${visibility.sql}
        ORDER BY p.total_sold DESC
@@ -526,8 +632,14 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url, p.total_sold
+              p.stock_quantity, p.unit, p.thumbnail_url, p.total_sold,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              p.avg_rating, p.rating_count, p.net_quantity,
+              pf.name AS family_name
        FROM products p
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.is_active = true
          AND p.category_id = $1
          AND p.id != $2
@@ -553,9 +665,15 @@ export class ProductsRepository {
       `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
               p.brand, p.total_sold, p.avg_rating, p.rating_count,
-              c.name AS category_name
+              c.name AS category_name,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              p.net_quantity,
+              pf.name AS family_name
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.is_active = true
          AND p.category_id != $1
          AND p.id != $2
@@ -565,6 +683,131 @@ export class ProductsRepository {
       params
     )
     return rows
+  }
+
+  /**
+   * Find all purchasable options for a product's family.
+   *
+   * @param {string} productId
+   * @param {string[]|null} [allocatedShopIds] - Customer shop scoping
+   * @returns {{ family: object|null, options: object[] }}
+   */
+  async findFamilyOptions(productId, allocatedShopIds = null) {
+    // 1. Look up the product's family
+    const { rows: productRows } = await query(
+      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+              p.stock_quantity, p.unit, p.thumbnail_url,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              p.avg_rating, p.rating_count, p.net_quantity,
+              p.category_id, p.is_active
+       FROM products p
+       WHERE p.id = $1`,
+      [productId]
+    )
+
+    if (productRows.length === 0) return null
+
+    const product = productRows[0]
+    const familyId = product.product_family_id
+
+    // 2. If no family, return just this product as a single option
+    if (!familyId) {
+      const option = { ...product }
+      // Enrich with shop data if customer context
+      if (Array.isArray(allocatedShopIds) && allocatedShopIds.length > 0) {
+        const shopData = await this._fetchShopDataForProducts([product.id], allocatedShopIds)
+        if (shopData[product.id]) {
+          Object.assign(option, shopData[product.id])
+        }
+      }
+      return {
+        family: null,
+        options: [option],
+      }
+    }
+
+    // 3. Get family info
+    const { rows: familyRows } = await query(
+      `SELECT id, name, slug, description FROM product_families WHERE id = $1`,
+      [familyId]
+    )
+    const family = familyRows[0] || null
+
+    // 4. Get all active products in the family
+    const { rows: options } = await query(
+      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+              p.stock_quantity, p.unit, p.thumbnail_url,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              p.avg_rating, p.rating_count, p.net_quantity,
+              p.category_id
+       FROM products p
+       WHERE p.product_family_id = $1
+         AND p.is_active = true
+       ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.name ASC`,
+      [familyId]
+    )
+
+    // 5. Enrich with shop data if customer context
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length > 0) {
+      const productIds = options.map(o => o.id)
+      const shopData = await this._fetchShopDataForProducts(productIds, allocatedShopIds)
+
+      // Filter out options with no available shop_product and enrich the rest
+      const enrichedOptions = options
+        .filter(o => shopData[o.id])
+        .map(o => ({ ...o, ...shopData[o.id] }))
+
+      return { family, options: enrichedOptions }
+    }
+
+    return { family, options }
+  }
+
+  /**
+   * Batch-fetch best shop_product data for a list of product IDs.
+   * Returns a map of productId → shop data object.
+   *
+   * @param {string[]} productIds
+   * @param {string[]} shopIds
+   * @returns {Promise<Record<string, object>>}
+   */
+  async _fetchShopDataForProducts(productIds, shopIds) {
+    if (!productIds.length || !shopIds.length) return {}
+
+    const { rows } = await query(
+      `SELECT DISTINCT ON (sp.product_id)
+        sp.product_id, sp.id AS shop_product_id, sp.shop_id,
+        sp.price AS sp_price, sp.sale_price AS sp_sale_price,
+        sp.stock_quantity, sp.max_order_qty, sp.is_available
+      FROM shop_products sp
+      JOIN shops s ON s.id = sp.shop_id
+      WHERE sp.product_id = ANY($1::uuid[])
+        AND sp.shop_id = ANY($2::uuid[])
+        AND sp.is_available = true
+        AND sp.deleted_at IS NULL
+        AND s.is_active = true
+        AND s.deleted_at IS NULL
+      ORDER BY sp.product_id, sp.stock_quantity DESC`,
+      [productIds, shopIds]
+    )
+
+    const map = {}
+    for (const row of rows) {
+      map[row.product_id] = {
+        shop_product_id: row.shop_product_id,
+        shop_id: row.shop_id,
+        sp_price: row.sp_price,
+        sp_sale_price: row.sp_sale_price,
+        sp_stock_quantity: row.stock_quantity,
+        sp_max_order_qty: row.max_order_qty,
+        sp_is_available: row.is_available,
+      }
+    }
+    return map
   }
 
   /**
@@ -580,8 +823,10 @@ export class ProductsRepository {
          certifications, nutrition_info, meta_title, meta_description,
          brand, brand_logo_url, net_quantity, highlights, attributes,
          vendor_name, vendor_address, vendor_fssai, return_policy,
-         avg_rating, rating_count, is_authentic)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
+         avg_rating, rating_count, is_authentic,
+         product_family_id, option_label, option_sort_order, is_default_option,
+         food_type, origin_tag, custom_badges, display_delivery_minutes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
        RETURNING id, name, slug, price, sale_price, stock_quantity, unit,
                  thumbnail_url, category_id, is_featured, is_active, sku, created_at`,
       [
@@ -604,6 +849,11 @@ export class ProductsRepository {
         data.vendorFssai || null, data.returnPolicy || 'no_return',
         data.avgRating ?? 0, data.ratingCount ?? 0,
         data.isAuthentic !== false,
+        data.productFamilyId || null, data.optionLabel || null,
+        data.optionSortOrder ?? 0, data.isDefaultOption || false,
+        data.foodType || 'NONE', data.originTag || 'NONE',
+        JSON.stringify(data.customBadges || []),
+        data.displayDeliveryMinutes || null,
       ]
     )
 
@@ -634,6 +884,13 @@ export class ProductsRepository {
       vendorAddress: 'vendor_address', vendorFssai: 'vendor_fssai',
       returnPolicy: 'return_policy', isAuthentic: 'is_authentic',
       avgRating: 'avg_rating', ratingCount: 'rating_count',
+      productFamilyId: 'product_family_id',
+      optionLabel: 'option_label',
+      optionSortOrder: 'option_sort_order',
+      isDefaultOption: 'is_default_option',
+      foodType: 'food_type',
+      originTag: 'origin_tag',
+      displayDeliveryMinutes: 'display_delivery_minutes',
     }
 
     const fields = []
@@ -667,6 +924,10 @@ export class ProductsRepository {
     if (data.certifications !== undefined) {
       fields.push(`certifications = $${idx++}`)
       params.push(data.certifications)
+    }
+    if (data.customBadges !== undefined) {
+      fields.push(`custom_badges = $${idx++}`)
+      params.push(JSON.stringify(data.customBadges))
     }
     if (data.variants !== undefined) {
       await this.saveVariants(id, data.variants)

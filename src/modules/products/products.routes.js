@@ -147,6 +147,16 @@ export default async function productRoutes(fastify) {
     preHandler: [tryAttachUser],
   }, controller.getRelated.bind(controller))
 
+  // GET /:id/options — All purchasable options for a product family
+  fastify.get('/:id/options', {
+    schema: {
+      tags: ['Products'],
+      summary: 'Get all purchasable options for a product family',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+    preHandler: [tryAttachUser],
+  }, controller.getOptions.bind(controller))
+
   fastify.get('/:id/pair-with', {
     schema: pairWithSchema,
     preHandler: [tryAttachUser],

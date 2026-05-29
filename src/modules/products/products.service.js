@@ -350,6 +350,37 @@ export class ProductsService {
     )
   }
 
+  /**
+   * Get all purchasable options for a product's family (cached 15 min)
+   *
+   * @param {string} productId
+   * @param {{ userId?: string }|null} [customerContext]
+   */
+  async getProductOptions(productId, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return null
+    }
+
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = `products:options:${CACHE_VERSION}:${scope}:${productId}`
+    const cached = await cacheGet(cacheKey)
+    if (cached) return cached
+
+    const result = await this.repo.findFamilyOptions(productId, allocatedShopIds)
+    if (!result) return null
+
+    // Normalize image URLs on options
+    const normalized = {
+      family: result.family,
+      options: this._normalizeProducts(result.options),
+    }
+
+    await cacheSet(cacheKey, normalized, CACHE_TTL_DETAIL)
+    return normalized
+  }
+
   async getPriceDrops(limit = 10, customerContext = null) {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 

@@ -40,50 +40,120 @@ export class CartService {
   }
 
   // ────────────────────────────────────────────────────────
-  // Add / update / remove
+  // Identity resolver (Phase 3)
   // ────────────────────────────────────────────────────────
 
   /**
-   * Add a product (from a specific shop) to the cart.
+   * Phase 3: resolve which (productId, shopId, shopProductRow) a cart
+   * mutation targets, given any of the three accepted identity inputs:
    *
-   * If `shopId` is omitted the service auto-resolves the shop when there is
-   * exactly one available shop for the product across the user's allocations
-   * (preserves backwards-compatible callers that don't yet pass shop_id).
+   *   1. `shopProductId` — exact, used by the new option popup. Resolves
+   *      to its productId/shopId via shop_products lookup, validates
+   *      against optional `productId`/`shopId` for conflict detection
+   *      (returns CART_ITEM_IDENTITY_CONFLICT if any disagree).
+   *   2. `productId` + `shopId` — legacy precise path, unchanged.
+   *   3. `productId` only — legacy auto-resolve. Returns
+   *      CART_SHOP_REQUIRED when more than one shop in the user's
+   *      allocations carries the product.
+   *
+   * On success the helper returns the same enriched row as
+   * `findShopProductForUser` so callers can reuse the existing
+   * availability/stock/max-qty validation.
+   *
+   * @param {string} userId
+   * @param {{ productId?: string|null, shopId?: string|null, shopProductId?: string|null }} input
+   * @returns {Promise<{success: true, productId: string, shopId: string, sp: object} | {success: false, message: string, code: string, details?: object}>}
    */
-  async addItem(userId, { productId, shopId = null, quantity }) {
-    const qty = Number(quantity)
-    if (!Number.isInteger(qty) || qty <= 0) {
-      return {
-        success: false,
-        message: 'Quantity must be a positive integer',
-        code: 'INVALID_QUANTITY',
-      }
-    }
+  async _resolveCartIdentity(userId, input) {
+    const productId = input.productId || null
+    const shopId = input.shopId || null
+    const shopProductId = input.shopProductId || null
 
-    let resolvedShopId = shopId
-    if (!resolvedShopId) {
-      const candidates = await this.repo.findShopProductsForProduct(
+    // Path 1: shopProductId provided
+    if (shopProductId) {
+      const sp = await this.repo.findShopProductByIdForUser(
         userId,
-        productId
+        shopProductId
       )
-      if (candidates.length === 0) {
+      if (!sp) {
         return {
           success: false,
-          message: 'Product is not available in any of your shops',
+          message: 'This product option is not available to you',
           code: 'SHOP_NOT_AVAILABLE',
         }
       }
-      if (candidates.length > 1) {
+      // Conflict detection — caller must not send mismatched legacy ids
+      if (productId && productId !== sp.product_id) {
         return {
           success: false,
           message:
-            'Multiple shops carry this product. Please specify which shop to order from.',
-          code: 'CART_SHOP_REQUIRED',
+            'productId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+          details: { expected: sp.product_id, got: productId },
         }
       }
-      resolvedShopId = candidates[0].shop_id
+      if (shopId && shopId !== sp.shop_id) {
+        return {
+          success: false,
+          message: 'shopId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+          details: { expected: sp.shop_id, got: shopId },
+        }
+      }
+      return {
+        success: true,
+        productId: sp.product_id,
+        shopId: sp.shop_id,
+        sp,
+      }
     }
 
+    if (!productId) {
+      return {
+        success: false,
+        message: 'productId or shopProductId is required',
+        code: 'INVALID_REQUEST',
+      }
+    }
+
+    // Path 2: productId + shopId
+    if (shopId) {
+      const sp = await this.repo.findShopProductForUser(
+        userId,
+        productId,
+        shopId
+      )
+      if (!sp) {
+        return {
+          success: false,
+          message: 'This shop is not available to you',
+          code: 'SHOP_NOT_AVAILABLE',
+        }
+      }
+      return { success: true, productId, shopId, sp }
+    }
+
+    // Path 3: productId only — auto-resolve
+    const candidates = await this.repo.findShopProductsForProduct(
+      userId,
+      productId
+    )
+    if (candidates.length === 0) {
+      return {
+        success: false,
+        message: 'Product is not available in any of your shops',
+        code: 'SHOP_NOT_AVAILABLE',
+      }
+    }
+    if (candidates.length > 1) {
+      return {
+        success: false,
+        message:
+          'Multiple shops carry this product. Please specify which shop to order from.',
+        code: 'CART_SHOP_REQUIRED',
+      }
+    }
+    const resolvedShopId = candidates[0].shop_id
     const sp = await this.repo.findShopProductForUser(
       userId,
       productId,
@@ -96,6 +166,45 @@ export class CartService {
         code: 'SHOP_NOT_AVAILABLE',
       }
     }
+    return { success: true, productId, shopId: resolvedShopId, sp }
+  }
+
+  // ────────────────────────────────────────────────────────
+  // Add / update / remove
+  // ────────────────────────────────────────────────────────
+
+  /**
+   * Add a product (from a specific shop) to the cart.
+   *
+   * Phase 3: accepts the new optional `shopProductId` identity in addition
+   * to the legacy `productId` (+ optional `shopId`) shape. Identity
+   * conflicts (e.g., shopProductId points to a different productId than
+   * the caller passed) are rejected with CART_ITEM_IDENTITY_CONFLICT.
+   *
+   * If `shopId` is omitted (and no shopProductId) the service auto-resolves
+   * the shop when there is exactly one available shop for the product
+   * across the user's allocations. Multiple shops → CART_SHOP_REQUIRED.
+   */
+  async addItem(userId, { productId = null, shopId = null, shopProductId = null, quantity }) {
+    const qty = Number(quantity)
+    if (!Number.isInteger(qty) || qty <= 0) {
+      return {
+        success: false,
+        message: 'Quantity must be a positive integer',
+        code: 'INVALID_QUANTITY',
+      }
+    }
+
+    const resolved = await this._resolveCartIdentity(userId, {
+      productId,
+      shopId,
+      shopProductId,
+    })
+    if (!resolved.success) return resolved
+
+    const sp = resolved.sp
+    const resolvedProductId = resolved.productId
+    const resolvedShopId = resolved.shopId
 
     const shopActive = sp.shop_active === true
     if (!shopActive) {
@@ -117,7 +226,7 @@ export class CartService {
 
     const cartItems = await this.repo.getCart(userId)
     const existingIndex = cartItems.findIndex(
-      (i) => i.productId === productId && i.shopId === resolvedShopId
+      (i) => i.productId === resolvedProductId && i.shopId === resolvedShopId
     )
     const existingQty = existingIndex >= 0 ? cartItems[existingIndex].quantity : 0
     const newQty = existingQty + qty
@@ -128,7 +237,7 @@ export class CartService {
         success: false,
         message: `Maximum ${maxOrderQty} units of "${sp.name}" allowed per order`,
         code: 'MAX_QTY_EXCEEDED',
-        details: { productId, shopId: resolvedShopId, max: maxOrderQty },
+        details: { productId: resolvedProductId, shopId: resolvedShopId, max: maxOrderQty },
       }
     }
 
@@ -139,7 +248,7 @@ export class CartService {
         message: `Only ${stockQuantity} units of "${sp.name}" available`,
         code: 'INSUFFICIENT_STOCK',
         details: {
-          productId,
+          productId: resolvedProductId,
           shopId: resolvedShopId,
           available: stockQuantity,
         },
@@ -157,15 +266,20 @@ export class CartService {
           details: { max: MAX_CART_ITEMS },
         }
       }
-      cartItems.push({ productId, shopId: resolvedShopId, quantity: newQty })
+      cartItems.push({
+        productId: resolvedProductId,
+        shopId: resolvedShopId,
+        quantity: newQty,
+      })
     }
 
     await this.repo.saveCart(userId, cartItems)
     logger.info(
       {
         userId,
-        productId,
+        productId: resolvedProductId,
         shopId: resolvedShopId,
+        shopProductId: sp.shop_product_id,
         quantity: newQty,
         action: 'cart_item_added',
       },
@@ -177,9 +291,14 @@ export class CartService {
 
   /**
    * Update item quantity (absolute, not delta).
-   * Identifies the line by (productId, shopId).
+   *
+   * Phase 3: identifies the line by `(productId, shopId)` or, when the
+   * caller passes `shopProductId`, resolves to the exact shop_product
+   * row first. Ambiguous matches (productId only, multiple lines) are
+   * rejected with CART_ITEM_AMBIGUOUS so we never update sibling options
+   * by accident.
    */
-  async updateItem(userId, productId, quantity, shopId = null) {
+  async updateItem(userId, productId, quantity, shopId = null, shopProductId = null) {
     const qty = Number(quantity)
     if (!Number.isInteger(qty) || qty <= 0) {
       return {
@@ -189,12 +308,46 @@ export class CartService {
       }
     }
 
+    // Phase 3: resolve shopProductId → (productId, shopId) for exact match.
+    let resolvedProductId = productId
+    let resolvedShopId = shopId
+    if (shopProductId) {
+      const spRow = await this.repo.findShopProductByIdForUser(
+        userId,
+        shopProductId
+      )
+      if (!spRow) {
+        return {
+          success: false,
+          message: 'This product option is not available to you',
+          code: 'SHOP_NOT_AVAILABLE',
+        }
+      }
+      // Conflict detection vs. legacy ids on the request
+      if (productId && productId !== spRow.product_id) {
+        return {
+          success: false,
+          message: 'productId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+        }
+      }
+      if (shopId && shopId !== spRow.shop_id) {
+        return {
+          success: false,
+          message: 'shopId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+        }
+      }
+      resolvedProductId = spRow.product_id
+      resolvedShopId = spRow.shop_id
+    }
+
     const cartItems = await this.repo.getCart(userId)
     const matches = cartItems
       .map((item, idx) => ({ item, idx }))
       .filter(({ item }) => {
-        if (item.productId !== productId) return false
-        if (shopId && item.shopId !== shopId) return false
+        if (item.productId !== resolvedProductId) return false
+        if (resolvedShopId && item.shopId !== resolvedShopId) return false
         return true
       })
 
@@ -204,8 +357,9 @@ export class CartService {
     if (matches.length > 1) {
       return {
         success: false,
-        message: 'Multiple cart entries match. Please specify shop_id.',
-        code: 'CART_SHOP_REQUIRED',
+        message:
+          'Multiple cart entries match. Please specify shopId or shopProductId.',
+        code: 'CART_ITEM_AMBIGUOUS',
       }
     }
 
@@ -252,7 +406,7 @@ export class CartService {
         success: false,
         message: `Maximum ${maxOrderQty} units of "${sp.name}" allowed per order`,
         code: 'MAX_QTY_EXCEEDED',
-        details: { productId, shopId: item.shopId, max: maxOrderQty },
+        details: { productId: item.productId, shopId: item.shopId, max: maxOrderQty },
       }
     }
 
@@ -262,7 +416,7 @@ export class CartService {
         success: false,
         message: `Only ${stockQuantity} units of "${sp.name}" available`,
         code: 'INSUFFICIENT_STOCK',
-        details: { productId, shopId: item.shopId, available: stockQuantity },
+        details: { productId: item.productId, shopId: item.shopId, available: stockQuantity },
       }
     }
 
@@ -273,19 +427,67 @@ export class CartService {
   }
 
   /**
-   * Remove an item from the cart, identified by (productId, shopId).
+   * Remove an item from the cart, identified by `(productId, shopId)` or
+   * by the new optional `shopProductId`. Ambiguous matches are rejected
+   * with CART_ITEM_AMBIGUOUS so sibling options are never deleted.
    */
-  async removeItem(userId, productId, shopId = null) {
+  async removeItem(userId, productId, shopId = null, shopProductId = null) {
+    let resolvedProductId = productId
+    let resolvedShopId = shopId
+    if (shopProductId) {
+      const spRow = await this.repo.findShopProductByIdForUser(
+        userId,
+        shopProductId
+      )
+      if (!spRow) {
+        return {
+          success: false,
+          message: 'This product option is not available to you',
+          code: 'SHOP_NOT_AVAILABLE',
+        }
+      }
+      if (productId && productId !== spRow.product_id) {
+        return {
+          success: false,
+          message: 'productId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+        }
+      }
+      if (shopId && shopId !== spRow.shop_id) {
+        return {
+          success: false,
+          message: 'shopId does not match the provided shopProductId',
+          code: 'CART_ITEM_IDENTITY_CONFLICT',
+        }
+      }
+      resolvedProductId = spRow.product_id
+      resolvedShopId = spRow.shop_id
+    }
+
     const cartItems = await this.repo.getCart(userId)
-    const filtered = cartItems.filter((i) => {
-      if (i.productId !== productId) return true
-      if (shopId && i.shopId !== shopId) return true
-      return false
+    const matches = cartItems.filter((i) => {
+      if (i.productId !== resolvedProductId) return false
+      if (resolvedShopId && i.shopId !== resolvedShopId) return false
+      return true
     })
 
-    if (filtered.length === cartItems.length) {
+    if (matches.length === 0) {
       return { success: false, message: 'Item not in cart', code: 'CART_ITEM_NOT_FOUND' }
     }
+    if (matches.length > 1) {
+      return {
+        success: false,
+        message:
+          'Multiple cart entries match. Please specify shopId or shopProductId.',
+        code: 'CART_ITEM_AMBIGUOUS',
+      }
+    }
+
+    const filtered = cartItems.filter((i) => {
+      if (i.productId !== resolvedProductId) return true
+      if (resolvedShopId && i.shopId !== resolvedShopId) return true
+      return false
+    })
 
     await this.repo.saveCart(userId, filtered)
     return { success: true, cart: await this._enrichCart(userId, filtered) }
@@ -535,10 +737,43 @@ export class CartService {
     const listPrice = this._listPrice(sp)
     const sale = sp.sp_sale_price ?? sp.product_sale_price
     const salePrice = sale !== null && sale !== undefined ? Number(sale) : null
+    const effectivePrice = Number(effective) || 0
+
+    // Phase 3: discount surfaced for the Flutter product card / cart row.
+    // Use list price (the canonical "MRP") as the reference so discount
+    // amount/percent reflect the visible strikethrough math.
+    const discountAmount =
+      listPrice > 0 && effectivePrice < listPrice
+        ? Number((listPrice - effectivePrice).toFixed(2))
+        : 0
+    const discountPercent =
+      listPrice > 0 && effectivePrice < listPrice
+        ? Math.round(((listPrice - effectivePrice) / listPrice) * 100)
+        : 0
+
+    // Defensive parsing for JSONB / nullable columns from products.
+    const customBadges = Array.isArray(sp.custom_badges)
+      ? sp.custom_badges
+      : (typeof sp.custom_badges === 'string'
+          ? this._safeParseArray(sp.custom_badges)
+          : [])
+
     return {
       productId: sp.product_id,
       shopId: sp.shop_id,
       shopProductId: sp.shop_product_id,
+      // Phase 3: option/family/badge metadata for Flutter UI
+      productFamilyId: sp.product_family_id || null,
+      familyName: sp.family_name || null,
+      optionLabel: sp.option_label || null,
+      netQuantity: sp.net_quantity || null,
+      foodType: sp.food_type || 'NONE',
+      originTag: sp.origin_tag || 'NONE',
+      customBadges,
+      displayDeliveryMinutes:
+        sp.display_delivery_minutes !== null && sp.display_delivery_minutes !== undefined
+          ? Number(sp.display_delivery_minutes)
+          : null,
       shopName: sp.shop_name || null,
       name: sp.name,
       slug: sp.slug,
@@ -546,6 +781,9 @@ export class CartService {
       originalPrice:
         salePrice !== null && salePrice < listPrice ? listPrice : null,
       salePrice,
+      effectivePrice,
+      discountAmount,
+      discountPercent,
       quantity: item.quantity,
       unit: sp.unit,
       image: sp.thumbnail_url,
@@ -555,6 +793,21 @@ export class CartService {
       subtotal: lineTotal,
       lineTotal,
       inStock: Number(sp.stock_quantity) > 0,
+      isAvailable: sp.is_available === true,
+    }
+  }
+
+  /**
+   * Defensive JSONB parser for custom_badges in case PG returned a JSON
+   * string (unlikely with `JSONB`, but safe). Never throws.
+   * @private
+   */
+  _safeParseArray(value) {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
     }
   }
 }
