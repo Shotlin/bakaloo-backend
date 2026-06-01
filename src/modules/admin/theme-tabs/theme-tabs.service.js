@@ -73,6 +73,17 @@ async function rebalanceStoreTabs(storeKey, preferredTab = null) {
   }
 }
 
+function buildConflictError(message) {
+  const err = new Error(message)
+  err.statusCode = 409
+  err.code = 'THEME_TAB_KEY_CONFLICT'
+  return err
+}
+
+function isUniqueViolation(err) {
+  return err && err.code === '23505'
+}
+
 export class ThemeTabsService {
   async list(filters) {
     return repo.findAll({
@@ -86,14 +97,39 @@ export class ThemeTabsService {
   }
 
   async create(data, adminId, ip) {
-    const tab = await repo.create({
-      ...data,
-      key: `${data.key}`.trim(),
-      label: `${data.label}`.trim(),
-      image_url: `${data.image_url || ''}`.trim() || null,
-      text_color: normalizeTextColor(data.text_color),
-      merch_config: normalizeMerchConfig(data.merch_config),
-    })
+    const storeKey = data.store_key
+    const key = `${data.key}`.trim()
+    const status = data.status || 'active'
+
+    // Only an ACTIVE tab with the same key blocks creation. Archived tabs
+    // may share a key (the unique index is partial on status='active').
+    if (status === 'active') {
+      const conflict = await repo.findByStoreAndKey(storeKey, key, { activeOnly: true })
+      if (conflict) {
+        throw buildConflictError(
+          `An active tab with key "${key}" already exists for this store. Choose a different name or key.`
+        )
+      }
+    }
+
+    let tab
+    try {
+      tab = await repo.create({
+        ...data,
+        key,
+        label: `${data.label}`.trim(),
+        image_url: `${data.image_url || ''}`.trim() || null,
+        text_color: normalizeTextColor(data.text_color),
+        merch_config: normalizeMerchConfig(data.merch_config),
+      })
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw buildConflictError(
+          `An active tab with key "${key}" already exists for this store. Choose a different name or key.`
+        )
+      }
+      throw err
+    }
 
     if (tab.status === 'active') {
       await rebalanceStoreTabs(tab.store_key, tab)
@@ -108,33 +144,67 @@ export class ThemeTabsService {
     const existing = await repo.findById(id)
     if (!existing) return null
 
-    const tab = await repo.update(id, {
-      ...data,
-      ...(data.key !== undefined ? { key: `${data.key}`.trim() } : {}),
-      ...(data.label !== undefined ? { label: `${data.label}`.trim() } : {}),
-      ...(data.image_url !== undefined
-        ? { image_url: `${data.image_url || ''}`.trim() || null }
-        : {}),
-      ...(data.text_color !== undefined
-        ? { text_color: normalizeTextColor(data.text_color) }
-        : {}),
-      ...(data.merch_config !== undefined
-        ? { merch_config: normalizeMerchConfig(data.merch_config) }
-        : {}),
-    })
+    const storeKey = data.store_key !== undefined ? data.store_key : existing.store_key
+    const nextKey = data.key !== undefined ? `${data.key}`.trim() : existing.key
+    const nextStatus = data.status !== undefined ? data.status : existing.status
+
+    // A conflict is only possible when the resulting tab is ACTIVE and its
+    // (store_key, key) identity changes — either the key/store changed, or an
+    // archived tab is being reactivated into a key an active tab already uses.
+    // Icon/label/merch-only edits keep the same identity and are never blocked.
+    const identityChanged =
+      storeKey !== existing.store_key || nextKey !== existing.key
+    const reactivating =
+      nextStatus === 'active' && existing.status !== 'active'
+
+    if (nextStatus === 'active' && (identityChanged || reactivating) && storeKey && nextKey) {
+      const conflict = await repo.findByStoreAndKey(storeKey, nextKey, { activeOnly: true })
+      if (conflict && conflict.id !== id) {
+        throw buildConflictError(
+          `An active tab with key "${nextKey}" already exists for this store. Choose a different name or key.`
+        )
+      }
+    }
+
+    let tab
+    try {
+      tab = await repo.update(id, {
+        ...data,
+        ...(data.key !== undefined ? { key: nextKey } : {}),
+        ...(data.label !== undefined ? { label: `${data.label}`.trim() } : {}),
+        ...(data.image_url !== undefined
+          ? { image_url: `${data.image_url || ''}`.trim() || null }
+          : {}),
+        ...(data.text_color !== undefined
+          ? { text_color: normalizeTextColor(data.text_color) }
+          : {}),
+        ...(data.merch_config !== undefined
+          ? { merch_config: normalizeMerchConfig(data.merch_config) }
+          : {}),
+      })
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        throw buildConflictError(
+          `An active tab with key "${nextKey}" already exists for this store. Choose a different name or key.`
+        )
+      }
+      throw err
+    }
+
+    if (!tab) return null
 
     const storesToRebalance = new Set([
       existing.store_key,
-      tab?.store_key,
+      tab.store_key,
     ].filter(Boolean))
 
-    for (const storeKey of storesToRebalance) {
-      if (tab?.status === 'active' && storeKey === tab.store_key) {
-        await rebalanceStoreTabs(storeKey, tab)
+    for (const storeKeyToBalance of storesToRebalance) {
+      if (tab.status === 'active' && storeKeyToBalance === tab.store_key) {
+        await rebalanceStoreTabs(storeKeyToBalance, tab)
         continue
       }
 
-      await rebalanceStoreTabs(storeKey)
+      await rebalanceStoreTabs(storeKeyToBalance)
     }
 
     await invalidateTabCaches()

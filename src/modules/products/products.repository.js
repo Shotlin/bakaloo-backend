@@ -195,6 +195,7 @@ export class ProductsRepository {
             p.is_default_option, p.food_type, p.origin_tag,
             p.custom_badges, p.display_delivery_minutes,
             p.avg_rating, p.rating_count, p.net_quantity,
+            p.created_at,
             c.name AS category_name,
             pf.name AS family_name,
             ${optionCountExpr} AS option_count,
@@ -522,7 +523,12 @@ export class ProductsRepository {
               p.is_default_option, p.food_type, p.origin_tag,
               p.custom_badges, p.display_delivery_minutes,
               p.avg_rating, p.rating_count, p.net_quantity,
-              pf.name AS family_name
+              pf.name AS family_name,
+              COALESCE(
+                (SELECT COUNT(*)::int FROM products sib
+                 WHERE sib.product_family_id = p.product_family_id
+                   AND sib.product_family_id IS NOT NULL
+                   AND sib.is_active = true), 1) AS option_count
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id

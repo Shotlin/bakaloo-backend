@@ -89,9 +89,12 @@ export class ThemeTabsRepository {
     return tab || null
   }
 
-  async findByStoreAndKey(storeKey, key) {
+  async findByStoreAndKey(storeKey, key, { activeOnly = false } = {}) {
     const { rows: [tab] } = await query(
-      'SELECT * FROM theme_tabs WHERE store_key = $1 AND key = $2 LIMIT 1',
+      `SELECT * FROM theme_tabs
+       WHERE store_key = $1 AND key = $2
+       ${activeOnly ? "AND status = 'active'" : ''}
+       LIMIT 1`,
       [storeKey, key]
     )
     return tab || null
