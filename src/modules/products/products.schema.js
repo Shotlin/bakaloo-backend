@@ -47,6 +47,24 @@ export const listProductsSchema = {
               low_stock_threshold: { type: 'integer' },
               category_id: { type: 'string', nullable: true },
               category_name: { type: 'string', nullable: true },
+              // Product family / option fields (Phase 1 contract).
+              // Declared here because Fastify's response serializer
+              // (fast-json-stringify) drops any property not present in the
+              // schema — without these the repository's option columns never
+              // reach the Flutter client on the /products list endpoint.
+              product_family_id: { type: 'string', nullable: true },
+              family_name: { type: 'string', nullable: true },
+              option_label: { type: 'string', nullable: true },
+              option_count: { type: 'integer' },
+              option_sort_order: { type: 'integer' },
+              is_default_option: { type: 'boolean' },
+              food_type: { type: 'string', nullable: true },
+              origin_tag: { type: 'string', nullable: true },
+              custom_badges: { type: 'array', items: { type: 'string' }, nullable: true },
+              display_delivery_minutes: { type: 'integer', nullable: true },
+              net_quantity: { type: 'string', nullable: true },
+              avg_rating: { type: 'number', nullable: true },
+              rating_count: { type: 'integer', nullable: true },
             },
           },
         },

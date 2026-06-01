@@ -568,11 +568,21 @@ export class ProductsRepository {
               p.brand, p.brand_logo_url, p.net_quantity, p.highlights, p.attributes,
               p.vendor_name, p.vendor_address, p.vendor_fssai, p.return_policy,
               p.avg_rating, p.rating_count, p.is_authentic,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
               c.name AS category_name,
+              pf.name AS family_name,
+              COALESCE(
+                (SELECT COUNT(*)::int FROM products sib
+                 WHERE sib.product_family_id = p.product_family_id
+                   AND sib.product_family_id IS NOT NULL
+                   AND sib.is_active = true), 1) AS option_count,
               (SELECT json_agg(v) FROM product_variants v WHERE v.product_id = p.id) AS variants,
               p.created_at, p.updated_at
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.id = $1
          ${visibility.sql}`,
       params
@@ -606,11 +616,21 @@ export class ProductsRepository {
               p.brand, p.brand_logo_url, p.net_quantity, p.highlights, p.attributes,
               p.vendor_name, p.vendor_address, p.vendor_fssai, p.return_policy,
               p.avg_rating, p.rating_count, p.is_authentic,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
               c.name AS category_name,
+              pf.name AS family_name,
+              COALESCE(
+                (SELECT COUNT(*)::int FROM products sib
+                 WHERE sib.product_family_id = p.product_family_id
+                   AND sib.product_family_id IS NOT NULL
+                   AND sib.is_active = true), 1) AS option_count,
               (SELECT json_agg(v) FROM product_variants v WHERE v.product_id = p.id) AS variants,
               p.created_at, p.updated_at
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.slug = $1 AND p.is_active = true
          ${visibility.sql}`,
       params

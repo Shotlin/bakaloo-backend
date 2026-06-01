@@ -437,6 +437,39 @@ export class OrdersRepository {
   }
 
   /**
+   * Batch-fetch product thumbnails for a set of product IDs.
+   *
+   * Order items are denormalized snapshots that don't store an image, so the
+   * customer order screens enrich them at read time. This is a single
+   * `id = ANY($1)` query (no N+1) returning a `productId -> thumbnailUrl` map.
+   * Named-column projection per R14.7 (no SELECT *).
+   *
+   * @param {string[]} productIds
+   * @returns {Promise<Map<string, string|null>>}
+   */
+  async findThumbnailsByProductIds(productIds) {
+    const ids = Array.from(
+      new Set((productIds || []).filter((id) => typeof id === 'string' && id))
+    )
+    if (ids.length === 0) {
+      return new Map()
+    }
+
+    const { rows } = await query(
+      `SELECT id, thumbnail_url
+         FROM products
+        WHERE id = ANY($1::uuid[])`,
+      [ids]
+    )
+
+    const map = new Map()
+    for (const row of rows) {
+      map.set(row.id, row.thumbnail_url || null)
+    }
+    return map
+  }
+
+  /**
    * Format snake_case row to camelCase
    */
   _format(row) {

@@ -19,6 +19,27 @@ export default async function categoriesRoutes(fastify) {
   const service = new CategoriesService(repository)
   const controller = new CategoriesController(service)
 
+  /**
+   * Best-effort JWT verification so customer-scoped category product lists
+   * can apply shop-allocation visibility. Never rejects — these endpoints
+   * remain public for anonymous browsing.
+   */
+  const tryAttachUser = async (request) => {
+    if (typeof fastify.optionalAuth === 'function') {
+      try {
+        await fastify.optionalAuth(request)
+      } catch {
+        /* anonymous fallback */
+      }
+      return
+    }
+    try {
+      await request.jwtVerify()
+    } catch {
+      /* anonymous fallback */
+    }
+  }
+
   // GET / — All categories (cached 30 min)
   fastify.get('/', {
     schema: listCategoriesSchema,
@@ -32,6 +53,7 @@ export default async function categoriesRoutes(fastify) {
   // GET /:id/products — Products by category (paginated)
   fastify.get('/:id/products', {
     schema: getCategoryProductsSchema,
+    preHandler: [tryAttachUser],
   }, controller.getProducts.bind(controller))
 
   // POST / — Create category [ADMIN]

@@ -93,15 +93,58 @@ export class CategoriesRepository {
   }
 
   /**
-   * Get products belonging to a category (paginated)
+   * Get products belonging to a category (paginated).
+   *
+   * Surfaces the same product-family / option fields as the products
+   * listing endpoint so the Flutter category grid can render "N options",
+   * veg/origin markers, ratings and delivery time consistently
+   * (product-options contract). `option_count` counts active siblings in
+   * the same family (1 for standalone products).
+   *
+   * @param {string} categoryId
+   * @param {object} opts
+   * @param {number} opts.limit
+   * @param {number} opts.offset
+   * @param {string} [opts.sort]
+   * @param {boolean} [opts.inStock]
+   * @param {boolean} [opts.groupOptions] - When true, returns one
+   *   representative per product_family_id (prefer default option) so
+   *   sibling options collapse into a single card.
+   * @param {string[]|null} [opts.allocatedShopIds] - Customer shop scoping;
+   *   when set, only products available in at least one allocated shop are
+   *   returned (mirrors ProductsRepository.buildCustomerVisibilitySnippet).
    */
-  async findProducts(categoryId, { limit, offset, sort, inStock }) {
+  async findProducts(
+    categoryId,
+    { limit, offset, sort, inStock, groupOptions = false, allocatedShopIds = null }
+  ) {
     const conditions = ['p.is_active = true', 'p.category_id = $1']
     const params = [categoryId]
     let paramIdx = 2
 
     if (inStock) {
       conditions.push('p.stock_quantity > 0')
+    }
+
+    // Customer shop-allocation visibility (additive — only when scoped).
+    if (Array.isArray(allocatedShopIds)) {
+      if (allocatedShopIds.length === 0) {
+        conditions.push('FALSE')
+      } else {
+        params.push(allocatedShopIds)
+        conditions.push(`EXISTS (
+          SELECT 1
+            FROM shop_products sp
+            JOIN shops s ON s.id = sp.shop_id
+           WHERE sp.product_id = p.id
+             AND sp.shop_id = ANY($${paramIdx}::uuid[])
+             AND sp.is_available = true
+             AND sp.deleted_at IS NULL
+             AND s.is_active = true
+             AND s.deleted_at IS NULL
+        )`)
+        paramIdx++
+      }
     }
 
     const sortMap = {
@@ -113,10 +156,69 @@ export class CategoriesRepository {
     const orderBy = sortMap[sort] || 'p.created_at DESC'
     const where = conditions.join(' AND ')
 
+    const optionCountExpr = `COALESCE(
+      (SELECT COUNT(*)::int FROM products sib
+       WHERE sib.product_family_id = p.product_family_id
+         AND sib.product_family_id IS NOT NULL
+         AND sib.is_active = true), 1)`
+
+    const selectCols = `
+      p.id, p.name, p.slug, p.price, p.sale_price, p.stock_quantity,
+      p.unit, p.thumbnail_url, p.is_featured, p.total_sold,
+      p.product_family_id, p.option_label, p.option_sort_order,
+      p.is_default_option, p.food_type, p.origin_tag,
+      p.custom_badges, p.display_delivery_minutes,
+      p.avg_rating, p.rating_count, p.net_quantity,
+      pf.name AS family_name,
+      ${optionCountExpr} AS option_count`
+
+    if (groupOptions) {
+      const { rows } = await query(
+        `WITH ranked AS (
+          SELECT ${selectCols},
+            ROW_NUMBER() OVER (
+              PARTITION BY COALESCE(p.product_family_id, p.id)
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+            ) AS rn
+          FROM products p
+          LEFT JOIN product_families pf ON pf.id = p.product_family_id
+          WHERE ${where}
+        )
+        SELECT id, name, slug, price, sale_price, stock_quantity,
+               unit, thumbnail_url, is_featured, total_sold,
+               product_family_id, option_label, option_sort_order,
+               is_default_option, food_type, origin_tag,
+               custom_badges, display_delivery_minutes,
+               avg_rating, rating_count, net_quantity,
+               family_name, option_count
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY ${orderBy.replace(/p\./g, '')}
+        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+        [...params, limit, offset]
+      )
+
+      const { rows: countRows } = await query(
+        `WITH ranked AS (
+          SELECT p.id,
+            ROW_NUMBER() OVER (
+              PARTITION BY COALESCE(p.product_family_id, p.id)
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+            ) AS rn
+          FROM products p
+          WHERE ${where}
+        )
+        SELECT COUNT(*)::int AS total FROM ranked WHERE rn = 1`,
+        params
+      )
+
+      return { data: rows, total: countRows[0]?.total || 0 }
+    }
+
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price, p.stock_quantity,
-              p.unit, p.thumbnail_url, p.is_featured, p.total_sold
+      `SELECT ${selectCols}
        FROM products p
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE ${where}
        ORDER BY ${orderBy}
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,

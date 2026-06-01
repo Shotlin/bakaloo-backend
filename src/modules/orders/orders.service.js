@@ -4,6 +4,7 @@ import { logger } from '../../config/logger.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
+import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../notifications/customer-order-event.helper.js'
@@ -352,7 +353,7 @@ export class OrdersService {
     })
 
     return {
-      orders,
+      orders: await this._attachItemThumbnails(orders),
       pagination: buildPagination({ page, limit, total }),
     }
   }
@@ -599,10 +600,65 @@ export class OrdersService {
         : Promise.resolve(null),
     ])
 
+    const [enriched] = await this._attachItemThumbnails([order])
+
     return {
-      ...order,
+      ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
+    }
+  }
+
+  /**
+   * Enrich denormalized order items with the current product thumbnail.
+   *
+   * Order items are point-in-time snapshots without an image, so customer
+   * order screens look thin. We batch-resolve thumbnails for every item across
+   * all supplied orders in a single query (no N+1) and attach `thumbnailUrl`.
+   * Failures are swallowed — a missing image must never break the orders list.
+   *
+   * @param {Array<object>} orders
+   * @returns {Promise<Array<object>>}
+   */
+  async _attachItemThumbnails(orders) {
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return orders || []
+    }
+
+    try {
+      const productIds = []
+      for (const order of orders) {
+        for (const item of order.items || []) {
+          if (item && item.productId) {
+            productIds.push(item.productId)
+          }
+        }
+      }
+
+      if (productIds.length === 0) {
+        return orders
+      }
+
+      const thumbnailMap = await this.repo.findThumbnailsByProductIds(productIds)
+
+      return orders.map((order) => ({
+        ...order,
+        items: (order.items || []).map((item) => {
+          const raw = thumbnailMap.get(item.productId) || null
+          return {
+            ...item,
+            thumbnailUrl: raw
+              ? normalizeCloudinaryDeliveryUrl(raw, 'thumb')
+              : null,
+          }
+        }),
+      }))
+    } catch (err) {
+      logger.warn(
+        { err: err.message, action: 'attach_item_thumbnails' },
+        'Failed to enrich order items with thumbnails'
+      )
+      return orders
     }
   }
 

@@ -3,6 +3,8 @@ import { simpleSlug } from '../../utils/slugify.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { logger } from '../../config/logger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
+import { AllocationService } from '../allocation/allocation.service.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const CACHE_KEY_ALL = 'categories:all'
 const CACHE_TTL = 1800 // 30 minutes
@@ -12,8 +14,41 @@ const CACHE_VERSION = 'v2'
  * Categories service — business logic with Redis caching
  */
 export class CategoriesService {
-  constructor(repository) {
+  constructor(repository, deps = {}) {
     this.repo = repository
+    this.allocationService =
+      deps.allocationService ||
+      new AllocationService(new AllocationRepository())
+  }
+
+  /**
+   * Resolve the customer's allocated shop_ids for product visibility.
+   * Returns null for anonymous/admin (legacy unscoped), [] when the
+   * customer has zero allocations, or the list of allocated shop ids.
+   * Fails closed (returns []) on error so a hiccup never leaks the full
+   * catalog to a customer.
+   *
+   * @param {{ userId?: string }|null|undefined} customerContext
+   * @returns {Promise<string[]|null>}
+   */
+  async _resolveAllocatedShopIds(customerContext) {
+    if (!customerContext || !customerContext.userId) return null
+    try {
+      const ids = await this.allocationService.getShopIdsForUser(
+        customerContext.userId
+      )
+      return Array.isArray(ids) ? ids : []
+    } catch (err) {
+      logger.error(
+        {
+          customerId: customerContext.userId,
+          err: err.message,
+          action: 'categories.resolve_allocations',
+        },
+        'Failed to resolve customer allocations; returning empty visibility'
+      )
+      return []
+    }
   }
 
   /**
@@ -44,19 +79,40 @@ export class CategoriesService {
   }
 
   /**
-   * Get products in a category (paginated)
+   * Get products in a category (paginated).
+   *
+   * @param {string} categoryId
+   * @param {object} filters - page/limit/sort/inStock/groupOptions
+   * @param {{ userId?: string }|null} [customerContext] - When present the
+   *   product list is scoped to the customer's allocated shops.
    */
-  async getProducts(categoryId, filters) {
+  async getProducts(categoryId, filters, customerContext = null) {
     // Verify category exists
     const category = this._normalizeCategory(await this.repo.findById(categoryId))
     if (!category) return null
 
     const { offset, limit } = getOffsetLimit(filters)
+
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+    // Customer with zero allocations sees an empty (but valid) page.
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return {
+        data: [],
+        pagination: buildPagination({
+          page: filters.page || 1,
+          limit,
+          total: 0,
+        }),
+      }
+    }
+
     const result = await this.repo.findProducts(categoryId, {
       limit,
       offset,
       sort: filters.sort,
       inStock: filters.inStock,
+      groupOptions: filters.groupOptions === true || filters.groupOptions === 'true',
+      allocatedShopIds,
     })
 
     return {

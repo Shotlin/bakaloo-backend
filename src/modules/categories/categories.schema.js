@@ -63,6 +63,7 @@ export const getCategoryProductsSchema = {
       limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
       sort: { type: 'string', enum: ['price_asc', 'price_desc', 'newest', 'popular'] },
       inStock: { type: 'boolean' },
+      groupOptions: { type: 'boolean', default: false },
     },
   },
 }

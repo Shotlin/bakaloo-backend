@@ -11,6 +11,7 @@ const orderItemSchema = {
     quantity: { type: 'integer' },
     unit: { type: 'string' },
     total: { type: 'number' },
+    thumbnailUrl: { type: ['string', 'null'] },
   },
 }
 

@@ -25,7 +25,16 @@ export class CategoriesController {
 
   /** GET /:id/products */
   async getProducts(request, reply) {
-    const result = await this.service.getProducts(request.params.id, request.query)
+    const user = request?.user
+    const customerContext =
+      user && user.id && (!user.role || user.role === 'CUSTOMER')
+        ? { userId: user.id }
+        : null
+    const result = await this.service.getProducts(
+      request.params.id,
+      request.query,
+      customerContext
+    )
     if (!result) {
       return reply.code(404).send(error('Category not found', 'NOT_FOUND'))
     }
