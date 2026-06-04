@@ -4,6 +4,12 @@ import { HQ_ROLES } from '../../utils/permissions.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { findDemoCouponByCode, mergeDemoCoupons } from './demo-coupons.js'
 
+/** Returns true only for properly formatted UUIDs. */
+function _isValidUUID(value) {
+  if (typeof value !== 'string') return false
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
+
 /**
  * Coupons service — business logic for discount codes.
  *
@@ -387,7 +393,8 @@ export class CouponsService {
     }
 
     // usage_limit_total (new multi-vendor field)
-    if (coupon.usageLimitTotal != null) {
+    // Skip DB lookup for demo coupons — they have non-UUID IDs
+    if (coupon.usageLimitTotal != null && _isValidUUID(coupon.id)) {
       const totalUsage = await this.repo.getTotalUsageCount(coupon.id)
       if (totalUsage >= coupon.usageLimitTotal) {
         return { valid: false, code: ERROR_CODES.COUPON_LIMIT_REACHED, message: 'Coupon usage limit reached' }
@@ -400,8 +407,11 @@ export class CouponsService {
     }
 
     // usage_limit_per_user (new multi-vendor field)
+    // Skip DB lookup for demo coupons — they have non-UUID IDs
     const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
-    const userUsage = await this.repo.getUserUsageCount(coupon.id, userId)
+    const userUsage = _isValidUUID(coupon.id)
+      ? await this.repo.getUserUsageCount(coupon.id, userId)
+      : 0
     if (userUsage >= perUserLimit) {
       return { valid: false, code: ERROR_CODES.COUPON_USER_LIMIT_REACHED, message: 'You have already used this coupon the maximum number of times' }
     }
@@ -542,7 +552,11 @@ export class CouponsService {
       minOrderAmount: coupon.minOrderAmount || 0,
       maxDiscount: coupon.maxDiscount || null,
       code: coupon.code,
-      couponId: coupon.id,
+      // Only return couponId if it looks like a real UUID — demo coupons
+      // have string IDs like 'demo-coupon-bakaloo50' that would crash
+      // the coupon_usages INSERT (UUID type column).
+      couponId: _isValidUUID(coupon.id) ? coupon.id : null,
+      isDemo: !!coupon.isDemo,
     }
   }
 
@@ -571,7 +585,10 @@ export class CouponsService {
    */
   async recordUsage(couponCode, userId, orderId) {
     const coupon = await this.repo.findByCode(couponCode)
-    if (coupon) {
+    // Only record usage for real DB coupons with valid UUID ids.
+    // Demo coupons have string IDs (e.g. 'demo-coupon-bakaloo50') that
+    // would cause a PostgreSQL UUID cast error on the coupon_usages INSERT.
+    if (coupon && _isValidUUID(coupon.id)) {
       await this.repo.recordUsage(coupon.id, userId, orderId)
       logger.info({ couponId: coupon.id, userId, orderId }, 'Coupon usage recorded')
     }

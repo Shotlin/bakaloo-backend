@@ -5,6 +5,7 @@ import { closeRedis } from './config/redis.js'
 import { logger } from './config/logger.js'
 import { runPermissionAudit } from './utils/permission-audit.js'
 import { startCampaignScheduler, stopCampaignScheduler } from './workers/campaign-scheduler.worker.js'
+import { startPaymentExpiryWorker, stopPaymentExpiryWorker } from './workers/payment-expiry.worker.js'
 
 const start = async () => {
   try {
@@ -52,6 +53,9 @@ const start = async () => {
     // Start campaign scheduler poller
     startCampaignScheduler()
 
+    // Start payment expiry worker (cleans up abandoned 15-min payment windows)
+    startPaymentExpiryWorker()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -63,6 +67,9 @@ const start = async () => {
 
       // Stop campaign scheduler
       stopCampaignScheduler()
+
+      // Stop payment expiry worker
+      stopPaymentExpiryWorker()
 
       // Close Socket.IO
       if (app.io) {

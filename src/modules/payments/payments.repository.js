@@ -9,8 +9,8 @@ export class PaymentsRepository {
    */
   async create(data) {
     const { rows } = await query(
-      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         data.orderId,
@@ -20,6 +20,7 @@ export class PaymentsRepository {
         data.currency || 'INR',
         data.status || 'PENDING',
         data.method || null,
+        data.expiresAt || null,
         JSON.stringify(data.metadata || {}),
       ]
     )
@@ -152,6 +153,7 @@ export class PaymentsRepository {
       currency: row.currency,
       status: row.status,
       method: row.method,
+      expiresAt: row.expires_at || null,
       refundId: row.refund_id,
       refundAmount: row.refund_amount ? parseFloat(row.refund_amount) : null,
       refundStatus: row.refund_status,

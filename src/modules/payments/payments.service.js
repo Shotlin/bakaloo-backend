@@ -57,6 +57,10 @@ export class PaymentsService {
       },
     })
 
+    // Payment expires in 15 minutes — after this the cleanup worker will
+    // cancel the order and release any reserved stock.
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000)
+
     // Save payment record
     const payment = await this.repo.create({
       orderId: order.id,
@@ -65,7 +69,13 @@ export class PaymentsService {
       amount: order.totalAmount,
       currency: 'INR',
       status: 'PENDING',
+      expiresAt,
       metadata: { receipt: order.orderNumber },
+    })
+
+    // Update the order with payment expiry so the cleanup worker can find it
+    await this.ordersRepo.updateStatus(order.id, undefined, {
+      paymentExpiresAt: expiresAt,
     })
 
     logger.info(

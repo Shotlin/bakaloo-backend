@@ -37,6 +37,17 @@ export default async function paymentsRoutes(fastify) {
     preHandler: [fastify.authenticate],
   }, controller.history.bind(controller))
 
+  // ─── Webhook (NO AUTH — verified by Razorpay signature) ────────────
+
+  // POST /webhook — Razorpay event webhook
+  // Raw body must be preserved for signature verification.
+  fastify.post('/webhook', {
+    config: { rawBody: true },
+    schema: {
+      body: { type: 'object', additionalProperties: true },
+    },
+  }, controller.webhook.bind(controller))
+
   // ─── Admin routes ───────────────────────────────────────
 
   // POST /:id/refund — Initiate refund [ADMIN]
