@@ -104,7 +104,12 @@ export const placeOrderSchema = {
     properties: {
       addressId: { type: 'string', format: 'uuid' },
       paymentMethod: { type: 'string', enum: ['COD', 'ONLINE', 'WALLET'] },
-      couponCode: { type: 'string', minLength: 1, maxLength: 50 },
+      couponCode: {
+        oneOf: [
+          { type: 'string', minLength: 1, maxLength: 50 },
+          { type: 'null' },
+        ],
+      },
       deliveryNotes: { type: 'string', maxLength: 500 },
       tipAmount: { type: 'number', minimum: 0, maximum: 500 },
       deliveryInstructions: { type: ['string', 'null'], maxLength: 200 },

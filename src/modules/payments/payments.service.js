@@ -138,6 +138,39 @@ export class PaymentsService {
     })
     await this._queueAutoAssign(payment.orderId, 'PAYMENT_VERIFY')
 
+    // NOW clear the cart and send "Order placed" notification — only after
+    // payment is confirmed. This is the critical fix: previously the order
+    // service cleared cart and sent notification at order creation time,
+    // before payment verification, which caused false notifications and
+    // empty carts when Razorpay payment failed.
+    try {
+      const { CartRepository } = await import('../cart/cart.repository.js')
+      const cartRepo = new CartRepository()
+      await cartRepo.clearCart(userId)
+      await cartRepo.clearExtras(userId)
+    } catch (err) {
+      logger.warn({ err: err.message, userId }, 'Cart clear after payment verify failed (non-critical)')
+    }
+
+    // Send order placed notification after confirmed payment
+    try {
+      const order = await this.ordersRepo.findByIdAndUser(payment.orderId, userId)
+      if (order) {
+        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+        const { NotificationsService } = await import('../notifications/notifications.service.js')
+        const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
+          orderId: order.id,
+          orderNumber: order.orderNumber || order.order_number,
+          timelineType: 'ORDER_PLACED',
+          status: 'CONFIRMED',
+        }))
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment verify failed (non-critical)')
+    }
+
     logger.info(
       { paymentId: payment.id, razorpayPaymentId, orderId: payment.orderId },
       'Payment verified successfully'

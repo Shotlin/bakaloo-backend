@@ -240,7 +240,12 @@ export class OrdersService {
     // 6. Post-commit cleanup + side effects (best-effort; do not fail the
     //    customer if any of these throw).
     try {
-      await this.cartService.clearCart(userId)
+      // For ONLINE and WALLET payments, do NOT clear cart yet — cart is only
+      // cleared after successful payment verification / wallet deduction.
+      // This prevents the "cart disappeared but payment failed" bug.
+      if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+        await this.cartService.clearCart(userId)
+      }
       if (appliedCouponCode && createdOrders.length === 1) {
         await this.couponsService.recordUsage(
           appliedCouponCode,
@@ -290,15 +295,21 @@ export class OrdersService {
         'Per-shop order placed successfully'
       )
 
-      await this._sendCustomerOrderNotification(
-        userId,
-        buildCustomerOrderEventNotification({
-          orderId: order.id,
-          orderNumber: order.orderNumber,
-          timelineType: 'ORDER_PLACED',
-          status: order.status,
-        })
-      )
+      // For ONLINE and WALLET payments, do NOT send "Order placed" notification yet.
+      // - ONLINE: notification sent after Razorpay payment verification
+      // - WALLET: notification sent after wallet deduction succeeds
+      // This prevents false "Order placed" notifications when payment fails.
+      if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+        await this._sendCustomerOrderNotification(
+          userId,
+          buildCustomerOrderEventNotification({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            timelineType: 'ORDER_PLACED',
+            status: order.status,
+          })
+        )
+      }
 
       if (order.status === ORDER_STATUS.CONFIRMED) {
         await this._queueAutoAssign(order.id, 'ORDER_PLACED_COD')

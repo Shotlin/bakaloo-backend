@@ -288,6 +288,32 @@ export class WalletService {
       })
       await this._queueAutoAssign(orderId, 'WALLET_PAY')
 
+      // Clear cart and send notification AFTER successful wallet deduction
+      try {
+        const { CartRepository } = await import('../cart/cart.repository.js')
+        const cartRepo = new CartRepository()
+        await cartRepo.clearCart(userId)
+        await cartRepo.clearExtras(userId)
+      } catch (cartErr) {
+        logger.warn({ err: cartErr.message, userId }, 'Cart clear after wallet pay failed (non-critical)')
+      }
+
+      // Send "Order placed" notification only after confirmed payment
+      try {
+        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+        const { NotificationsService } = await import('../notifications/notifications.service.js')
+        const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
+          orderId: order.id,
+          orderNumber: order.orderNumber || order.order_number,
+          timelineType: 'ORDER_PLACED',
+          status: 'CONFIRMED',
+        }))
+      } catch (notifErr) {
+        logger.warn({ err: notifErr.message, orderId }, 'Notification after wallet pay failed (non-critical)')
+      }
+
       logger.info(
         { userId, orderId, amount: order.totalAmount },
         'Wallet payment successful'
