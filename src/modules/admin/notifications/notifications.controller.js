@@ -35,9 +35,8 @@ export class AdminNotificationsController {
 
   /* ── Campaigns ── */
   async sendBulk(request, reply) {
-    const notificationQueue = request.server.queues?.notifications || null
-    const data = await svc.sendBulk(request.body, request.user.id, request.ip, notificationQueue)
-    return success(data, 'Bulk notification sent')
+    const data = await svc.sendBulk(request.body, request.user.id, request.ip)
+    return success(data, 'Bulk notification queued')
   }
 
   async schedule(request, reply) {
@@ -45,9 +44,15 @@ export class AdminNotificationsController {
     return success(data, 'Campaign scheduled')
   }
 
+  async cancelCampaign(request, reply) {
+    const c = await svc.cancelCampaign(request.params.id, request.user.id, request.ip)
+    if (!c) return error('Campaign not found or cannot be cancelled', 404)
+    return success(c, 'Campaign cancelled')
+  }
+
   async listCampaigns(request, reply) {
-    const { page, limit } = request.query
-    const data = await svc.listCampaigns({ page, limit })
+    const { page, limit, status } = request.query
+    const data = await svc.listCampaigns({ page, limit, status })
     return success(data, 'Campaigns fetched')
   }
 
@@ -58,8 +63,8 @@ export class AdminNotificationsController {
   }
 
   async getSegmentCount(request, reply) {
-    const { segment } = request.query
-    const count = await svc.getSegmentCount(segment)
-    return success({ segment, count }, 'Segment count fetched')
+    const { segment, segmentValue } = request.query
+    const count = await svc.getSegmentCount(segment, segmentValue)
+    return success({ segment, segmentValue, count }, 'Segment count fetched')
   }
 }

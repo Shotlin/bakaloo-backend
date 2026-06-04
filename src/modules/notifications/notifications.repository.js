@@ -90,27 +90,31 @@ export class NotificationsRepository {
   }
 
   async registerToken(userId, token, platform) {
-    const { rows: existing } = await query(
-      'SELECT id FROM fcm_tokens WHERE token = $1',
-      [token]
+    // Upsert: if token exists, re-activate and update owner.
+    // Also mark all OTHER tokens for this user as inactive — a user should
+    // only have ONE active token at a time (the most recently registered one).
+    // This prevents sending to 10+ stale tokens accumulated over reinstalls.
+    await query(
+      `INSERT INTO fcm_tokens (user_id, token, platform, is_active, updated_at)
+       VALUES ($1, $2, $3, true, NOW())
+       ON CONFLICT (token) DO UPDATE
+         SET user_id = EXCLUDED.user_id,
+             platform = EXCLUDED.platform,
+             is_active = true,
+             updated_at = NOW()`,
+      [userId, token, platform]
     )
-
-    if (existing.length > 0) {
-      await query(
-        'UPDATE fcm_tokens SET user_id = $1, platform = $2, updated_at = NOW() WHERE token = $3',
-        [userId, platform, token]
-      )
-    } else {
-      await query(
-        'INSERT INTO fcm_tokens (user_id, token, platform) VALUES ($1, $2, $3)',
-        [userId, token, platform]
-      )
-    }
+    // Deactivate all other tokens for this user (keep only the new one active)
+    await query(
+      `UPDATE fcm_tokens SET is_active = false
+       WHERE user_id = $1 AND token != $2 AND is_active = true`,
+      [userId, token]
+    )
   }
 
   async getFcmTokens(userId) {
     const { rows } = await query(
-      'SELECT token, platform FROM fcm_tokens WHERE user_id = $1',
+      'SELECT token, platform FROM fcm_tokens WHERE user_id = $1 AND is_active = true',
       [userId]
     )
     return rows

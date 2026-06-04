@@ -4,6 +4,7 @@ import { testConnection, closePool } from './config/database.js'
 import { closeRedis } from './config/redis.js'
 import { logger } from './config/logger.js'
 import { runPermissionAudit } from './utils/permission-audit.js'
+import { startCampaignScheduler, stopCampaignScheduler } from './workers/campaign-scheduler.worker.js'
 
 const start = async () => {
   try {
@@ -48,6 +49,9 @@ const start = async () => {
       logger.info(`🔌 Socket.IO ready on ws://${env.HOST}:${env.PORT}`)
     }
 
+    // Start campaign scheduler poller
+    startCampaignScheduler()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -56,6 +60,9 @@ const start = async () => {
     // ─── GRACEFUL SHUTDOWN ──────────────────────────
     const shutdown = async (signal) => {
       logger.info({ signal }, 'Shutdown signal received')
+
+      // Stop campaign scheduler
+      stopCampaignScheduler()
 
       // Close Socket.IO
       if (app.io) {

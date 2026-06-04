@@ -1,84 +1,137 @@
 import { query, getClient } from '../../../config/database.js'
 
+const TEMPLATE_COLS = `
+  id, name, title, body, type, variables, image_url, deep_link,
+  is_active, created_by, created_at, updated_at
+`
+
+const CAMPAIGN_COLS = `
+  nc.id, nc.title, nc.body, nc.image_url, nc.deep_link, nc.type,
+  nc.target_type, nc.segment, nc.target_count, nc.sent_count,
+  nc.opened_count, nc.failed_count, nc.failure_summary,
+  nc.status, nc.template_id, nc.scheduled_at, nc.expires_at,
+  nc.sent_at, nc.created_by, nc.created_at, nc.updated_at,
+  u.name AS created_by_name
+`
+
 export class AdminNotificationsRepository {
   /* ── Templates ── */
+
   async findAllTemplates() {
-    const { rows } = await query('SELECT * FROM notification_templates ORDER BY name')
+    const { rows } = await query(
+      `SELECT ${TEMPLATE_COLS} FROM notification_templates ORDER BY name`
+    )
     return rows
   }
 
   async findTemplateById(id) {
-    const { rows: [t] } = await query('SELECT * FROM notification_templates WHERE id = $1', [id])
+    const { rows: [t] } = await query(
+      `SELECT ${TEMPLATE_COLS} FROM notification_templates WHERE id = $1`,
+      [id]
+    )
     return t || null
   }
 
-  async createTemplate({ name, title, body, type, variables }) {
+  async createTemplate({ name, title, body, type = 'PUSH', variables, image_url, deep_link }) {
     const { rows: [t] } = await query(
-      `INSERT INTO notification_templates (name, title, body, type, variables)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [name, title, body, type, JSON.stringify(variables || [])]
+      `INSERT INTO notification_templates
+         (name, title, body, type, variables, image_url, deep_link)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING ${TEMPLATE_COLS}`,
+      [name, title, body, type, JSON.stringify(variables || []), image_url || null, deep_link || null]
     )
     return t
   }
 
-  async updateTemplate(id, { name, title, body, type, variables }) {
+  async updateTemplate(id, updates) {
+    const allowed = ['name', 'title', 'body', 'type', 'variables', 'image_url', 'deep_link', 'is_active']
     const sets = []; const params = []; let idx = 1
-    if (name !== undefined) { sets.push(`name = $${idx++}`); params.push(name) }
-    if (title !== undefined) { sets.push(`title = $${idx++}`); params.push(title) }
-    if (body !== undefined) { sets.push(`body = $${idx++}`); params.push(body) }
-    if (type !== undefined) { sets.push(`type = $${idx++}`); params.push(type) }
-    if (variables !== undefined) { sets.push(`variables = $${idx++}`); params.push(JSON.stringify(variables)) }
+    for (const key of allowed) {
+      if (updates[key] !== undefined) {
+        sets.push(`${key} = $${idx++}`)
+        params.push(key === 'variables' ? JSON.stringify(updates[key]) : updates[key])
+      }
+    }
     if (sets.length === 0) return this.findTemplateById(id)
-
     sets.push(`updated_at = NOW()`)
     params.push(id)
     const { rows: [t] } = await query(
-      `UPDATE notification_templates SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+      `UPDATE notification_templates SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${TEMPLATE_COLS}`,
       params
     )
-    return t
+    return t || null
   }
 
   async deleteTemplate(id) {
-    const { rowCount } = await query('DELETE FROM notification_templates WHERE id = $1', [id])
+    const { rowCount } = await query(
+      'DELETE FROM notification_templates WHERE id = $1',
+      [id]
+    )
     return rowCount > 0
   }
 
   /* ── Campaigns ── */
-  async createCampaign({ title, body, segment, segmentFilters, scheduledAt, createdBy }) {
-    // Map API segment names to DB target_type CHECK constraint values
+
+  async createCampaign({ title, body, type, segment, segmentValue, image_url, deep_link, expires_at, template_id, scheduledAt, createdBy, targetCount = 0 }) {
+    // Map canonical segment names to DB target_type CHECK constraint values
     const segmentToTargetType = {
+      all_customers: 'all_customers',
+      specific_user: 'custom_list',
+      store_customers: 'all_customers',
+      inactive_customers: 'no_order_30_days',
+      cart_not_empty: 'wishlist_users',
       all: 'all_customers',
       new: 'all_customers',
       inactive: 'no_order_30_days',
       high_value: 'high_value',
     }
     const targetType = segmentToTargetType[segment] || 'all_customers'
+    const status = scheduledAt ? 'SCHEDULED' : 'SENDING'
 
     const { rows: [c] } = await query(
-      `INSERT INTO notification_campaigns (title, body, target_type, scheduled_at, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [title, body, targetType, scheduledAt || null,
-        scheduledAt ? 'SCHEDULED' : 'SENDING', createdBy]
+      `INSERT INTO notification_campaigns
+         (title, body, type, target_type, segment, image_url, deep_link,
+          expires_at, template_id, target_count, scheduled_at, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id, title, body, type, target_type, segment, image_url, deep_link,
+         expires_at, template_id, target_count, sent_count, failed_count,
+         status, scheduled_at, created_by, created_at`,
+      [
+        title, body, type || 'general', targetType, segment,
+        image_url || null, deep_link || null,
+        expires_at || null, template_id || null,
+        targetCount, scheduledAt || null, status, createdBy,
+      ]
     )
     return c
   }
 
-  async findAllCampaigns({ offset, limit }) {
+  async findAllCampaigns({ offset, limit, status }) {
+    const params = [limit, offset]
+    let where = ''
+    if (status) {
+      where = 'WHERE nc.status = $3'
+      params.push(status)
+    }
     const { rows } = await query(
-      `SELECT nc.*, u.name AS created_by_name
+      `SELECT ${CAMPAIGN_COLS}
        FROM notification_campaigns nc
        LEFT JOIN users u ON u.id = nc.created_by
-       ORDER BY nc.created_at DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       ${where}
+       ORDER BY nc.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      params
     )
-    const countRes = await query('SELECT COUNT(*)::int AS total FROM notification_campaigns')
+    const countRes = await query(
+      `SELECT COUNT(*)::int AS total FROM notification_campaigns ${where}`,
+      status ? [status] : []
+    )
     return { campaigns: rows, total: countRes.rows[0].total }
   }
 
   async findCampaignById(id) {
     const { rows: [c] } = await query(
-      `SELECT nc.*, u.name AS created_by_name
+      `SELECT ${CAMPAIGN_COLS}
        FROM notification_campaigns nc
        LEFT JOIN users u ON u.id = nc.created_by
        WHERE nc.id = $1`,
@@ -87,60 +140,164 @@ export class AdminNotificationsRepository {
     return c || null
   }
 
-  async updateCampaignStatus(id, status, sentCount) {
-    const sets = ['status = $1']
-    const params = [status, id]
+  async findDueScheduledCampaigns() {
+    const { rows } = await query(
+      `SELECT id, title, body, type, segment, image_url, deep_link, expires_at, template_id
+       FROM notification_campaigns
+       WHERE status = 'SCHEDULED' AND scheduled_at <= NOW()
+       ORDER BY scheduled_at ASC
+       LIMIT 20`
+    )
+    return rows
+  }
+
+  async lockAndMarkSending(id) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `SELECT id FROM notification_campaigns WHERE id = $1 AND status = 'SCHEDULED' FOR UPDATE SKIP LOCKED`,
+        [id]
+      )
+      if (rows.length === 0) {
+        await client.query('ROLLBACK')
+        return false
+      }
+      await client.query(
+        `UPDATE notification_campaigns SET status = 'SENDING', updated_at = NOW() WHERE id = $1`,
+        [id]
+      )
+      await client.query('COMMIT')
+      return true
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  async updateCampaignStatus(id, status, { sentCount, failedCount, failureSummary } = {}) {
+    const sets = ['status = $1', 'updated_at = NOW()']
+    const params = [status]
+    let idx = 2
+
     if (sentCount !== undefined) {
-      sets.push('sent_count = $3')
+      sets.push(`sent_count = $${idx++}`)
       params.push(sentCount)
+    }
+    if (failedCount !== undefined) {
+      sets.push(`failed_count = $${idx++}`)
+      params.push(failedCount)
+    }
+    if (failureSummary !== undefined) {
+      sets.push(`failure_summary = $${idx++}`)
+      params.push(JSON.stringify(failureSummary))
     }
     if (status === 'SENT') {
       sets.push('sent_at = NOW()')
     }
+    params.push(id)
     const { rows: [c] } = await query(
-      `UPDATE notification_campaigns SET ${sets.join(', ')} WHERE id = $2 RETURNING *`,
+      `UPDATE notification_campaigns SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, status, sent_count, failed_count`,
       params
     )
     return c
   }
 
-  /* ── Target audience count ── */
-  async getSegmentCount(segment, filters = {}) {
-    let where = "u.role = 'CUSTOMER' AND u.is_active = true"
-    const params = []
+  async cancelCampaign(id) {
+    const { rows: [c] } = await query(
+      `UPDATE notification_campaigns
+       SET status = 'CANCELLED', updated_at = NOW()
+       WHERE id = $1 AND status = 'SCHEDULED'
+       RETURNING id, status`,
+      [id]
+    )
+    return c || null
+  }
 
-    if (segment === 'all') {
-      // no extra filter
-    } else if (segment === 'new') {
-      where += ` AND u.created_at >= NOW() - INTERVAL '30 days'`
-    } else if (segment === 'inactive') {
-      where += ` AND u.id NOT IN (SELECT DISTINCT user_id FROM orders WHERE created_at >= NOW() - INTERVAL '30 days')`
-    } else if (segment === 'high_value') {
-      where += ` AND u.id IN (SELECT user_id FROM orders WHERE status = 'DELIVERED' GROUP BY user_id HAVING SUM(total) >= 5000)`
-    }
+  /* ── Segment Queries ── */
 
+  async getSegmentCount(segment, segmentValue) {
+    const { where, params } = buildSegmentWhere(segment, segmentValue)
     const { rows: [{ count }] } = await query(
-      `SELECT COUNT(DISTINCT u.id)::int AS count 
-       FROM users u 
-       INNER JOIN fcm_tokens ft ON ft.user_id = u.id
+      `SELECT COUNT(DISTINCT u.id)::int AS count
+       FROM users u
+       INNER JOIN fcm_tokens ft ON ft.user_id = u.id AND ft.is_active = true
        WHERE ${where}`,
       params
     )
     return count
   }
 
-  async getTargetUserIds(segment) {
-    let where = "u.role = 'CUSTOMER' AND u.is_active = true"
-    if (segment === 'new') where += ` AND u.created_at >= NOW() - INTERVAL '30 days'`
-    else if (segment === 'inactive') where += ` AND u.id NOT IN (SELECT DISTINCT user_id FROM orders WHERE created_at >= NOW() - INTERVAL '30 days')`
-    else if (segment === 'high_value') where += ` AND u.id IN (SELECT user_id FROM orders WHERE status = 'DELIVERED' GROUP BY user_id HAVING SUM(total) >= 5000)`
-
+  async getTargetUsersWithTokens(segment, segmentValue) {
+    const { where, params } = buildSegmentWhere(segment, segmentValue)
     const { rows } = await query(
-      `SELECT DISTINCT u.id, ft.token AS fcm_token 
-       FROM users u 
-       INNER JOIN fcm_tokens ft ON ft.user_id = u.id
-       WHERE ${where}`
+      `SELECT DISTINCT ON (u.id) u.id AS user_id, ft.token AS fcm_token
+       FROM users u
+       INNER JOIN fcm_tokens ft ON ft.user_id = u.id AND ft.is_active = true
+       WHERE ${where}
+       ORDER BY u.id`,
+      params
     )
     return rows
   }
+
+  async deactivateInvalidTokens(tokens) {
+    if (!tokens?.length) return
+    await query(
+      `UPDATE fcm_tokens SET is_active = false WHERE token = ANY($1)`,
+      [tokens]
+    )
+  }
+}
+
+function buildSegmentWhere(segment, segmentValue) {
+  const baseWhere = "u.role = 'CUSTOMER' AND u.is_active = true"
+  const params = []
+  let where = baseWhere
+
+  switch (segment) {
+    case 'all_customers':
+    case 'all':
+      break
+    case 'new':
+      where += ` AND u.created_at >= NOW() - INTERVAL '30 days'`
+      break
+    case 'inactive_customers':
+    case 'inactive':
+      where += ` AND u.id NOT IN (
+        SELECT DISTINCT user_id FROM orders WHERE created_at >= NOW() - INTERVAL '30 days'
+      )`
+      break
+    case 'high_value':
+      where += ` AND u.id IN (
+        SELECT user_id FROM orders WHERE status = 'DELIVERED'
+        GROUP BY user_id HAVING SUM(total) >= 5000
+      )`
+      break
+    case 'specific_user':
+      if (segmentValue) {
+        params.push(segmentValue)
+        where += ` AND (u.id::text = $${params.length} OR u.phone = $${params.length})`
+      }
+      break
+    case 'store_customers':
+      if (segmentValue) {
+        params.push(segmentValue)
+        where += ` AND u.id IN (
+          SELECT DISTINCT user_id FROM orders WHERE shop_id = $${params.length}
+        )`
+      }
+      break
+    case 'cart_not_empty':
+      where += ` AND u.id IN (
+        SELECT DISTINCT user_id FROM cart_items
+      )`
+      break
+    default:
+      break
+  }
+
+  return { where, params }
 }

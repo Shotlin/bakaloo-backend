@@ -169,6 +169,7 @@ export class CategoriesRepository {
       p.is_default_option, p.food_type, p.origin_tag,
       p.custom_badges, p.display_delivery_minutes,
       p.avg_rating, p.rating_count, p.net_quantity,
+      p.created_at,
       pf.name AS family_name,
       ${optionCountExpr} AS option_count`
 
@@ -190,7 +191,7 @@ export class CategoriesRepository {
                is_default_option, food_type, origin_tag,
                custom_badges, display_delivery_minutes,
                avg_rating, rating_count, net_quantity,
-               family_name, option_count
+               created_at, family_name, option_count
         FROM ranked
         WHERE rn = 1
         ORDER BY ${orderBy.replace(/p\./g, '')}

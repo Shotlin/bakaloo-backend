@@ -457,9 +457,30 @@ async function getProductsByIds(productIds) {
        p.description,
        p.ingredients,
        p.nutrition_info,
-       p.storage_instructions
+       p.storage_instructions,
+       p.product_family_id,
+       pf.name AS family_name,
+       p.option_label,
+       p.option_sort_order,
+       p.is_default_option,
+       p.food_type,
+       p.origin_tag,
+       p.custom_badges,
+       p.display_delivery_minutes,
+       p.net_quantity,
+       p.brand,
+       p.brand_logo_url,
+       p.avg_rating,
+       p.rating_count,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM products ps
+          WHERE ps.product_family_id = p.product_family_id
+            AND ps.is_active = true AND ps.stock_quantity > 0),
+         1
+       ) AS option_count
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_families pf ON pf.id = p.product_family_id
      WHERE p.is_active = true
        AND p.stock_quantity > 0
        AND p.id = ANY($1::uuid[])
@@ -509,9 +530,30 @@ async function getProductsByCategoryIds(categoryIds, limit, excludeIds = []) {
        p.description,
        p.ingredients,
        p.nutrition_info,
-       p.storage_instructions
+       p.storage_instructions,
+       p.product_family_id,
+       pf.name AS family_name,
+       p.option_label,
+       p.option_sort_order,
+       p.is_default_option,
+       p.food_type,
+       p.origin_tag,
+       p.custom_badges,
+       p.display_delivery_minutes,
+       p.net_quantity,
+       p.brand,
+       p.brand_logo_url,
+       p.avg_rating,
+       p.rating_count,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM products ps
+          WHERE ps.product_family_id = p.product_family_id
+            AND ps.is_active = true AND ps.stock_quantity > 0),
+         1
+       ) AS option_count
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_families pf ON pf.id = p.product_family_id
      WHERE ${where}
      ORDER BY p.is_featured DESC, p.total_sold DESC, p.created_at DESC
      LIMIT ${limitPlaceholder}`,
@@ -542,9 +584,30 @@ async function getFeaturedProducts(limit) {
        p.description,
        p.ingredients,
        p.nutrition_info,
-       p.storage_instructions
+       p.storage_instructions,
+       p.product_family_id,
+       pf.name AS family_name,
+       p.option_label,
+       p.option_sort_order,
+       p.is_default_option,
+       p.food_type,
+       p.origin_tag,
+       p.custom_badges,
+       p.display_delivery_minutes,
+       p.net_quantity,
+       p.brand,
+       p.brand_logo_url,
+       p.avg_rating,
+       p.rating_count,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM products ps
+          WHERE ps.product_family_id = p.product_family_id
+            AND ps.is_active = true AND ps.stock_quantity > 0),
+         1
+       ) AS option_count
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_families pf ON pf.id = p.product_family_id
      WHERE p.is_active = true
        AND p.stock_quantity > 0
        AND p.is_featured = true
@@ -577,9 +640,30 @@ async function getDealProducts(limit) {
        p.description,
        p.ingredients,
        p.nutrition_info,
-       p.storage_instructions
+       p.storage_instructions,
+       p.product_family_id,
+       pf.name AS family_name,
+       p.option_label,
+       p.option_sort_order,
+       p.is_default_option,
+       p.food_type,
+       p.origin_tag,
+       p.custom_badges,
+       p.display_delivery_minutes,
+       p.net_quantity,
+       p.brand,
+       p.brand_logo_url,
+       p.avg_rating,
+       p.rating_count,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM products ps
+          WHERE ps.product_family_id = p.product_family_id
+            AND ps.is_active = true AND ps.stock_quantity > 0),
+         1
+       ) AS option_count
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_families pf ON pf.id = p.product_family_id
      WHERE p.is_active = true
        AND p.stock_quantity > 0
        AND p.sale_price IS NOT NULL
@@ -613,9 +697,30 @@ async function getTrendingProducts(limit) {
        p.description,
        p.ingredients,
        p.nutrition_info,
-       p.storage_instructions
+       p.storage_instructions,
+       p.product_family_id,
+       pf.name AS family_name,
+       p.option_label,
+       p.option_sort_order,
+       p.is_default_option,
+       p.food_type,
+       p.origin_tag,
+       p.custom_badges,
+       p.display_delivery_minutes,
+       p.net_quantity,
+       p.brand,
+       p.brand_logo_url,
+       p.avg_rating,
+       p.rating_count,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM products ps
+          WHERE ps.product_family_id = p.product_family_id
+            AND ps.is_active = true AND ps.stock_quantity > 0),
+         1
+       ) AS option_count
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN product_families pf ON pf.id = p.product_family_id
      WHERE p.is_active = true
        AND p.stock_quantity > 0
      ORDER BY p.total_sold DESC, p.created_at DESC
