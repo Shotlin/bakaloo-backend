@@ -105,7 +105,65 @@ export class OrdersService {
       handlingFee,
       lateNightFee,
       savingsTotal,
+      // Delivery slot fields
+      deliveryMode,
+      scheduledDeliveryAt,
+      scheduledSlotStart,
+      scheduledSlotEnd,
+      scheduledSlotLabel,
     } = body
+
+    // Validate delivery slot
+    const resolvedDeliveryMode = (deliveryMode || 'ASAP').toUpperCase()
+    if (!['ASAP', 'SCHEDULED'].includes(resolvedDeliveryMode)) {
+      return {
+        success: false,
+        message: 'deliveryMode must be ASAP or SCHEDULED',
+        code: 'INVALID_DELIVERY_MODE',
+      }
+    }
+    if (resolvedDeliveryMode === 'SCHEDULED') {
+      if (!scheduledSlotStart || !scheduledSlotEnd) {
+        return {
+          success: false,
+          message: 'scheduledSlotStart and scheduledSlotEnd are required for SCHEDULED delivery',
+          code: 'MISSING_SLOT_FIELDS',
+        }
+      }
+      const slotStart = new Date(scheduledSlotStart)
+      const slotEnd = new Date(scheduledSlotEnd)
+      const now = new Date()
+      if (!Number.isFinite(slotStart.getTime()) || !Number.isFinite(slotEnd.getTime())) {
+        return {
+          success: false,
+          message: 'scheduledSlotStart and scheduledSlotEnd must be valid ISO timestamps',
+          code: 'INVALID_SLOT_TIMESTAMPS',
+        }
+      }
+      if (slotStart <= now) {
+        return {
+          success: false,
+          message: 'Scheduled delivery time must be in the future',
+          code: 'SLOT_IN_PAST',
+        }
+      }
+      if (slotEnd <= slotStart) {
+        return {
+          success: false,
+          message: 'Slot end time must be after slot start time',
+          code: 'INVALID_SLOT_RANGE',
+        }
+      }
+      // Max 7 days ahead
+      const maxAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+      if (slotStart > maxAhead) {
+        return {
+          success: false,
+          message: 'Scheduled delivery cannot be more than 7 days in the future',
+          code: 'SLOT_TOO_FAR_AHEAD',
+        }
+      }
+    }
 
     // 1. Validate cart (re-checks allocations, shop active, stock,
     //    max_order_qty per Req 12.3/12.7)
@@ -201,6 +259,12 @@ export class OrdersService {
           couponCode: appliedCouponCode,
           deliveryNotes: deliveryNotes || null,
           deliveryInstructions: resolvedInstructions,
+          // Delivery slot
+          deliveryMode: resolvedDeliveryMode,
+          scheduledDeliveryAt: resolvedDeliveryMode === 'SCHEDULED' ? (scheduledDeliveryAt || scheduledSlotStart) : null,
+          scheduledSlotStart: resolvedDeliveryMode === 'SCHEDULED' ? scheduledSlotStart : null,
+          scheduledSlotEnd: resolvedDeliveryMode === 'SCHEDULED' ? scheduledSlotEnd : null,
+          scheduledSlotLabel: resolvedDeliveryMode === 'SCHEDULED' ? (scheduledSlotLabel || null) : null,
         },
       })
 

@@ -360,6 +360,12 @@ export class OrderSplitterService {
           tipAmount: 0,
           deliveryInstructions: checkoutMeta.deliveryInstructions || null,
           savingsTotal: 0,
+          // Delivery slot fields
+          deliveryMode: checkoutMeta.deliveryMode || 'ASAP',
+          scheduledDeliveryAt: checkoutMeta.scheduledDeliveryAt || null,
+          scheduledSlotStart: checkoutMeta.scheduledSlotStart || null,
+          scheduledSlotEnd: checkoutMeta.scheduledSlotEnd || null,
+          scheduledSlotLabel: checkoutMeta.scheduledSlotLabel || null,
         },
         orderItems
       )

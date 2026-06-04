@@ -142,6 +142,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/delivery',
   })
 
+  // Delivery Slots — available time windows for scheduled delivery
+  await app.register(import('./modules/orders/delivery-slots.routes.js'), {
+    prefix: '/api/v1/delivery',
+  })
+
   // Shops — multi-vendor system
   await app.register(import('./modules/shops/shops.routes.js'), {
     prefix: '/api/v1/shops',

@@ -90,6 +90,12 @@ const orderResponseSchema = {
     riderId: { type: ['string', 'null'] },
     riderName: { type: ['string', 'null'] },
     riderPhone: { type: ['string', 'null'] },
+    // Delivery slot fields
+    deliveryMode: { type: 'string', enum: ['ASAP', 'SCHEDULED'] },
+    scheduledDeliveryAt: { type: ['string', 'null'] },
+    scheduledSlotStart: { type: ['string', 'null'] },
+    scheduledSlotEnd: { type: ['string', 'null'] },
+    scheduledSlotLabel: { type: ['string', 'null'] },
     timeline: { type: 'array', items: timelineItemSchema },
     tracking: trackingSchema,
   },
@@ -116,6 +122,12 @@ export const placeOrderSchema = {
       handlingFee: { type: 'number', minimum: 0, default: 0 },
       lateNightFee: { type: 'number', minimum: 0, default: 0 },
       savingsTotal: { type: 'number', minimum: 0, default: 0 },
+      // Delivery slot fields
+      deliveryMode: { type: 'string', enum: ['ASAP', 'SCHEDULED'], default: 'ASAP' },
+      scheduledDeliveryAt: { type: ['string', 'null'] },
+      scheduledSlotStart: { type: ['string', 'null'] },
+      scheduledSlotEnd: { type: ['string', 'null'] },
+      scheduledSlotLabel: { type: ['string', 'null'], maxLength: 100 },
     },
   },
   response: {

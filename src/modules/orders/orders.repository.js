@@ -32,13 +32,15 @@ export class OrdersRepository {
         delivery_fee, platform_fee, tax_amount, total_amount,
         payment_method, payment_status, coupon_code, delivery_address,
         delivery_notes, estimated_delivery,
-        handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
+        delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
       RETURNING id, order_number, user_id, shop_id, rider_id, status, items,
                 subtotal, discount_amount, delivery_fee, platform_fee, tax_amount, total_amount,
                 payment_method, payment_status, coupon_code, delivery_address, delivery_notes,
                 estimated_delivery, delivered_at, proof_photo_url, cancelled_reason,
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
+                delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
                 created_at, updated_at`,
       [
         orderData.orderNumber,
@@ -63,6 +65,11 @@ export class OrdersRepository {
         orderData.tipAmount || 0,
         orderData.deliveryInstructions || null,
         orderData.savingsTotal || 0,
+        orderData.deliveryMode || 'ASAP',
+        orderData.scheduledDeliveryAt || null,
+        orderData.scheduledSlotStart || null,
+        orderData.scheduledSlotEnd || null,
+        orderData.scheduledSlotLabel || null,
       ]
     )
 
@@ -505,6 +512,11 @@ export class OrdersRepository {
       tipAmount: parseFloat(row.tip_amount || 0),
       deliveryInstructions: row.delivery_instructions || null,
       savingsTotal: parseFloat(row.savings_total || 0),
+      deliveryMode: row.delivery_mode || 'ASAP',
+      scheduledDeliveryAt: row.scheduled_delivery_at || null,
+      scheduledSlotStart: row.scheduled_slot_start || null,
+      scheduledSlotEnd: row.scheduled_slot_end || null,
+      scheduledSlotLabel: row.scheduled_slot_label || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
