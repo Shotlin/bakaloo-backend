@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { query } from '../../config/database.js'
 import { redis } from '../../config/redis.js'
 import { success, error } from '../../utils/apiResponse.js'
+import { logger } from '../../config/logger.js'
 import {
   ACTIVE_THEME_CACHE_KEY,
   getSectionPublicCacheKey,
@@ -11,6 +12,35 @@ import {
 import { STORE_KEYS } from '../theme-tabs/theme-tabs.shared.js'
 
 const CACHE_TTL = 300
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 5B: Safe mobile home payload caps.
+//
+// These constants define the maximum product count returned by each section
+// type in the public mobile home endpoint. Dashboard admins can still
+// configure higher limits via merch_config, but the mobile API always clamps
+// to these values regardless.
+//
+// Rationale: Flutter home screen renders at most 12 products per carousel
+// and 8 per category rail. Sending more is wasted JSON decode/network work.
+// The caps are intentionally generous (not minimal) to ensure sections look
+// full on screen.
+// ─────────────────────────────────────────────────────────────────────────────
+const HOME_CAPS = {
+  featured:         12, // horizontal carousel — 12 fills 3 visible + scrollable
+  deals:            12, // same
+  trending:         12, // same
+  seasonal:          8, // mosaic hero+4 pattern
+  categoryRail:      8, // 3-column grid shows 6; 8 gives one extra row
+  defaultRailItems:  8, // getDefaultCategorySections per-rail limit
+  defaultRailCount:  4, // max category rails in fallback
+}
+
+// Section-level product count cap applied to every section type from the
+// manifest (productCarousel, categoryProductGrid, archedShowcase, etc.).
+// The dashboard ProductConfigEditor already clamps its slider to 20 (phase 5D),
+// but we enforce a server-side cap here so old/mis-configured records are safe.
+const HOME_MANIFEST_SECTION_CAP = 12
 
 export class PublicThemeController {
   async getActiveTheme(request, reply) {
@@ -95,29 +125,40 @@ export class PublicThemeController {
     }
 
     const merchConfig = tab.merch_config || {}
+
+    // PHASE 5B: Each resolveSectionProducts call gets the dashboard-configured
+    // limit clamped to HOME_CAPS.* — regardless of what the dashboard stored.
     const featuredProducts = await resolveSectionProducts(
       merchConfig.featured,
-      () => getFeaturedProducts(12)
+      () => getFeaturedProducts(HOME_CAPS.featured),
+      HOME_CAPS.featured
     )
     const dealProducts = await resolveSectionProducts(
       merchConfig.deals,
-      () => getDealProducts(12)
+      () => getDealProducts(HOME_CAPS.deals),
+      HOME_CAPS.deals
     )
     const trendingProducts = await resolveSectionProducts(
       merchConfig.trending,
-      () => getTrendingProducts(6)
+      () => getTrendingProducts(HOME_CAPS.trending),
+      HOME_CAPS.trending
     )
     const seasonalProducts = await resolveSectionProducts(
       merchConfig.seasonal_mosaic,
       async () => mergeUniqueProducts([
-        await getDealProducts(12),
-        await getFeaturedProducts(12),
-        await getTrendingProducts(12),
-      ]).slice(0, 8)
+        await getDealProducts(HOME_CAPS.seasonal),
+        await getFeaturedProducts(HOME_CAPS.seasonal),
+        await getTrendingProducts(HOME_CAPS.seasonal),
+      ]).slice(0, HOME_CAPS.seasonal),
+      HOME_CAPS.seasonal
     )
     const categorySections = await resolveCategorySections(
       merchConfig.category_rails,
-      async () => getDefaultCategorySections(4)
+      async () => getDefaultCategorySections(
+        HOME_CAPS.defaultRailCount,
+        HOME_CAPS.defaultRailItems
+      ),
+      HOME_CAPS.categoryRail
     )
 
     const responseData = {
@@ -128,7 +169,31 @@ export class PublicThemeController {
       deal_products: dealProducts,
       trending_products: trendingProducts,
       category_sections: categorySections,
+      // PHASE 5E: Future-safe pagination hints.
+      // Clients can check has_more to know a "Load more" path is available.
+      // The actual load-more endpoint (GET /api/v1/home/sections/:id/items?cursor=)
+      // is documented but not yet built — this flag prepares the schema so
+      // Flutter can conditionally show load-more controls without a breaking
+      // API change later.
+      _meta: {
+        effective_limits: {
+          featured: HOME_CAPS.featured,
+          deals: HOME_CAPS.deals,
+          trending: HOME_CAPS.trending,
+          seasonal: HOME_CAPS.seasonal,
+          category_rail: HOME_CAPS.categoryRail,
+        },
+        has_more: {
+          featured: featuredProducts.length >= HOME_CAPS.featured,
+          deals: dealProducts.length >= HOME_CAPS.deals,
+          trending: trendingProducts.length >= HOME_CAPS.trending,
+        },
+      },
     }
+
+    // PHASE 5F: Lightweight payload logging for QA/staging.
+    // Only logs at debug level — production log level (info/warn) is unaffected.
+    _logHomePayload(storeKey, tabKey, responseData)
 
     await redis.set(cacheKey, JSON.stringify(responseData), 'EX', CACHE_TTL)
     return success(responseData, 'Tab home content')
@@ -369,10 +434,11 @@ async function getTabDefinition(storeKey, tabKey) {
   return tab || null
 }
 
-async function resolveSectionProducts(config, fallbackResolver) {
+async function resolveSectionProducts(config, fallbackResolver, cap) {
   const productIds = Array.isArray(config?.product_ids) ? config.product_ids : []
   const categoryIds = Array.isArray(config?.category_ids) ? config.category_ids : []
-  const limit = normalizeLimit(config?.limit, 12)
+  // PHASE 5B: normalizeLimit honours dashboard config but clamps to cap.
+  const limit = normalizeLimit(config?.limit, cap ?? HOME_CAPS.featured, cap)
 
   if (productIds.length === 0 && categoryIds.length === 0) {
     return (await fallbackResolver()).slice(0, limit)
@@ -394,7 +460,7 @@ async function resolveSectionProducts(config, fallbackResolver) {
   return [...manualProducts, ...fillProducts].slice(0, limit)
 }
 
-async function resolveCategorySections(rails, fallbackResolver) {
+async function resolveCategorySections(rails, fallbackResolver, railCap) {
   if (!Array.isArray(rails) || rails.length === 0) {
     return fallbackResolver()
   }
@@ -404,7 +470,8 @@ async function resolveCategorySections(rails, fallbackResolver) {
   for (const rail of rails) {
     if (!rail?.category_id) continue
 
-    const limit = normalizeLimit(rail.limit, 6)
+    // PHASE 5B: each rail limit clamped to railCap.
+    const limit = normalizeLimit(rail.limit, HOME_CAPS.categoryRail, railCap)
     const manualProducts = await getProductsByIds(
       Array.isArray(rail.product_ids) ? rail.product_ids : []
     )
@@ -731,7 +798,7 @@ async function getTrendingProducts(limit) {
   return rows
 }
 
-async function getDefaultCategorySections(limitSections) {
+async function getDefaultCategorySections(limitSections, itemsPerSection) {
   const { rows: categories } = await query(
     `SELECT
        c.id,
@@ -748,12 +815,14 @@ async function getDefaultCategorySections(limitSections) {
        )
      ORDER BY c.sort_order ASC, c.name ASC
      LIMIT $1`,
-    [limitSections]
+    [limitSections ?? HOME_CAPS.defaultRailCount]
   )
 
+  const perRail = itemsPerSection ?? HOME_CAPS.defaultRailItems
   const sections = []
   for (const category of categories) {
-    const products = await getProductsByCategoryIds([category.id], 6, [])
+    // PHASE 5B: use configurable per-rail cap.
+    const products = await getProductsByCategoryIds([category.id], perRail, [])
     if (products.length === 0) continue
     sections.push({
       category_id: category.id,
@@ -789,8 +858,55 @@ function mergeUniqueProducts(groups) {
   return merged
 }
 
-function normalizeLimit(value, fallback) {
+/**
+ * PHASE 5B: normalizeLimit — parse dashboard limit, apply safe mobile cap.
+ *
+ * @param {any}    value    - raw dashboard config value
+ * @param {number} fallback - default when value is absent/invalid
+ * @param {number} [cap]    - optional hard ceiling (overrides max=50 for mobile home)
+ */
+function normalizeLimit(value, fallback, cap) {
   const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
-  return Math.min(Math.max(Math.trunc(parsed), 1), 50)
+  const resolved = (!Number.isFinite(parsed) || parsed <= 0) ? fallback : Math.trunc(parsed)
+  // If a per-context cap is provided, honour it; otherwise keep the legacy 50 ceiling
+  // so non-home endpoints (admin, full category pages) are unchanged.
+  const ceiling = (typeof cap === 'number' && cap > 0) ? cap : 50
+  return Math.min(Math.max(resolved, 1), ceiling)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 5F: Lightweight home payload debug logging.
+// Only fires at Pino 'debug' level — production deployments set LOG_LEVEL=info
+// so this is zero-cost in prod. Staging/QA can set LOG_LEVEL=debug to see it.
+// ─────────────────────────────────────────────────────────────────────────────
+function _logHomePayload(storeKey, tabKey, data) {
+  if (!logger.isLevelEnabled?.('debug') && logger.level !== 'debug') return
+
+  const totalProducts =
+    (data.featured_products?.length ?? 0) +
+    (data.deal_products?.length ?? 0) +
+    (data.trending_products?.length ?? 0) +
+    (data.seasonal_products?.length ?? 0) +
+    (data.category_sections ?? []).reduce((sum, s) => sum + (s.products?.length ?? 0), 0)
+
+  const approxBytes = JSON.stringify(data).length
+
+  logger.debug(
+    {
+      storeKey,
+      tabKey,
+      counts: {
+        featured: data.featured_products?.length ?? 0,
+        deals: data.deal_products?.length ?? 0,
+        trending: data.trending_products?.length ?? 0,
+        seasonal: data.seasonal_products?.length ?? 0,
+        categorySections: data.category_sections?.length ?? 0,
+        categoryRailProducts: (data.category_sections ?? []).map(s => s.products?.length ?? 0),
+      },
+      totalProducts,
+      approxBytes,
+      action: 'tab_home_content.payload',
+    },
+    `[home-payload] ${tabKey}@${storeKey}: ${totalProducts} products, ~${Math.round(approxBytes / 1024)}KB`
+  )
 }
