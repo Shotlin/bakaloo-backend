@@ -1,4 +1,7 @@
 import { logger } from '../../config/logger.js'
+import { query } from '../../config/database.js'
+import { AllocationService } from '../allocation/allocation.service.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 /**
  * Multi-vendor cart service.
@@ -20,8 +23,11 @@ import { logger } from '../../config/logger.js'
 export const MAX_CART_ITEMS = 50
 
 export class CartService {
-  constructor(repository) {
+  constructor(repository, deps = {}) {
     this.repo = repository
+    this.allocationService =
+      deps.allocationService ||
+      new AllocationService(new AllocationRepository())
   }
 
   // ────────────────────────────────────────────────────────
@@ -139,10 +145,41 @@ export class CartService {
       productId
     )
     if (candidates.length === 0) {
+      // FIX: Distinguish between "product genuinely unavailable" and
+      // "user has no allocation yet". Try to auto-assign from default address
+      // first, then retry the lookup once.
+      const autoAssigned = await this._ensureAllocationFromDefaultAddress(userId)
+      if (autoAssigned) {
+        const retriedCandidates = await this.repo.findShopProductsForProduct(
+          userId,
+          productId
+        )
+        if (retriedCandidates.length === 0) {
+          return {
+            success: false,
+            message: 'Product is not available in your delivery area',
+            code: 'SHOP_NOT_AVAILABLE',
+          }
+        }
+        if (retriedCandidates.length > 1) {
+          return {
+            success: false,
+            message: 'Multiple shops carry this product. Please specify which shop to order from.',
+            code: 'CART_SHOP_REQUIRED',
+          }
+        }
+        const resolvedShopIdRetry = retriedCandidates[0].shop_id
+        const spRetry = await this.repo.findShopProductForUser(userId, productId, resolvedShopIdRetry)
+        if (!spRetry) {
+          return { success: false, message: 'This shop is not available to you', code: 'SHOP_NOT_AVAILABLE' }
+        }
+        return { success: true, productId, shopId: resolvedShopIdRetry, sp: spRetry }
+      }
+      // No allocation and no default address — give an actionable message
       return {
         success: false,
-        message: 'Product is not available in any of your shops',
-        code: 'SHOP_NOT_AVAILABLE',
+        message: 'Please set your delivery address to add items to cart.',
+        code: 'SHOP_ALLOCATION_REQUIRED',
       }
     }
     if (candidates.length > 1) {
@@ -808,6 +845,59 @@ export class CartService {
       return Array.isArray(parsed) ? parsed : []
     } catch {
       return []
+    }
+  }
+
+  /**
+   * FIX: If a user has no allocation, attempt to auto-assign one from their
+   * default address. This unblocks real users who logged in before the
+   * auto-assign trigger was added and never got an allocation row.
+   *
+   * Returns true if allocation was successfully computed (even if 0 shops
+   * were found — the caller handles that gracefully), false if no default
+   * address exists or on error.
+   *
+   * @private
+   * @param {string} userId
+   * @returns {Promise<boolean>}
+   */
+  async _ensureAllocationFromDefaultAddress(userId) {
+    try {
+      // Check if user already has allocations (avoid redundant recompute)
+      const existing = await this.allocationService.getShopIdsForUser(userId)
+      if (Array.isArray(existing) && existing.length > 0) return true
+
+      // Look up default address
+      const { rows } = await query(
+        `SELECT lat, lng, pincode FROM addresses
+          WHERE user_id = $1 AND is_default = true
+            AND lat IS NOT NULL AND lng IS NOT NULL AND pincode IS NOT NULL
+          LIMIT 1`,
+        [userId]
+      )
+      if (rows.length === 0) return false
+
+      const addr = rows[0]
+      const result = await this.allocationService.computeAndUpsertForUser(userId, {
+        lat: Number(addr.lat),
+        lng: Number(addr.lng),
+        pincode: String(addr.pincode),
+      })
+
+      if (result.success) {
+        logger.info(
+          { userId, shopCount: result.data?.shops?.length ?? 0, action: 'cart.auto_allocation' },
+          'Cart auto-assigned allocation from default address'
+        )
+        return true
+      }
+      return false
+    } catch (err) {
+      logger.warn(
+        { userId, err: err.message, action: 'cart.auto_allocation_failed' },
+        'Cart auto-allocation attempt failed'
+      )
+      return false
     }
   }
 }

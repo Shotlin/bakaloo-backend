@@ -1,4 +1,6 @@
 import { query, getClient } from '../../config/database.js'
+import { CartService } from '../cart/cart.service.js'
+import { CartRepository } from '../cart/cart.repository.js'
 
 /**
  * Wishlist repository — database access for wishlist
@@ -141,41 +143,41 @@ export class WishlistRepository {
     return rows
   }
 
+  /**
+   * Move all wishlist items to the Redis-backed cart via CartService.
+   *
+   * The old implementation queried a `cart_items` SQL table that does not
+   * exist — the cart lives entirely in Redis (CartRepository / CartService).
+   * This version calls CartService.addItem() for each in-stock wishlist
+   * product, which handles allocation-scoped shop resolution, stock checks,
+   * and Redis persistence correctly.
+   *
+   * @param {string} userId
+   * @param {Array<{id: string, is_active: boolean, stock_quantity: number}>} items
+   * @returns {Promise<number>} number of items successfully added
+   */
   async moveToCart(userId, items) {
-    const client = await getClient()
-    try {
-      await client.query('BEGIN')
+    const cartService = new CartService(new CartRepository())
+    let movedCount = 0
 
-      let movedCount = 0
-      for (const item of items) {
-        if (item.is_active && Number(item.stock_quantity) > 0) {
-          const existing = await client.query(
-            'SELECT id, quantity FROM cart_items WHERE user_id = $1 AND product_id = $2',
-            [userId, item.id]
-          )
-
-          if (existing.rows.length > 0) {
-            await client.query(
-              'UPDATE cart_items SET quantity = quantity + 1, updated_at = NOW() WHERE id = $1',
-              [existing.rows[0].id]
-            )
-          } else {
-            await client.query(
-              'INSERT INTO cart_items (user_id, product_id, quantity) VALUES ($1, $2, 1)',
-              [userId, item.id]
-            )
-          }
+    for (const item of items) {
+      if (!item.is_active || Number(item.stock_quantity) <= 0) {
+        continue
+      }
+      try {
+        const result = await cartService.addItem(userId, {
+          productId: item.id,
+          quantity: 1,
+        })
+        if (result.success) {
           movedCount++
         }
+      } catch {
+        // Skip items that fail (e.g. shop not available for this user).
+        // Other items should still be processed.
       }
-
-      await client.query('COMMIT')
-      return movedCount
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
     }
+
+    return movedCount
   }
 }

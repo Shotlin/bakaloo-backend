@@ -48,6 +48,31 @@ export const buildApp = async () => {
   // ─── GLOBAL HOOKS ──────────────────────────────────────
   app.addHook('onRequest', sanitize)
 
+  // PHASE 7 FIX (mobile-network stale-UI bug):
+  // Never allow an intermediary (Cloudflare, a mobile-carrier transparent
+  // proxy, or an on-device HTTP cache) to serve a stale copy of a
+  // *user-scoped* API response. Any request that resolved an authenticated
+  // user (request.user populated by the JWT preHandler / optionalAuth) is
+  // marked no-store. This is the server-side guarantee that complements the
+  // Flutter AppCacheManager: a logged-in user's cart / wallet / orders /
+  // shop-scoped catalog can never be cached and replayed to a different
+  // network or a different user.
+  //
+  // Anonymous public responses (master catalog, theme, banners) are left
+  // untouched so their existing ETag/Cache-Control behaviour and
+  // Cloudflare edge caching keep working.
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.user && request.user.id) {
+      reply.header(
+        'Cache-Control',
+        'no-store, no-cache, must-revalidate, private'
+      )
+      reply.header('Pragma', 'no-cache')
+      reply.header('Expires', '0')
+    }
+    return payload
+  })
+
   // ─── PERMISSION AUDIT ROUTE COLLECTOR (R17 AC#9, design §4.5) ────
   // Install BEFORE any module routes register so the `onRoute` hook fires
   // for every dashboard endpoint. The collected array is exposed via

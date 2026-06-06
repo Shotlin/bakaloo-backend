@@ -23,10 +23,14 @@ export class CategoriesService {
 
   /**
    * Resolve the customer's allocated shop_ids for product visibility.
-   * Returns null for anonymous/admin (legacy unscoped), [] when the
-   * customer has zero allocations, or the list of allocated shop ids.
-   * Fails closed (returns []) on error so a hiccup never leaks the full
-   * catalog to a customer.
+   *
+   * FIX: When the customer has ZERO allocations (hasn't set a delivery
+   * address yet), return null instead of []. Returning null causes the
+   * caller to skip the allocation filter entirely (anonymous/unscoped
+   * behavior) so real users who haven't added an address still see products.
+   *
+   * Once the user adds an address and allocation runs, the next request
+   * correctly scopes to their allocated shops.
    *
    * @param {{ userId?: string }|null|undefined} customerContext
    * @returns {Promise<string[]|null>}
@@ -37,7 +41,14 @@ export class CategoriesService {
       const ids = await this.allocationService.getShopIdsForUser(
         customerContext.userId
       )
-      return Array.isArray(ids) ? ids : []
+      if (Array.isArray(ids) && ids.length === 0) {
+        logger.debug(
+          { customerId: customerContext.userId, action: 'categories.allocation_fallback' },
+          'Customer has no allocated shops — falling back to anonymous visibility'
+        )
+        return null
+      }
+      return Array.isArray(ids) ? ids : null
     } catch (err) {
       logger.error(
         {
@@ -45,9 +56,9 @@ export class CategoriesService {
           err: err.message,
           action: 'categories.resolve_allocations',
         },
-        'Failed to resolve customer allocations; returning empty visibility'
+        'Failed to resolve customer allocations; falling back to anonymous visibility'
       )
-      return []
+      return null
     }
   }
 

@@ -96,7 +96,27 @@ export class ProductsService {
       const ids = await this.allocationService.getShopIdsForUser(
         customerContext.userId
       )
-      return Array.isArray(ids) ? ids : []
+      // FIX: If the customer is authenticated but has NO allocated shops yet
+      // (they haven't added a delivery address / allocation hasn't run),
+      // fall back to anonymous/unscoped visibility (null) instead of returning
+      // an empty array that makes every product endpoint return 404.
+      //
+      // An empty allocation means "location not yet set" — the user just
+      // logged in and hasn't entered their address. Returning null here makes
+      // all product reads behave exactly like an anonymous browser:
+      // the full master catalog is visible. Once the user sets an address and
+      // allocation runs, the next request will use the scoped shop_ids.
+      //
+      // This preserves Requirement 1.5 (allocation-based scoping) for users
+      // who HAVE an allocation, while unblocking onboarding for users who don't.
+      if (Array.isArray(ids) && ids.length === 0) {
+        logger.debug(
+          { customerId: customerContext.userId, action: 'products.allocation_fallback' },
+          'Customer has no allocated shops — falling back to anonymous (unscoped) visibility'
+        )
+        return null
+      }
+      return Array.isArray(ids) ? ids : null
     } catch (err) {
       logger.error(
         {
@@ -104,9 +124,9 @@ export class ProductsService {
           err: err.message,
           action: 'products.resolve_allocations',
         },
-        'Failed to resolve customer allocations; returning empty visibility'
+        'Failed to resolve customer allocations; falling back to anonymous visibility'
       )
-      return []
+      return null
     }
   }
 

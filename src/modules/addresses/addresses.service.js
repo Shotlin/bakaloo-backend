@@ -1,6 +1,8 @@
 import { logger } from '../../config/logger.js'
 import { query } from '../../config/database.js'
 import { env } from '../../config/env.js'
+import { AllocationService } from '../allocation/allocation.service.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const MAX_ADDRESSES = 10
 
@@ -88,6 +90,26 @@ export class AddressesService {
     }
 
     logger.info({ userId, addressId: address.id }, 'Address created')
+
+    // FIX: Automatically recompute shop allocation when an address is created.
+    // This ensures that a real user who adds their first delivery address
+    // immediately gets an allocated shop and can view product details.
+    // Fire-and-forget — do not block the address creation response.
+    if (this._hasValidCoordinates(data.lat, data.lng) && data.pincode) {
+      setImmediate(() => {
+        this._triggerAllocationRecompute(userId, {
+          lat: Number(data.lat),
+          lng: Number(data.lng),
+          pincode: String(data.pincode),
+        }).catch((err) => {
+          logger.warn(
+            { userId, err: err.message, action: 'address_create.allocation_recompute_failed' },
+            'Background allocation recompute failed after address creation'
+          )
+        })
+      })
+    }
+
     return { success: true, address }
   }
 
@@ -126,6 +148,30 @@ export class AddressesService {
 
     const address = await this.repo.update(id, userId, data)
     logger.info({ userId, addressId: id }, 'Address updated')
+
+    // FIX: Recompute allocation when a default address coordinates/pincode change.
+    // Use updated coords if provided, fall back to existing.
+    const effectiveLat = hasLat ? Number(data.lat) : Number(existing.lat)
+    const effectiveLng = hasLng ? Number(data.lng) : Number(existing.lng)
+    const effectivePincode = data.pincode ?? existing.pincode
+    if (
+      this._hasValidCoordinates(effectiveLat, effectiveLng) &&
+      effectivePincode
+    ) {
+      setImmediate(() => {
+        this._triggerAllocationRecompute(userId, {
+          lat: effectiveLat,
+          lng: effectiveLng,
+          pincode: String(effectivePincode),
+        }).catch((err) => {
+          logger.warn(
+            { userId, err: err.message, action: 'address_update.allocation_recompute_failed' },
+            'Background allocation recompute failed after address update'
+          )
+        })
+      })
+    }
+
     return { success: true, address }
   }
 
@@ -196,5 +242,31 @@ export class AddressesService {
       parsedLat <= 90 &&
       parsedLng >= -180 &&
       parsedLng <= 180
+  }
+
+  /**
+   * Fire-and-forget allocation recompute helper.
+   * Called after address create/update so the user gets a shop allocation
+   * automatically without needing to call POST /allocation/recompute manually.
+   * @private
+   */
+  async _triggerAllocationRecompute(userId, address) {
+    const allocationService = new AllocationService(new AllocationRepository())
+    const result = await allocationService.computeAndUpsertForUser(userId, address)
+    if (result.success) {
+      logger.info(
+        {
+          userId,
+          shopCount: result.data?.shops?.length ?? 0,
+          action: 'address.allocation_recomputed',
+        },
+        'Allocation auto-recomputed after address change'
+      )
+    } else {
+      logger.warn(
+        { userId, code: result.code, message: result.message, action: 'address.allocation_recompute_failed' },
+        'Allocation auto-recompute returned non-success'
+      )
+    }
   }
 }

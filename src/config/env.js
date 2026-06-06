@@ -127,7 +127,12 @@ const envSchema = z.object({
 
   // 2Factor.in SMS OTP
   TWO_FACTOR_API_KEY: z.string().optional(),
+  // Template name registered on 2Factor.in dashboard.
+  // Accepts both TWO_FACTOR_TEMPLATE (preferred) and legacy TWO_FACTOR_SENDER alias.
   TWO_FACTOR_TEMPLATE: z.string().default('GroceryAppOTP'),
+  TWO_FACTOR_SENDER: z.string().optional(),        // alias — used if TEMPLATE unset
+  // TWO_FACTOR_BASE_URL is not needed — the URL is hardcoded in sms.js to
+  // https://2factor.in/API/V1 which is the stable, non-configurable endpoint.
   SMS_PROVIDER: z.enum(['2factor', 'none']).default('none'),
 
   // Firebase FCM
