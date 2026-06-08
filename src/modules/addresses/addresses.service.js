@@ -6,7 +6,11 @@ import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const MAX_ADDRESSES = 10
 
-// ─── Dynamic serviceable pincodes from DB ─────────────────
+// ─── Serviceable pincodes — aggregated from active shops ─────────────
+// The old implementation read from app_settings (a global static list),
+// which missed pincodes added to individual shops. This version queries
+// the shops table directly so any pincode in any active shop's
+// serviceable_pincodes array is immediately available to customers.
 let cachedPincodes = null
 let pincodesCacheTime = 0
 const PINCODE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
@@ -18,30 +22,31 @@ async function getServiceablePincodes() {
   }
 
   try {
+    // Flatten all serviceable_pincodes arrays from every active, non-deleted shop
     const { rows } = await query(
-      `SELECT value FROM app_settings WHERE key = 'serviceable_pincodes'`
+      `SELECT DISTINCT unnest(serviceable_pincodes) AS pincode
+         FROM shops
+        WHERE is_active = true
+          AND deleted_at IS NULL
+          AND array_length(serviceable_pincodes, 1) > 0`
     )
 
-    if (rows[0]?.value) {
-      let raw = rows[0].value
-      // Handle JSONB — might already be an array or a JSON string
-      if (typeof raw === 'string') {
-        raw = JSON.parse(raw)
-      }
-      cachedPincodes = new Set(Array.isArray(raw) ? raw.map(String) : [])
+    if (rows.length > 0) {
+      cachedPincodes = new Set(rows.map((r) => String(r.pincode)))
     } else {
-      // Fallback: Kolkata pincodes 700001–700157
-      cachedPincodes = new Set(
-        Array.from({ length: 157 }, (_, i) => String(700001 + i))
-      )
+      // No shops configured yet — allow all pincodes so the app isn't blocked
+      cachedPincodes = null
     }
 
     pincodesCacheTime = now
-    logger.info({ count: cachedPincodes.size }, 'Serviceable pincodes loaded from DB')
+    logger.info(
+      { count: cachedPincodes ? cachedPincodes.size : 'all' },
+      'Serviceable pincodes loaded from active shops'
+    )
     return cachedPincodes
   } catch (err) {
-    logger.error({ err }, 'Failed to load serviceable pincodes — using fallback')
-    return new Set(Array.from({ length: 157 }, (_, i) => String(700001 + i)))
+    logger.error({ err }, 'Failed to load serviceable pincodes from shops — allowing all')
+    return null // null = allow all, so the app never gets stuck
   }
 }
 
@@ -213,19 +218,19 @@ export class AddressesService {
   }
 
   /**
-   * Validate pincode for delivery availability
+   * Validate pincode for delivery availability.
+   * Checks against pincodes in active shops' serviceable_pincodes arrays.
+   * Returns available=true also when no shops are configured yet (null set).
    */
   async validatePincode(pincode) {
     if (env.ALLOW_ALL_PINCODES) {
-      return {
-        available: true,
-        deliveryFee: 29,
-        estimatedMin: 30,
-      }
+      return { available: true, deliveryFee: 29, estimatedMin: 30 }
     }
 
     const serviceablePincodes = await getServiceablePincodes()
-    const available = serviceablePincodes.has(pincode)
+
+    // null means no shops configured — allow all so the app isn't blocked
+    const available = serviceablePincodes === null || serviceablePincodes.has(String(pincode))
     return {
       available,
       deliveryFee: available ? 29 : 0,
