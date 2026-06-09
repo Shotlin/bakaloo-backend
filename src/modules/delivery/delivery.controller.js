@@ -75,8 +75,14 @@ export class DeliveryController {
    */
   async toggleOnline(request, reply) {
     const { isOnline } = request.body
-    const result = await this.service.toggleOnline(request.user.id, isOnline)
-    return reply.code(200).send(success(result, `Rider is now ${isOnline ? 'online' : 'offline'}`))
+    try {
+      const result = await this.service.toggleOnline(request.user.id, isOnline)
+      return reply.code(200).send(success(result, `Rider is now ${isOnline ? 'online' : 'offline'}`))
+    } catch (err) {
+      const statusCode = err.statusCode || 400
+      const code = err.code || 'TOGGLE_ONLINE_FAILED'
+      return reply.code(statusCode).send(error(err.message || 'Failed to toggle online status', code))
+    }
   }
 
   /**

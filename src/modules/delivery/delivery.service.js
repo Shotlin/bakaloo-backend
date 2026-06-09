@@ -33,8 +33,20 @@ export class DeliveryService {
 
   async toggleOnline(riderId, isOnline) {
     const profile = await this.repository.getRiderProfile(riderId)
-    if (!profile) throw new Error('Rider profile not found')
-    if (!profile.is_approved) throw new Error('Rider not approved yet')
+    if (!profile) {
+      const err = new Error('Rider profile not found')
+      err.statusCode = 404
+      err.code = 'RIDER_NOT_FOUND'
+      throw err
+    }
+    // Return a proper 403 instead of a plain Error (which became HTTP 500).
+    // The Flutter app maps any non-success on toggle-online to RiderNotApprovedError.
+    if (!profile.is_approved) {
+      const err = new Error('Rider profile is not yet approved')
+      err.statusCode = 403
+      err.code = 'RIDER_NOT_APPROVED'
+      throw err
+    }
 
     const updatedProfile = await this.repository.toggleOnline(riderId, isOnline)
 
