@@ -86,7 +86,8 @@ export class ProductsController {
     const customerContext = resolveCustomerContext(request)
     const product = await this.service.getByIdOrSlug(
       request.params.id,
-      customerContext
+      customerContext,
+      request.user?.id || null
     )
     if (!product) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))

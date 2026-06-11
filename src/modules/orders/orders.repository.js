@@ -171,16 +171,61 @@ export class OrdersRepository {
   }
 
   /**
-   * Restore stock when an order is cancelled (within transaction)
+   * Restore stock when an order is cancelled (within transaction).
+   *
+   * IMPORTANT: Stock is tracked on `shop_products`, NOT the master `products`
+   * table. This method restores `shop_products.stock_quantity` for each order
+   * item, using `shop_product_id` when available (Phase 3 orders) and falling
+   * back to `(product_id, shop_id)` lookup for legacy orders.
+   *
+   * Also clears `sold_out_at` and re-enables `is_available` when restoring
+   * from zero (mirrors the `applyStockUpdate` CASE logic).
    */
   async restoreStock(client, items) {
     for (const item of items) {
-      await client.query(
-        `UPDATE products SET stock_quantity = stock_quantity + $1, total_sold = GREATEST(0, total_sold - $1),
-                updated_at = NOW()
-         WHERE id = $2`,
-        [item.quantity, item.productId]
-      )
+      const qty = Number(item.quantity)
+      if (!qty || qty <= 0) continue
+
+      if (item.shopProductId || item.shop_product_id) {
+        // Phase 3 path: exact shop_product_id available
+        const shopProductId = item.shopProductId || item.shop_product_id
+        await client.query(
+          `UPDATE shop_products
+           SET stock_quantity = stock_quantity + $1,
+               is_available = CASE
+                 WHEN stock_quantity = 0 AND $1 > 0 THEN true
+                 ELSE is_available
+               END,
+               sold_out_at = CASE
+                 WHEN stock_quantity = 0 AND $1 > 0 THEN NULL
+                 ELSE sold_out_at
+               END,
+               updated_at = NOW()
+           WHERE id = $2 AND deleted_at IS NULL`,
+          [qty, shopProductId]
+        )
+      } else {
+        // Legacy path: resolve via (product_id, shop_id)
+        const productId = item.productId || item.product_id
+        const shopId = item.shopId || item.shop_id
+        if (productId && shopId) {
+          await client.query(
+            `UPDATE shop_products
+             SET stock_quantity = stock_quantity + $1,
+                 is_available = CASE
+                   WHEN stock_quantity = 0 AND $1 > 0 THEN true
+                   ELSE is_available
+                 END,
+                 sold_out_at = CASE
+                   WHEN stock_quantity = 0 AND $1 > 0 THEN NULL
+                   ELSE sold_out_at
+                 END,
+                 updated_at = NOW()
+             WHERE product_id = $2 AND shop_id = $3 AND deleted_at IS NULL`,
+            [qty, productId, shopId]
+          )
+        }
+      }
     }
   }
 

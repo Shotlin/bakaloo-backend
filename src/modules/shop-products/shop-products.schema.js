@@ -35,6 +35,7 @@ export const createShopProductSchema = z
       .max(MAX_ORDER_QTY_MAX)
       .default(50),
     is_available: z.boolean().default(true),
+    is_featured: z.boolean().default(false),
   })
   .superRefine((data, ctx) => {
     // Requirement 3.9 — sale_price must be < price when both are set
@@ -69,6 +70,7 @@ export const updateShopProductSchema = z
       .max(MAX_ORDER_QTY_MAX)
       .optional(),
     is_available: z.boolean().optional(),
+    is_featured: z.boolean().optional(),
   })
   .refine(
     (data) =>
@@ -77,7 +79,8 @@ export const updateShopProductSchema = z
       data.cost_price !== undefined ||
       data.low_stock_threshold !== undefined ||
       data.max_order_qty !== undefined ||
-      data.is_available !== undefined,
+      data.is_available !== undefined ||
+      data.is_featured !== undefined,
     { message: 'At least one field must be provided' }
   )
 

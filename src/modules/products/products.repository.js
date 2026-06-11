@@ -542,6 +542,67 @@ export class ProductsRepository {
   }
 
   /**
+   * Resolve the best supplying shop for a product for a given customer.
+   *
+   * Prefers a shop in the customer's allocation (so the product can actually
+   * be delivered), falling back to ANY active shop that carries it so the UI
+   * can show "Sold by {storeName} — not available for delivery to {pincode}".
+   *
+   * @param {string} userId
+   * @param {string} productId
+   * @returns {Promise<{
+   *   shop_product_id: string, shop_id: string, shop_name: string,
+   *   is_available: boolean, stock_quantity: number, in_allocation: boolean
+   * }|null>}
+   */
+  async findSupplyingShopForUser(userId, productId) {
+    const { rows } = await query(
+      `SELECT sp.id            AS shop_product_id,
+              sp.shop_id,
+              s.name           AS shop_name,
+              sp.is_available,
+              sp.stock_quantity,
+              (a.user_id IS NOT NULL) AS in_allocation
+         FROM shop_products sp
+         JOIN shops s ON s.id = sp.shop_id
+         LEFT JOIN user_shop_allocations a
+                ON a.shop_id = sp.shop_id
+               AND a.user_id = $1
+        WHERE sp.product_id = $2
+          AND sp.deleted_at IS NULL
+          AND s.is_active = true
+          AND s.deleted_at IS NULL
+        ORDER BY (a.user_id IS NOT NULL) DESC,
+                 a.is_primary DESC NULLS LAST,
+                 sp.is_available DESC,
+                 sp.stock_quantity DESC
+        LIMIT 1`,
+      [userId, productId]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Returns the customer's currently-selected delivery pincode (default
+   * address first, else most recently updated). Null when no address exists.
+   *
+   * @param {string} userId
+   * @returns {Promise<string|null>}
+   */
+  async findSelectedPincodeForUser(userId) {
+    const { rows } = await query(
+      `SELECT pincode
+         FROM addresses
+        WHERE user_id = $1
+        ORDER BY is_default DESC, updated_at DESC
+        LIMIT 1`,
+      [userId]
+    )
+    const pincode = rows[0]?.pincode
+    return pincode ? String(pincode).trim() : null
+  }
+
+  /**
    * Get single product with full details
    *
    * @param {string} id

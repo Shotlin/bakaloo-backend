@@ -274,7 +274,7 @@ export class ProductsService {
    * @param {string} id
    * @param {{ userId?: string }|null} [customerContext]
    */
-  async getById(id, customerContext = null) {
+  async getById(id, customerContext = null, viewerUserId = null) {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -284,15 +284,89 @@ export class ProductsService {
     const scope = this._scopeKey(allocatedShopIds)
     const cacheKey = `products:detail:${CACHE_VERSION}:${scope}:${id}`
     const cached = await cacheGet(cacheKey)
-    if (cached) return cached
-
-    const product = this._normalizeProduct(
-      await this.repo.findById(id, allocatedShopIds)
-    )
-    if (product) {
+    const product = cached
+      ? cached
+      : this._normalizeProduct(await this.repo.findById(id, allocatedShopIds))
+    if (!product) {
+      return null
+    }
+    if (!cached) {
       await cacheSet(cacheKey, product, CACHE_TTL_DETAIL)
     }
-    return product
+
+    // Attach per-user supplying-store info OUTSIDE the cache so it always
+    // reflects the current address/allocation (not shared across users).
+    // Uses the viewer's id directly so it works for any authenticated viewer,
+    // including the demo/RIDER test account, without affecting catalog scoping.
+    const resolvedViewerId = viewerUserId || customerContext?.userId || null
+    const store = await this._resolveStoreInfo(resolvedViewerId, product.id)
+    return store ? { ...product, store } : product
+  }
+
+  /**
+   * Resolve the supplying-store block for a product detail response.
+   * Returns null when there is no authenticated viewer.
+   *
+   * Shape (camelCase for the Flutter client):
+   *   { shopId, shopName, shopProductId, isAvailableAtSelectedLocation,
+   *     availabilityReason, selectedPincode, stockStatus }
+   *
+   * @param {string|null} viewerUserId
+   * @param {string} productId
+   * @private
+   */
+  async _resolveStoreInfo(viewerUserId, productId) {
+    const userId = viewerUserId
+    if (!userId) return null
+
+    try {
+      const [supplier, selectedPincode] = await Promise.all([
+        this.repo.findSupplyingShopForUser(userId, productId),
+        this.repo.findSelectedPincodeForUser(userId),
+      ])
+
+      if (!supplier) {
+        return {
+          shopId: null,
+          shopName: null,
+          shopProductId: null,
+          isAvailableAtSelectedLocation: false,
+          availabilityReason: 'PRODUCT_NOT_ASSIGNED_TO_STORE',
+          selectedPincode,
+          stockStatus: 'unavailable',
+        }
+      }
+
+      const inAllocation = supplier.in_allocation === true
+      const hasStock = Number(supplier.stock_quantity) > 0
+      const isAvailable =
+        inAllocation && supplier.is_available === true && hasStock
+
+      let availabilityReason = 'AVAILABLE'
+      if (!inAllocation) {
+        availabilityReason = 'PRODUCT_UNAVAILABLE_AT_LOCATION'
+      } else if (supplier.is_available !== true) {
+        availabilityReason = 'PRODUCT_UNAVAILABLE_AT_LOCATION'
+      } else if (!hasStock) {
+        availabilityReason = 'PRODUCT_OUT_OF_STOCK'
+      }
+
+      return {
+        shopId: supplier.shop_id,
+        shopName: supplier.shop_name,
+        shopProductId: supplier.shop_product_id,
+        isAvailableAtSelectedLocation: isAvailable,
+        availabilityReason,
+        selectedPincode,
+        stockStatus: hasStock ? 'in_stock' : 'out_of_stock',
+      }
+    } catch (err) {
+      logger.warn(
+        { productId, userId, err: err.message, action: 'products.store_info_failed' },
+        'Failed to resolve supplying-store info for product detail'
+      )
+      return null
+    }
   }
 
   /**
@@ -301,7 +375,7 @@ export class ProductsService {
    * @param {string} slug
    * @param {{ userId?: string }|null} [customerContext]
    */
-  async getBySlug(slug, customerContext = null) {
+  async getBySlug(slug, customerContext = null, viewerUserId = null) {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -311,15 +385,19 @@ export class ProductsService {
     const scope = this._scopeKey(allocatedShopIds)
     const cacheKey = `products:slug:${CACHE_VERSION}:${scope}:${slug}`
     const cached = await cacheGet(cacheKey)
-    if (cached) return cached
-
-    const product = this._normalizeProduct(
-      await this.repo.findBySlug(slug, allocatedShopIds)
-    )
-    if (product) {
+    const product = cached
+      ? cached
+      : this._normalizeProduct(await this.repo.findBySlug(slug, allocatedShopIds))
+    if (!product) {
+      return null
+    }
+    if (!cached) {
       await cacheSet(cacheKey, product, CACHE_TTL_DETAIL)
     }
-    return product
+
+    const resolvedViewerId = viewerUserId || customerContext?.userId || null
+    const store = await this._resolveStoreInfo(resolvedViewerId, product.id)
+    return store ? { ...product, store } : product
   }
 
   /**
@@ -328,11 +406,11 @@ export class ProductsService {
    * @param {string} identifier
    * @param {{ userId?: string }|null} [customerContext]
    */
-  async getByIdOrSlug(identifier, customerContext = null) {
+  async getByIdOrSlug(identifier, customerContext = null, viewerUserId = null) {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier)
     return isUUID
-      ? this.getById(identifier, customerContext)
-      : this.getBySlug(identifier, customerContext)
+      ? this.getById(identifier, customerContext, viewerUserId)
+      : this.getBySlug(identifier, customerContext, viewerUserId)
   }
 
   /**

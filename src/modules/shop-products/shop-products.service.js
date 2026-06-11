@@ -511,6 +511,7 @@ export class ShopProductsService {
       ...data,
       shop_id: shopId,
       is_available: desiredAvailability,
+      is_featured: data.is_featured ?? false,
     })
 
     await this.invalidateShopCache(shopId)

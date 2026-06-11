@@ -79,12 +79,14 @@ export class ShopProductsRepository {
   // rejection_reason) were added by migration 041_shop_products_approval.sql
   // for R23 AC#10/AC#11/AC#22/AC#23 and are surfaced here per R14.7
   // (named columns, never SELECT *) and design §3.3.
+  //
+  // is_featured added by migration 054_shop_products_is_featured.sql.
   // ────────────────────────────────────────────────────────
   static SELECT_COLUMNS = `
     id, shop_id, product_id,
     price, sale_price, cost_price,
     stock_quantity, low_stock_threshold, max_order_qty,
-    is_available, sold_out_at,
+    is_available, is_featured, sold_out_at,
     approval_status, approved_at, approved_by, rejection_reason,
     deleted_at, created_at, updated_at
   `
@@ -105,12 +107,12 @@ export class ShopProductsRepository {
         shop_id, product_id,
         price, sale_price, cost_price,
         stock_quantity, low_stock_threshold, max_order_qty,
-        is_available, sold_out_at
+        is_available, is_featured, sold_out_at
       ) VALUES (
         $1, $2,
         $3, $4, $5,
         $6, $7, $8,
-        $9, $10
+        $9, $10, $11
       )
       RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
       [
@@ -123,6 +125,7 @@ export class ShopProductsRepository {
         data.low_stock_threshold,
         data.max_order_qty,
         data.is_available,
+        data.is_featured ?? false,
         soldOutAt,
       ]
     )
@@ -167,8 +170,13 @@ export class ShopProductsRepository {
 
   /**
    * List shop_products for a shop with filters and pagination.
-   * Single LEFT JOIN to products avoids N+1 lookups for product names.
-   * Filters use idx_shop_products_shop_available (shop_id, is_available).
+   * Joins products (name, sku, thumbnail_url, category) and shops (name) so
+   * the dashboard can display product identity and store context without
+   * extra round-trips.
+   *
+   * Each returned row is enriched with a nested `product` object
+   * ({ id, name, sku, image_url, category_id, category_name }) and
+   * `shop_name` to match the dashboard ShopProduct type expectations.
    *
    * @param {object} filters
    * @param {string} filters.shopId
@@ -176,7 +184,7 @@ export class ShopProductsRepository {
    * @param {number} [filters.limit=20]
    * @param {string} [filters.is_available] - 'true' | 'false'
    * @param {string} [filters.low_stock] - 'true' | 'false'
-   * @param {string} [filters.search] - Search by product name
+   * @param {string} [filters.search] - Search by product name or SKU
    * @param {boolean} [filters.includeDeleted=false]
    * @returns {Promise<{items: Array, total: number}>}
    */
@@ -209,8 +217,10 @@ export class ShopProductsRepository {
     }
 
     if (search) {
-      conditions.push(`p.name ILIKE $${paramIdx++}`)
+      // Search by product name OR SKU (case-insensitive)
+      conditions.push(`(p.name ILIKE $${paramIdx} OR p.sku ILIKE $${paramIdx})`)
       params.push(`%${search}%`)
+      paramIdx++
     }
 
     const where = conditions.join(' AND ')
@@ -218,20 +228,36 @@ export class ShopProductsRepository {
     const [dataResult, countResult] = await Promise.all([
       query(
         `SELECT
-          sp.id, sp.shop_id, sp.product_id,
-          sp.price, sp.sale_price, sp.cost_price,
-          sp.stock_quantity, sp.low_stock_threshold, sp.max_order_qty,
-          sp.is_available, sp.sold_out_at,
-          sp.approval_status, sp.approved_at, sp.approved_by, sp.rejection_reason,
-          sp.deleted_at, sp.created_at, sp.updated_at,
-          p.name AS product_name,
-          -- products.images is JSONB (array of URLs). Take the first element
-          -- as the thumbnail; the column was renamed from image_url at some
-          -- point and the SELECT was never updated. Falls back to NULL when
-          -- the array is empty or missing.
-          (p.images->>0) AS product_image_url
+          sp.id,
+          sp.shop_id,
+          sp.product_id,
+          sp.price,
+          sp.sale_price,
+          sp.cost_price,
+          sp.stock_quantity,
+          sp.low_stock_threshold,
+          sp.max_order_qty,
+          sp.is_available,
+          sp.is_featured,
+          sp.sold_out_at,
+          sp.approval_status,
+          sp.approved_at,
+          sp.approved_by,
+          sp.rejection_reason,
+          sp.deleted_at,
+          sp.created_at,
+          sp.updated_at,
+          p.name          AS product_name,
+          p.sku           AS product_sku,
+          COALESCE(p.thumbnail_url, p.images->>0)
+                          AS product_image_url,
+          p.category_id   AS product_category_id,
+          c.name          AS product_category_name,
+          s.name          AS shop_name
         FROM shop_products sp
         LEFT JOIN products p ON p.id = sp.product_id
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN shops s ON s.id = sp.shop_id
         WHERE ${where}
         ORDER BY sp.created_at DESC
         LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
@@ -246,8 +272,42 @@ export class ShopProductsRepository {
       ),
     ])
 
+    // Reshape flat SQL rows into the nested structure the dashboard expects:
+    //   { ...shopProductFields, product: { id, name, sku, image_url, category_id, category_name }, shop_name }
+    const items = dataResult.rows.map((row) => ({
+      id: row.id,
+      shop_id: row.shop_id,
+      product_id: row.product_id,
+      price: row.price,
+      sale_price: row.sale_price,
+      cost_price: row.cost_price,
+      stock_quantity: row.stock_quantity,
+      low_stock_threshold: row.low_stock_threshold,
+      max_order_qty: row.max_order_qty,
+      is_available: row.is_available,
+      is_featured: row.is_featured ?? false,
+      sold_out_at: row.sold_out_at,
+      approval_status: row.approval_status,
+      approved_at: row.approved_at,
+      approved_by: row.approved_by,
+      rejection_reason: row.rejection_reason,
+      deleted_at: row.deleted_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      // Nested product object — matches ShopProductCatalogRef on the dashboard
+      product: {
+        id: row.product_id,
+        name: row.product_name ?? null,
+        sku: row.product_sku ?? null,
+        image_url: row.product_image_url ?? null,
+        category_id: row.product_category_id ?? null,
+        category_name: row.product_category_name ?? null,
+      },
+      shop_name: row.shop_name ?? null,
+    }))
+
     return {
-      items: dataResult.rows,
+      items,
       total: countResult.rows[0]?.total || 0,
     }
   }
@@ -272,6 +332,7 @@ export class ShopProductsRepository {
       'low_stock_threshold',
       'max_order_qty',
       'is_available',
+      'is_featured',
     ]
 
     for (const key of updatable) {

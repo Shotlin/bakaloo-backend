@@ -5,6 +5,9 @@
  *
  * Safe: uses SELECT FOR UPDATE SKIP LOCKED to avoid double-processing
  * on multi-instance deployments.
+ *
+ * Stock correctness: restores shop_products.stock_quantity for each
+ * cancelled order's items so stock is not permanently lost on payment expiry.
  */
 import { getClient } from '../config/database.js'
 import { logger } from '../config/logger.js'
@@ -81,6 +84,77 @@ async function _processExpiredPayments() {
     logger.info({ count: all.length, legacy: legacy.length }, 'Processing expired pending payments')
 
     for (const row of all) {
+      // Verify the order is still PENDING before cancelling (idempotency guard)
+      const { rows: [orderRow] } = await client.query(
+        `SELECT id, status, payment_status, items FROM orders WHERE id = $1 FOR UPDATE`,
+        [row.orderId]
+      )
+
+      if (!orderRow) {
+        logger.warn({ orderId: row.orderId }, 'Payment expiry: order not found, skipping')
+        continue
+      }
+
+      // Only cancel truly PENDING orders — idempotent guard against double-processing
+      if (orderRow.status !== 'PENDING' || orderRow.payment_status !== 'PENDING') {
+        logger.info(
+          { orderId: row.orderId, status: orderRow.status, paymentStatus: orderRow.payment_status },
+          'Payment expiry: order already processed, skipping stock restore'
+        )
+      } else {
+        // Restore shop_products stock for each item in the order
+        const items = typeof orderRow.items === 'string'
+          ? JSON.parse(orderRow.items)
+          : (orderRow.items || [])
+
+        for (const item of items) {
+          const qty = Number(item.quantity)
+          if (!qty || qty <= 0) continue
+
+          const shopProductId = item.shopProductId || item.shop_product_id || null
+          const productId = item.productId || item.product_id || null
+          const shopId = item.shopId || item.shop_id || null
+
+          if (shopProductId) {
+            // Phase 3 exact path
+            await client.query(
+              `UPDATE shop_products
+               SET stock_quantity = stock_quantity + $1,
+                   is_available = CASE
+                     WHEN stock_quantity = 0 AND $1 > 0 THEN true
+                     ELSE is_available
+                   END,
+                   sold_out_at = CASE
+                     WHEN stock_quantity = 0 AND $1 > 0 THEN NULL
+                     ELSE sold_out_at
+                   END,
+                   updated_at = NOW()
+               WHERE id = $2 AND deleted_at IS NULL`,
+              [qty, shopProductId]
+            )
+          } else if (productId && shopId) {
+            // Legacy path: resolve via (product_id, shop_id)
+            await client.query(
+              `UPDATE shop_products
+               SET stock_quantity = stock_quantity + $1,
+                   is_available = CASE
+                     WHEN stock_quantity = 0 AND $1 > 0 THEN true
+                     ELSE is_available
+                   END,
+                   sold_out_at = CASE
+                     WHEN stock_quantity = 0 AND $1 > 0 THEN NULL
+                     ELSE sold_out_at
+                   END,
+                   updated_at = NOW()
+               WHERE product_id = $2 AND shop_id = $3 AND deleted_at IS NULL`,
+              [qty, productId, shopId]
+            )
+          }
+        }
+
+        logger.info({ orderId: row.orderId, itemCount: items.length }, 'Payment expiry: stock restored for order items')
+      }
+
       if (row.paymentId) {
         await client.query(
           `UPDATE payments SET status = 'EXPIRED', updated_at = NOW() WHERE id = $1`,

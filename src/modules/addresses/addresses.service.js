@@ -195,7 +195,11 @@ export class AddressesService {
     if (existing.isDefault) {
       const remaining = await this.repo.findByUser(userId)
       if (remaining.length > 0) {
-        await this.repo.setDefault(remaining[0].id, userId)
+        const promoted = remaining[0]
+        await this.repo.setDefault(promoted.id, userId)
+        // FIX: the promoted address is now the delivery context — recompute
+        // allocation so cart/product availability tracks the new default.
+        this._recomputeForAddress(userId, promoted, 'address_delete')
       }
     }
 
@@ -214,6 +218,14 @@ export class AddressesService {
 
     const address = await this.repo.setDefault(id, userId)
     logger.info({ userId, addressId: id }, 'Default address set')
+
+    // FIX (root cause of stale allocation): switching the default delivery
+    // address must recompute the user's shop allocation. Previously only
+    // create/update recomputed, so selecting an existing address as default
+    // left the allocation pointing at the OLD address's shops — making
+    // products from the new area's stores appear yet fail cart validation.
+    this._recomputeForAddress(userId, address ?? existing, 'address_set_default')
+
     return { success: true, address }
   }
 
@@ -247,6 +259,35 @@ export class AddressesService {
       parsedLat <= 90 &&
       parsedLng >= -180 &&
       parsedLng <= 180
+  }
+
+  /**
+   * Fire-and-forget allocation recompute for a full address row (used by
+   * setDefault/delete where we already hold the address record). Validates
+   * coordinates + pincode before triggering so we never push an invalid
+   * recompute.
+   * @private
+   */
+  _recomputeForAddress(userId, address, action) {
+    if (!address) return
+    const lat = Number(address.lat)
+    const lng = Number(address.lng)
+    const pincode = address.pincode
+    if (!this._hasValidCoordinates(lat, lng) || !pincode) {
+      return
+    }
+    setImmediate(() => {
+      this._triggerAllocationRecompute(userId, {
+        lat,
+        lng,
+        pincode: String(pincode),
+      }).catch((err) => {
+        logger.warn(
+          { userId, err: err.message, action: `${action}.allocation_recompute_failed` },
+          'Background allocation recompute failed'
+        )
+      })
+    })
   }
 
   /**
