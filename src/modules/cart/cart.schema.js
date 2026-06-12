@@ -187,6 +187,11 @@ export const getCartSummarySchema = {
         message: { type: 'string' },
         data: {
           type: 'object',
+          // Allow the new canonical fee fields (totals, fees[], distance,
+          // freeDelivery, platformFee, smallCartFee, totalPayable) through
+          // without enumerating every nested key — they are additive and
+          // consumed by the redesigned bill UI.
+          additionalProperties: true,
           properties: {
             itemTotal: {
               type: 'object',
@@ -197,10 +202,13 @@ export const getCartSummarySchema = {
             },
             deliveryFee: {
               type: 'object',
+              additionalProperties: true,
               properties: {
                 amount: { type: 'number' },
                 isFree: { type: 'boolean' },
                 freeIn: { type: 'number' },
+                originalAmount: { type: 'number' },
+                waiverReason: { type: ['string', 'null'] },
               },
             },
             handlingFee: {

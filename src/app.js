@@ -329,9 +329,14 @@ export const buildApp = async () => {
     prefix: '/api/v1/payment-offers',
   })
 
-  // Fee Config (admin)
+  // Fee Config (admin) — legacy row-per-type config (kept for backward compat)
   await app.register(import('./modules/fee-config/fee-config.routes.js'), {
     prefix: '/api/v1/admin/fee-config',
+  })
+
+  // Fee Settings (admin) — canonical dynamic fee + distance-based delivery engine
+  await app.register(import('./modules/fee-settings/fee-settings.routes.js'), {
+    prefix: '/api/v1/admin/fee-settings',
   })
 
   // Tip Presets (admin)

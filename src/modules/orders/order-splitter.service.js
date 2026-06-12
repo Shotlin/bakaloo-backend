@@ -1,5 +1,6 @@
 import { logger } from '../../config/logger.js'
 import { ORDER_STATUS } from '../../constants/orderStatus.js'
+import { haversineKm } from '../../utils/distance.js'
 
 /**
  * Order Splitter — groups a multi-shop cart into one order per shop and
@@ -53,6 +54,8 @@ export class OrderSplitterService {
     ordersRepository,
     shopProductsRepository,
     shopProductsService = null,
+    feeSettingsService = null,
+    totalsEngine = null,
     fees = {},
   }) {
     if (!ordersRepository) {
@@ -64,6 +67,12 @@ export class OrderSplitterService {
     this.ordersRepo = ordersRepository
     this.shopProductsRepo = shopProductsRepository
     this.shopProductsService = shopProductsService
+    // Canonical fee engine + config. When provided, per-shop fees are
+    // computed dynamically (distance-based delivery + configurable fees).
+    // When absent (e.g. legacy unit tests), the static `fees` fallback
+    // below keeps the old behaviour deterministic.
+    this.feeSettingsService = feeSettingsService
+    this.totalsEngine = totalsEngine
     this.deliveryFee = Number.isFinite(fees.deliveryFee)
       ? fees.deliveryFee
       : DEFAULT_DELIVERY_FEE
@@ -134,6 +143,104 @@ export class OrderSplitterService {
     }
   }
 
+  /**
+   * Compute per-shop fees using the canonical TotalsEngine when available,
+   * falling back to the legacy static calculation otherwise.
+   *
+   * @param {object} args
+   * @param {string} args.shopId
+   * @param {Array<object>} args.items
+   * @param {object} args.feeContext - { deliveryCoords, shopCoords(Map), couponDiscount, couponShopId, configByShop(Map) }
+   * @returns {Promise<{
+   *   subtotal:number, deliveryFee:number, platformFee:number, handlingFee:number,
+   *   smallCartFee:number, surgeFee:number, packagingFee:number, taxAmount:number,
+   *   discountAmount:number, savingsTotal:number, totalAmount:number, feeBreakdown:object|null
+   * }>}
+   */
+  async computeShopFees({ shopId, items, feeContext }) {
+    const subtotal = Number(
+      items.reduce((sum, item) => sum + Number(item.lineTotal ?? 0), 0).toFixed(2)
+    )
+
+    // Coupon discount applies only to the shop it was validated against
+    // (single-shop carts today). Clamp to subtotal so totals never go negative.
+    const couponDiscount =
+      feeContext.couponShopId && feeContext.couponShopId === shopId
+        ? Math.min(Number(feeContext.couponDiscount || 0), subtotal)
+        : 0
+
+    // Tip belongs to a single order (single-shop checkouts only). Apply it to
+    // the designated shop so the charged total matches the cart summary.
+    const tipAmount =
+      feeContext.tipShopId && feeContext.tipShopId === shopId
+        ? Number(feeContext.tipAmount || 0)
+        : 0
+
+    // Legacy fallback when no engine is wired (unit tests / safety net).
+    if (!this.totalsEngine) {
+      const deliveryFee = subtotal >= this.freeDeliveryThreshold ? 0 : this.deliveryFee
+      const platformFee = this.platformFee
+      const totalAmount = Number(
+        (subtotal - couponDiscount + deliveryFee + platformFee + tipAmount).toFixed(2)
+      )
+      return {
+        subtotal,
+        deliveryFee,
+        platformFee,
+        handlingFee: 0,
+        smallCartFee: 0,
+        surgeFee: 0,
+        packagingFee: 0,
+        taxAmount: 0,
+        discountAmount: couponDiscount,
+        tipAmount,
+        savingsTotal: couponDiscount,
+        totalAmount: totalAmount < 0 ? 0 : totalAmount,
+        feeBreakdown: null,
+      }
+    }
+
+    // Resolve config (per-shop override → global) and distance.
+    const config =
+      feeContext.configByShop?.get(shopId) ||
+      (await this.feeSettingsService.resolveForShop(shopId)).config
+
+    const coords = feeContext.shopCoords?.get(shopId)
+    const deliveryCoords = feeContext.deliveryCoords
+    const distanceKm =
+      coords &&
+      deliveryCoords &&
+      Number.isFinite(coords.lat) &&
+      Number.isFinite(coords.lng)
+        ? haversineKm(deliveryCoords.lat, deliveryCoords.lng, coords.lat, coords.lng)
+        : null
+
+    const breakdown = this.totalsEngine.computeBreakdown({
+      config,
+      itemsSubtotal: subtotal,
+      couponDiscount,
+      distanceKm,
+      tipAmount,
+      storeName: coords?.name || null,
+    })
+
+    return {
+      subtotal: breakdown.itemsSubtotal,
+      deliveryFee: breakdown.deliveryFee,
+      platformFee: breakdown.platformFee,
+      handlingFee: breakdown.handlingFee,
+      smallCartFee: breakdown.smallCartFee,
+      surgeFee: breakdown.surgeFee,
+      packagingFee: breakdown.packagingFee,
+      taxAmount: breakdown.tax,
+      discountAmount: couponDiscount,
+      tipAmount: breakdown.tipAmount,
+      savingsTotal: breakdown.totalSavings,
+      totalAmount: breakdown.totalPayable,
+      feeBreakdown: breakdown,
+    }
+  }
+
   // ────────────────────────────────────────────────────────
   // Atomic create (Requirements 5.6, 5.7, 5.8, 5.9, 11.7)
   // ────────────────────────────────────────────────────────
@@ -170,6 +277,7 @@ export class OrderSplitterService {
     deliveryAddress,
     payment,
     checkoutMeta = {},
+    feeContext = {},
   }) {
     if (!client) throw new Error('createOrders requires an open pg client')
     if (!groups || groups.size === 0) {
@@ -301,7 +409,7 @@ export class OrderSplitterService {
       }
 
       // ─── 3. Compute fees per shop and insert order ────────────────────
-      const fees = this.computeFees(items)
+      const fees = await this.computeShopFees({ shopId, items, feeContext })
 
       const orderItems = items.map((item) => ({
         productId: item.productId,
@@ -328,7 +436,7 @@ export class OrderSplitterService {
         total: Number(item.lineTotal ?? 0),
       }))
 
-      const orderNumber = await this.ordersRepo.generateOrderNumber()
+      const orderNumber = await this.ordersRepo.generateOrderNumber(client)
 
       const initialStatus =
         payment?.method === 'COD' ? ORDER_STATUS.CONFIRMED : ORDER_STATUS.PENDING
@@ -342,10 +450,10 @@ export class OrderSplitterService {
           status: initialStatus,
           items: orderItems,
           subtotal: fees.subtotal,
-          discountAmount: 0,
+          discountAmount: fees.discountAmount || 0,
           deliveryFee: fees.deliveryFee,
           platformFee: fees.platformFee,
-          taxAmount: 0,
+          taxAmount: fees.taxAmount || 0,
           totalAmount: fees.totalAmount,
           paymentMethod: payment?.method || 'COD',
           paymentStatus: payment?.status || 'PENDING',
@@ -355,11 +463,12 @@ export class OrderSplitterService {
           estimatedDelivery:
             checkoutMeta.estimatedDelivery ||
             new Date(Date.now() + 30 * 60 * 1000),
-          handlingFee: 0,
+          handlingFee: fees.handlingFee || 0,
           lateNightFee: 0,
-          tipAmount: 0,
+          tipAmount: fees.tipAmount || 0,
           deliveryInstructions: checkoutMeta.deliveryInstructions || null,
-          savingsTotal: 0,
+          savingsTotal: fees.savingsTotal || 0,
+          feeBreakdown: fees.feeBreakdown || {},
           // Delivery slot fields
           deliveryMode: checkoutMeta.deliveryMode || 'ASAP',
           scheduledDeliveryAt: checkoutMeta.scheduledDeliveryAt || null,

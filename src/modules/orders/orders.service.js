@@ -1,4 +1,5 @@
 import { getClient } from '../../config/database.js'
+import { query } from '../../config/database.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { logger } from '../../config/logger.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
@@ -18,6 +19,8 @@ import { CouponsService } from '../coupons/coupons.service.js'
 import { ShopProductsRepository } from '../shop-products/shop-products.repository.js'
 import { ShopProductsService } from '../shop-products/shop-products.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
+import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
+import { TotalsEngine } from '../cart/totals-engine.service.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -53,12 +56,21 @@ export class OrdersService {
           ? new NotificationsService(new NotificationsRepository(), fastify)
           : null,
       })
+    // Canonical fee engine — shared by cart summary and order creation so
+    // the charged total always matches the displayed bill.
+    this.feeSettingsService =
+      options.feeSettingsService || new FeeSettingsService()
+    this.totalsEngine =
+      options.totalsEngine ||
+      new TotalsEngine({ feeSettingsService: this.feeSettingsService })
     this.orderSplitter =
       options.orderSplitter ||
       new OrderSplitterService({
         ordersRepository: this.repo,
         shopProductsRepository: this.shopProductsRepo,
         shopProductsService: this.shopProductsService,
+        feeSettingsService: this.feeSettingsService,
+        totalsEngine: this.totalsEngine,
         fees: {
           deliveryFee: DELIVERY_FEE,
           platformFee: PLATFORM_FEE,
@@ -208,6 +220,8 @@ export class OrdersService {
     // 3. Apply coupon — only meaningful when the cart is single-shop. For
     //    multi-shop carts coupons are deferred (see method docstring).
     let appliedCouponCode = null
+    let appliedCouponDiscount = 0
+    let couponShopId = null
     if (couponCode) {
       const isSingleShop = groupedByShop.size === 1
       if (!isSingleShop) {
@@ -222,6 +236,10 @@ export class OrdersService {
         return { success: false, message: couponResult.message, code: 'INVALID_COUPON' }
       }
       appliedCouponCode = couponResult.code
+      // Capture the discount amount so it is actually deducted from the order
+      // total (previously the code was stored but the discount was dropped).
+      appliedCouponDiscount = Number(couponResult.discount || 0)
+      couponShopId = Array.from(groupedByShop.keys())[0]
     }
 
     // 4. Resolve checkout extras (tip / instructions) — preserves the
@@ -242,6 +260,41 @@ export class OrdersService {
     const normalizedPaymentMethod = `${paymentMethod || 'COD'}`.toUpperCase()
     const initialPaymentStatus = 'PENDING'
 
+    // Resolve shop coordinates for distance-based delivery fees (one query
+    // for every shop in the cart). Used by the splitter's fee engine.
+    const shopCoords = new Map()
+    try {
+      const shopIdList = Array.from(groupedByShop.keys())
+      if (shopIdList.length > 0) {
+        const { rows } = await query(
+          `SELECT id, name, lat, lng FROM shops WHERE id = ANY($1)`,
+          [shopIdList]
+        )
+        for (const r of rows) {
+          shopCoords.set(r.id, {
+            name: r.name,
+            lat: r.lat != null ? Number(r.lat) : NaN,
+            lng: r.lng != null ? Number(r.lng) : NaN,
+          })
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { userId, err: err.message, action: 'order_shop_coords' },
+        'Failed to resolve shop coordinates; delivery fee will use safe fallback'
+      )
+    }
+
+    const feeContext = {
+      deliveryCoords: { lat: addressLat, lng: addressLng },
+      shopCoords,
+      couponDiscount: appliedCouponDiscount,
+      couponShopId,
+      // Tip applies to a single order only (single-shop checkouts).
+      tipAmount: orderTipAmount,
+      tipShopId: groupedByShop.size === 1 ? Array.from(groupedByShop.keys())[0] : null,
+    }
+
     // 5. Transaction: split + create orders + decrement stock atomically
     const client = await getClient()
     let createdOrders = []
@@ -255,6 +308,7 @@ export class OrdersService {
         groups,
         deliveryAddress,
         payment: { method: normalizedPaymentMethod, status: initialPaymentStatus },
+        feeContext,
         checkoutMeta: {
           couponCode: appliedCouponCode,
           deliveryNotes: deliveryNotes || null,
@@ -380,16 +434,14 @@ export class OrdersService {
       }
     }
 
-    // Apply tip + instructions only on single-shop checkouts to avoid
-    // ambiguity around which order owns the tip.
-    if (createdOrders.length === 1 && (orderTipAmount > 0 || resolvedInstructions)) {
+    // Apply delivery instructions only. Tip + all fees (handling/platform/
+    // delivery/coupon discount/savings) are computed authoritatively by the
+    // fee engine at order-creation time and persisted in the transaction, so
+    // we must NOT overwrite them here from the client request body.
+    if (createdOrders.length === 1 && resolvedInstructions) {
       try {
         await this.repo.updateExtras(createdOrders[0].id, {
-          tipAmount: orderTipAmount,
           deliveryInstructions: resolvedInstructions,
-          handlingFee: this._toNumber(handlingFee),
-          lateNightFee: this._toNumber(lateNightFee),
-          savingsTotal: this._toNumber(savingsTotal),
         })
       } catch (err) {
         logger.warn(

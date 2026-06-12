@@ -33,14 +33,16 @@ export class OrdersRepository {
         payment_method, payment_status, coupon_code, delivery_address,
         delivery_notes, estimated_delivery,
         handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
-        delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+        delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
+        fee_breakdown
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
       RETURNING id, order_number, user_id, shop_id, rider_id, status, items,
                 subtotal, discount_amount, delivery_fee, platform_fee, tax_amount, total_amount,
                 payment_method, payment_status, coupon_code, delivery_address, delivery_notes,
                 estimated_delivery, delivered_at, proof_photo_url, cancelled_reason,
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
                 delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
+                fee_breakdown,
                 created_at, updated_at`,
       [
         orderData.orderNumber,
@@ -70,6 +72,7 @@ export class OrdersRepository {
         orderData.scheduledSlotStart || null,
         orderData.scheduledSlotEnd || null,
         orderData.scheduledSlotLabel || null,
+        JSON.stringify(orderData.feeBreakdown || {}),
       ]
     )
 
@@ -459,14 +462,18 @@ export class OrdersRepository {
   /**
    * Generate order number: GRO-YYYYMMDD-XXX
    */
-  async generateOrderNumber() {
+  async generateOrderNumber(client = null) {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
     const pattern = `GRO-${today}-%`
 
-    const { rows } = await query(
-      `SELECT COUNT(*) FROM orders WHERE order_number LIKE $1`,
-      [pattern]
-    )
+    // When a transaction client is supplied, run the COUNT on it so orders
+    // already inserted earlier in the same transaction (multi-shop checkout
+    // creates one order per shop) are visible and the sequence increments
+    // correctly instead of colliding on the same number.
+    const runner = client && typeof client.query === 'function' ? client : null
+    const { rows } = runner
+      ? await runner.query(`SELECT COUNT(*) FROM orders WHERE order_number LIKE $1`, [pattern])
+      : await query(`SELECT COUNT(*) FROM orders WHERE order_number LIKE $1`, [pattern])
 
     const seq = parseInt(rows[0].count, 10) + 1
     return `GRO-${today}-${String(seq).padStart(3, '0')}`
@@ -562,6 +569,12 @@ export class OrdersRepository {
       scheduledSlotStart: row.scheduled_slot_start || null,
       scheduledSlotEnd: row.scheduled_slot_end || null,
       scheduledSlotLabel: row.scheduled_slot_label || null,
+      feeBreakdown:
+        row.fee_breakdown == null
+          ? null
+          : typeof row.fee_breakdown === 'string'
+            ? JSON.parse(row.fee_breakdown)
+            : row.fee_breakdown,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
