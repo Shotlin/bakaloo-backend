@@ -28,9 +28,34 @@ async function corsPlugin(fastify) {
     ? env.CORS_ORIGINS.split(',').map((o) => o.trim())
     : ['http://localhost:3001']
   const origins = expandLoopbackOrigins(configuredOrigins)
+  const allowSet = new Set(origins)
+
+  // Production domains are always allowed regardless of env config, so we never
+  // get blocked by a missing CORS_ORIGINS entry after a deploy. Matches:
+  //   - bakaloo.in and any subdomain (www, api, dash, etc.)
+  //   - shotlin.in and any subdomain
+  //   - *.vercel.app preview/production deployments
+  const allowedHostSuffixes = ['bakaloo.in', 'shotlin.in', 'vercel.app']
+
+  function isOriginAllowed(origin) {
+    // Non-browser requests (curl, server-to-server) send no Origin header.
+    if (!origin) return true
+    if (allowSet.has(origin)) return true
+    try {
+      const { hostname, protocol } = new URL(origin)
+      if (protocol !== 'https:' && protocol !== 'http:') return false
+      return allowedHostSuffixes.some(
+        (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+      )
+    } catch {
+      return false
+    }
+  }
 
   await fastify.register(cors, {
-    origin: origins,
+    origin(origin, cb) {
+      cb(null, isOriginAllowed(origin))
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     // X-Shop-Id is set by the dashboard's axios interceptor for every
