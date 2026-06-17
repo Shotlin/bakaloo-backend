@@ -288,10 +288,48 @@ export class PublicThemeController {
       [tab.id]
     )
 
+    // Resolve products for sections that have product_ids or category_ids in merch_binding.
+    // Without this step the mobile receives only IDs and renders nothing.
+    const resolvedSections = await Promise.all(
+      rows.map(async (section) => {
+        const binding = section.merch_binding || {}
+        const productIds = Array.isArray(binding.product_ids) ? binding.product_ids : []
+        const categoryIds = Array.isArray(binding.category_ids) ? binding.category_ids : []
+        const limit = normalizeLimit(binding.limit, HOME_MANIFEST_SECTION_CAP, HOME_MANIFEST_SECTION_CAP)
+
+        // No IDs configured — section uses its own rendering logic (banners, spacers, etc.)
+        if (productIds.length === 0 && categoryIds.length === 0) {
+          return section
+        }
+
+        // Fetch manually pinned products first, preserving dashboard order
+        const manualProducts = productIds.length > 0
+          ? await getProductsByIds(productIds)
+          : []
+        const seenIds = manualProducts.map((p) => p.id)
+
+        // Fill remaining slots from category if needed
+        let products = manualProducts
+        if (products.length < limit && categoryIds.length > 0) {
+          const fillProducts = await getProductsByCategoryIds(
+            categoryIds,
+            limit - products.length,
+            seenIds
+          )
+          products = [...manualProducts, ...fillProducts]
+        }
+
+        return {
+          ...section,
+          products: products.slice(0, limit),
+        }
+      })
+    )
+
     const responseData = {
       tab_key: tabKey,
       store_key: storeKey,
-      sections: rows,
+      sections: resolvedSections,
     }
     const etag = createHash('md5').update(JSON.stringify(responseData)).digest('hex')
 

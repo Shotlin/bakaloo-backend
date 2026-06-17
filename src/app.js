@@ -101,6 +101,13 @@ export const buildApp = async () => {
   await app.register(import('./modules/products/products.routes.js'), {
     prefix: '/api/v1/products',
   })
+  // URL alias fix — Flutter mobile app has a doubled /api/v1/ prefix bug
+  // where it constructs product URLs as /api/v1/api/v1/products/:id instead
+  // of /api/v1/products/:id. This alias transparently handles those requests
+  // so products load correctly without requiring a mobile app release.
+  await app.register(import('./modules/products/products.routes.js'), {
+    prefix: '/api/v1/api/v1/products',
+  })
 
   // Uploads — fully implemented
   await app.register(import('./modules/uploads/uploads.routes.js'), {
