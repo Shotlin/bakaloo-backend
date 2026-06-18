@@ -253,51 +253,74 @@ export class AdminNotificationsRepository {
 }
 
 function buildSegmentWhere(segment, segmentValue) {
-  const baseWhere = "u.role = 'CUSTOMER' AND u.is_active = true"
+  const customerBaseWhere = "u.role = 'CUSTOMER' AND u.is_active = true"
   const params = []
-  let where = baseWhere
 
   switch (segment) {
     case 'all_customers':
     case 'all':
-      break
+      return { where: customerBaseWhere, params }
+
     case 'new':
-      where += ` AND u.created_at >= NOW() - INTERVAL '30 days'`
-      break
+      return {
+        where: `${customerBaseWhere} AND u.created_at >= NOW() - INTERVAL '30 days'`,
+        params,
+      }
+
     case 'inactive_customers':
     case 'inactive':
-      where += ` AND u.id NOT IN (
-        SELECT DISTINCT user_id FROM orders WHERE created_at >= NOW() - INTERVAL '30 days'
-      )`
-      break
-    case 'high_value':
-      where += ` AND u.id IN (
-        SELECT user_id FROM orders WHERE status = 'DELIVERED'
-        GROUP BY user_id HAVING SUM(total) >= 5000
-      )`
-      break
-    case 'specific_user':
-      if (segmentValue) {
-        params.push(segmentValue)
-        where += ` AND (u.id::text = $${params.length} OR u.phone = $${params.length})`
+      return {
+        where: `${customerBaseWhere} AND u.id NOT IN (
+          SELECT DISTINCT user_id FROM orders WHERE created_at >= NOW() - INTERVAL '30 days'
+        )`,
+        params,
       }
-      break
-    case 'store_customers':
-      if (segmentValue) {
-        params.push(segmentValue)
-        where += ` AND u.id IN (
-          SELECT DISTINCT user_id FROM orders WHERE shop_id = $${params.length}
-        )`
-      }
-      break
-    case 'cart_not_empty':
-      where += ` AND u.id IN (
-        SELECT DISTINCT user_id FROM cart_items
-      )`
-      break
-    default:
-      break
-  }
 
-  return { where, params }
+    case 'high_value':
+      return {
+        where: `${customerBaseWhere} AND u.id IN (
+          SELECT user_id FROM orders WHERE status = 'DELIVERED'
+          GROUP BY user_id HAVING SUM(total) >= 5000
+        )`,
+        params,
+      }
+
+    case 'specific_user': {
+      // Target a specific person by phone or user ID — no role restriction so
+      // admins can test notifications with their own accounts.
+      const baseWhere = "u.is_active = true"
+      if (segmentValue) {
+        params.push(segmentValue)
+        return {
+          where: `${baseWhere} AND (u.id::text = $${params.length} OR u.phone = $${params.length})`,
+          params,
+        }
+      }
+      return { where: baseWhere, params }
+    }
+
+    case 'store_customers': {
+      if (segmentValue) {
+        params.push(segmentValue)
+        return {
+          where: `${customerBaseWhere} AND u.id IN (
+            SELECT DISTINCT user_id FROM orders WHERE shop_id = $${params.length}
+          )`,
+          params,
+        }
+      }
+      return { where: customerBaseWhere, params }
+    }
+
+    case 'cart_not_empty':
+      return {
+        where: `${customerBaseWhere} AND u.id IN (
+          SELECT DISTINCT user_id FROM cart_items
+        )`,
+        params,
+      }
+
+    default:
+      return { where: customerBaseWhere, params }
+  }
 }
