@@ -54,6 +54,7 @@ const USER_ID = '44444444-4444-4444-4444-444444444444'
 function makeRepoMock() {
   return {
     create: vi.fn(),
+    revive: vi.fn(),
     findById: vi.fn(),
     findByShopAndProduct: vi.fn(),
     findMany: vi.fn(),
@@ -183,6 +184,72 @@ describe('ShopProductsService.create', () => {
       code: 'SHOP_PRODUCT_DUPLICATE',
     })
     expect(repo.create).not.toHaveBeenCalled()
+  })
+
+  it('revives a soft-deleted row instead of inserting a duplicate', async () => {
+    // Regression test: uq_shop_products_shop_product UNIQUE(shop_id, product_id)
+    // is NOT partial — it still counts soft-deleted rows. Re-adding a product
+    // that was previously removed from this shop must UPDATE the existing row
+    // (repo.revive), never INSERT, or Postgres rejects with 23505 and the
+    // request surfaces as an unhandled 500 (see prod incident 2026-06-18).
+    const repo = makeRepoMock()
+    const existingDeletedRow = {
+      id: 'soft-deleted-row',
+      shop_id: SHOP_ID,
+      product_id: PRODUCT_ID,
+      deleted_at: '2026-06-01T00:00:00.000Z',
+    }
+    repo.findByShopAndProduct.mockResolvedValueOnce(existingDeletedRow)
+    const revived = {
+      id: 'soft-deleted-row',
+      shop_id: SHOP_ID,
+      product_id: PRODUCT_ID,
+      price: 50,
+      stock_quantity: 5,
+      is_available: true,
+      deleted_at: null,
+    }
+    repo.revive.mockResolvedValueOnce(revived)
+    const svc = new ShopProductsService(repo)
+
+    const result = await svc.create(
+      SHOP_ID,
+      { product_id: PRODUCT_ID, price: 50, stock_quantity: 5, is_available: true },
+      ADMIN_ACTOR
+    )
+
+    expect(result).toEqual({ success: true, data: revived })
+    expect(repo.revive).toHaveBeenCalledTimes(1)
+    expect(repo.revive).toHaveBeenCalledWith(
+      'soft-deleted-row',
+      SHOP_ID,
+      expect.objectContaining({ product_id: PRODUCT_ID, shop_id: SHOP_ID })
+    )
+    expect(repo.create).not.toHaveBeenCalled()
+  })
+
+  it('translates a concurrent 23505 unique violation into SHOP_PRODUCT_DUPLICATE', async () => {
+    // Defense-in-depth: two requests can both pass the findByShopAndProduct
+    // check (TOCTOU) and race to insert the same (shop_id, product_id). The
+    // loser must get a friendly 409, not an unhandled 500.
+    const repo = makeRepoMock()
+    repo.findByShopAndProduct.mockResolvedValueOnce(null)
+    const pgError = new Error('duplicate key value violates unique constraint "uq_shop_products_shop_product"')
+    pgError.code = '23505'
+    repo.create.mockRejectedValueOnce(pgError)
+    const svc = new ShopProductsService(repo)
+
+    const result = await svc.create(
+      SHOP_ID,
+      { product_id: PRODUCT_ID, price: 50, stock_quantity: 5 },
+      ADMIN_ACTOR
+    )
+
+    expect(result).toEqual({
+      success: false,
+      message: expect.any(String),
+      code: 'SHOP_PRODUCT_DUPLICATE',
+    })
   })
 
   it('forces is_available=false when initial stock_quantity=0 (Req 11.1)', async () => {

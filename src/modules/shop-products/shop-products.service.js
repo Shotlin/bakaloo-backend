@@ -507,12 +507,37 @@ export class ShopProductsService {
     const desiredAvailability =
       data.stock_quantity === 0 ? false : data.is_available
 
-    const created = await this.repo.create({
+    const payload = {
       ...data,
       shop_id: shopId,
       is_available: desiredAvailability,
       is_featured: data.is_featured ?? false,
-    })
+    }
+
+    let created
+    try {
+      // `existing` here is necessarily soft-deleted (the duplicate check
+      // above already rejected the non-deleted case) — revive it in place
+      // instead of inserting a second row for the same (shop_id, product_id),
+      // which the UNIQUE constraint forbids even across soft-deletes.
+      created = existing
+        ? await this.repo.revive(existing.id, shopId, payload)
+        : await this.repo.create(payload)
+    } catch (err) {
+      // Defense-in-depth: two concurrent requests can both pass the
+      // `existing` check above (TOCTOU) and race to insert/revive the same
+      // row. Translate the resulting Postgres unique-violation into the same
+      // friendly 409 instead of letting it reach the global handler as an
+      // opaque 500.
+      if (err && err.code === '23505') {
+        return {
+          success: false,
+          message: 'This product is already listed for the shop',
+          code: 'SHOP_PRODUCT_DUPLICATE',
+        }
+      }
+      throw err
+    }
 
     await this.invalidateShopCache(shopId)
 

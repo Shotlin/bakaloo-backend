@@ -133,6 +133,55 @@ export class ShopProductsRepository {
   }
 
   /**
+   * Revive a soft-deleted shop_product row in place instead of inserting a
+   * new one. `uq_shop_products_shop_product UNIQUE (shop_id, product_id)` is
+   * not partial — it still counts soft-deleted rows — so re-adding a product
+   * that was previously removed from this shop must UPDATE the existing row
+   * (clearing deleted_at) rather than INSERT, or Postgres rejects the insert
+   * with a 23505 duplicate-key error.
+   *
+   * Resets approval/sold-out state the same way a fresh INSERT would, so a
+   * revived row carries no stale state from its previous lifecycle.
+   *
+   * @param {string} id - shop_product UUID (the soft-deleted row to revive)
+   * @param {string} shopId
+   * @param {object} data - Same shape as `create()`
+   * @returns {Promise<object>} Revived record
+   */
+  async revive(id, shopId, data) {
+    const soldOutAt =
+      data.stock_quantity === 0 && data.is_available === false
+        ? new Date()
+        : null
+
+    const { rows } = await query(
+      `UPDATE shop_products SET
+        price = $3, sale_price = $4, cost_price = $5,
+        stock_quantity = $6, low_stock_threshold = $7, max_order_qty = $8,
+        is_available = $9, is_featured = $10, sold_out_at = $11,
+        approval_status = 'APPROVED', approved_at = NULL, approved_by = NULL,
+        rejection_reason = NULL,
+        deleted_at = NULL, updated_at = NOW()
+      WHERE id = $1 AND shop_id = $2
+      RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
+      [
+        id,
+        shopId,
+        data.price ?? null,
+        data.sale_price ?? null,
+        data.cost_price ?? null,
+        data.stock_quantity,
+        data.low_stock_threshold,
+        data.max_order_qty,
+        data.is_available,
+        data.is_featured ?? false,
+        soldOutAt,
+      ]
+    )
+    return rows[0] || null
+  }
+
+  /**
    * Find a shop_product by id, scoped to a shop (excludes soft-deleted).
    * Uses idx_shop_products_shop_available (shop_id, is_available).
    * @param {string} id - shop_product UUID
