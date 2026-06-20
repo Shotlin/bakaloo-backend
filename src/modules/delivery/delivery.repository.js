@@ -104,7 +104,7 @@ export class DeliveryRepository {
                ELSE true
              END as is_offer_active,
              o.id as order_id, o.order_number, o.status as order_status,
-             o.total_amount, o.payment_method, o.delivery_fee,
+             o.shop_id, o.total_amount, o.payment_method, o.delivery_fee,
              o.delivery_address, o.delivery_notes,
              o.items, o.estimated_delivery, o.created_at,
              u.name as customer_name, u.phone as customer_phone
@@ -879,7 +879,9 @@ export class DeliveryRepository {
   async getShopInfo(shopId) {
     if (!shopId) return null
     const { rows } = await query(
-      `SELECT id, name, address, phone, pickup_lat, pickup_lng
+      `SELECT id, name,
+              CONCAT_WS(', ', address_line1, address_line2, city, state, pincode) AS address,
+              phone, lat AS pickup_lat, lng AS pickup_lng
        FROM shops
        WHERE id = $1
        LIMIT 1`,

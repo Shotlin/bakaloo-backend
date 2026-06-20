@@ -823,7 +823,9 @@ async function cancelStaleAssignedOffers(orderId) {
 async function getShopInfoForOrder(shopId) {
   if (!shopId) return null
   const { rows } = await query(
-    `SELECT id, name, address, phone, pickup_lat, pickup_lng
+    `SELECT id, name,
+            CONCAT_WS(', ', address_line1, address_line2, city, state, pincode) AS address,
+            phone, lat AS pickup_lat, lng AS pickup_lng
      FROM shops
      WHERE id = $1
      LIMIT 1`,

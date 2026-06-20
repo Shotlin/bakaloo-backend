@@ -78,12 +78,34 @@ export class DeliveryService {
   // ─── ORDER FLOW ─────────────────────────────────────
 
   async getAssignedOrders(riderId, status) {
-    const [orders, store] = await Promise.all([
+    const [orders, fallbackStore] = await Promise.all([
       this.repository.getAssignedOrders(riderId, status),
       this.repository.getStoreSettings(),
     ])
 
-    return orders.map((order) => this._normalizeAssignedOrder(order, store))
+    const shopIds = [...new Set(orders.map((order) => order.shop_id).filter(Boolean))]
+    const shopInfos = await Promise.all(
+      shopIds.map((shopId) => this.repository.getShopInfo(shopId))
+    )
+    const storeByShopId = new Map(
+      shopIds.map((shopId, index) => {
+        const info = shopInfos[index]
+        return [
+          shopId,
+          info && {
+            name: info.name,
+            address: info.address,
+            phone: info.phone,
+            lat: info.pickup_lat,
+            lng: info.pickup_lng,
+          },
+        ]
+      })
+    )
+
+    return orders.map((order) =>
+      this._normalizeAssignedOrder(order, storeByShopId.get(order.shop_id) || fallbackStore)
+    )
   }
 
   async acceptOrder(riderId, orderId) {
