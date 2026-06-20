@@ -21,6 +21,8 @@ import { ShopProductsService } from '../shop-products/shop-products.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from '../cart/totals-engine.service.js'
+import { BillSummaryService } from '../cart/bill-summary.service.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -63,6 +65,20 @@ export class OrdersService {
     this.totalsEngine =
       options.totalsEngine ||
       new TotalsEngine({ feeSettingsService: this.feeSettingsService })
+    // Payment-method gating — same total-bill calculation the cart summary
+    // shows the customer, so COD/Razorpay/Wallet enforcement at order
+    // creation always agrees with what was displayed at checkout.
+    this.paymentSettingsService =
+      options.paymentSettingsService || new PaymentSettingsService()
+    this.billSummaryService =
+      options.billSummaryService ||
+      new BillSummaryService({
+        cartService: this.cartService,
+        cartRepository: this.cartRepo,
+        feeSettingsService: this.feeSettingsService,
+        totalsEngine: this.totalsEngine,
+        paymentSettingsService: this.paymentSettingsService,
+      })
     this.orderSplitter =
       options.orderSplitter ||
       new OrderSplitterService({
@@ -217,6 +233,20 @@ export class OrdersService {
       lng: addressLng,
     }
 
+    // 2b. Payment-method gate — enforce the admin's COD/Razorpay/Wallet
+    // toggles and the COD min/max amount server-side. Uses the same bill
+    // calculation the cart summary shows the customer so the total this
+    // gate checks against always matches what was displayed at checkout.
+    const normalizedPaymentMethod = `${paymentMethod || 'COD'}`.toUpperCase()
+    const paymentGateError = await this._checkPaymentMethodAllowed(
+      userId,
+      addressId,
+      normalizedPaymentMethod
+    )
+    if (paymentGateError) {
+      return paymentGateError
+    }
+
     // 3. Apply coupon — only meaningful when the cart is single-shop. For
     //    multi-shop carts coupons are deferred (see method docstring).
     let appliedCouponCode = null
@@ -257,7 +287,6 @@ export class OrdersService {
       : this._toNumber(tipFromRedis)
     const resolvedInstructions = normalizedInstructions || instructionsFromRedis || null
 
-    const normalizedPaymentMethod = `${paymentMethod || 'COD'}`.toUpperCase()
     const initialPaymentStatus = 'PENDING'
 
     // Resolve shop coordinates for distance-based delivery fees (one query
@@ -464,6 +493,64 @@ export class OrdersService {
   _toNumber(value, fallback = 0) {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  /**
+   * Enforce the admin's COD/Razorpay/Wallet toggles + COD min/max amount
+   * before an order is created. Returns a `{ success: false, ... }` payload
+   * (matching every other early-return in `placeOrder`) when the requested
+   * method isn't allowed, or `null` when it's fine to proceed.
+   */
+  async _checkPaymentMethodAllowed(userId, addressId, normalizedPaymentMethod) {
+    const config = await this.paymentSettingsService.getConfig()
+
+    if (normalizedPaymentMethod === 'ONLINE') {
+      if (!config.razorpayEnabled) {
+        return {
+          success: false,
+          message: 'Online payment is currently unavailable. Please choose another payment method.',
+          code: 'RAZORPAY_DISABLED',
+        }
+      }
+      return null
+    }
+
+    if (normalizedPaymentMethod === 'WALLET') {
+      if (!config.walletEnabled) {
+        return {
+          success: false,
+          message: 'Wallet payment is currently unavailable. Please choose another payment method.',
+          code: 'WALLET_DISABLED',
+        }
+      }
+      return null
+    }
+
+    // COD (default)
+    if (!config.codEnabled) {
+      return {
+        success: false,
+        message: 'Cash on Delivery is currently unavailable. Please choose another payment method.',
+        code: 'COD_DISABLED',
+      }
+    }
+
+    const { totalPayable } = await this.billSummaryService.getBillSummary(userId, addressId)
+    if (totalPayable < config.codMinOrderAmount) {
+      return {
+        success: false,
+        message: `Cash on Delivery is available for orders above ₹${config.codMinOrderAmount}.`,
+        code: 'COD_BELOW_MIN',
+      }
+    }
+    if (config.codMaxOrderAmount != null && totalPayable > config.codMaxOrderAmount) {
+      return {
+        success: false,
+        message: `Cash on Delivery isn't available for orders above ₹${config.codMaxOrderAmount}. Please pay online.`,
+        code: 'COD_ABOVE_MAX',
+      }
+    }
+    return null
   }
 
   /**

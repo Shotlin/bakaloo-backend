@@ -2,6 +2,7 @@ import { CartRepository } from './cart.repository.js'
 import { CartService } from './cart.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from './totals-engine.service.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { haversineKm } from '../../utils/distance.js'
 import { query } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
@@ -29,12 +30,14 @@ export class BillSummaryService {
     cartRepository = null,
     feeSettingsService = null,
     totalsEngine = null,
+    paymentSettingsService = null,
   } = {}) {
     this.cartRepository = cartRepository ?? new CartRepository()
     this.cartService = cartService ?? new CartService(this.cartRepository)
     this.feeSettingsService = feeSettingsService ?? new FeeSettingsService()
     this.totalsEngine =
       totalsEngine ?? new TotalsEngine({ feeSettingsService: this.feeSettingsService })
+    this.paymentSettingsService = paymentSettingsService ?? new PaymentSettingsService()
   }
 
   /**
@@ -44,8 +47,9 @@ export class BillSummaryService {
    */
   async getBillSummary(userId, addressId = null) {
     const cart = await this.cartService.getCart(userId)
+    const paymentConfig = await this.paymentSettingsService.getConfig()
     if (!cart.items || cart.items.length === 0) {
-      return this._emptyBill()
+      return this._emptyBill(paymentConfig)
     }
 
     const itemTotalDiscounted = this._round(cart.subtotal)
@@ -219,6 +223,38 @@ export class BillSummaryService {
       platformFee: { amount: platformFee, isFree: platformFee <= 0 },
       smallCartFee: { amount: smallCartFee, isFree: smallCartFee <= 0 },
       totalPayable: toPayFinal,
+      paymentMethods: this._buildPaymentMethods(paymentConfig, toPayFinal),
+    }
+  }
+
+  /** Build the cod/razorpay/wallet availability block from the resolved config + bill total. */
+  _buildPaymentMethods(config, totalPayable) {
+    const { codEnabled, codMinOrderAmount, codMaxOrderAmount, razorpayEnabled, walletEnabled } = config
+
+    let codReason = null
+    let codAvailable = codEnabled
+    if (!codEnabled) {
+      codReason = 'Cash on Delivery is currently unavailable.'
+      codAvailable = false
+    } else if (totalPayable < codMinOrderAmount) {
+      const shortfall = this._round(codMinOrderAmount - totalPayable)
+      codReason = `Add ₹${shortfall} more to use Cash on Delivery — available above ₹${codMinOrderAmount}.`
+      codAvailable = false
+    } else if (codMaxOrderAmount != null && totalPayable > codMaxOrderAmount) {
+      codReason = `Cash on Delivery isn't available above ₹${codMaxOrderAmount} — please pay online.`
+      codAvailable = false
+    }
+
+    return {
+      cod: {
+        enabled: codEnabled,
+        available: codAvailable,
+        minAmount: codMinOrderAmount,
+        maxAmount: codMaxOrderAmount,
+        reason: codReason,
+      },
+      razorpay: { enabled: razorpayEnabled },
+      wallet: { enabled: walletEnabled },
     }
   }
 
@@ -360,7 +396,7 @@ export class BillSummaryService {
     return map
   }
 
-  _emptyBill() {
+  _emptyBill(paymentConfig = null) {
     return {
       itemTotal: { original: 0, discounted: 0 },
       deliveryFee: { amount: 0, isFree: false, freeIn: 0, originalAmount: 0, waiverReason: null },
@@ -379,6 +415,7 @@ export class BillSummaryService {
       platformFee: { amount: 0, isFree: true },
       smallCartFee: { amount: 0, isFree: true },
       totalPayable: 0,
+      paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
     }
   }
 

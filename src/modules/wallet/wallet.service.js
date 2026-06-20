@@ -6,6 +6,7 @@ import { logger } from '../../config/logger.js'
 import { razorpay } from '../../config/razorpay.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -18,6 +19,7 @@ export class WalletService {
   constructor(repository) {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
+    this.paymentSettingsService = new PaymentSettingsService()
   }
 
   /**
@@ -240,6 +242,11 @@ export class WalletService {
    * Pay for an order from wallet balance
    */
   async payFromWallet(userId, orderId) {
+    const { walletEnabled } = await this.paymentSettingsService.getConfig()
+    if (!walletEnabled) {
+      return { success: false, message: 'Wallet payment is currently unavailable.' }
+    }
+
     const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
     if (!order) {
       return { success: false, message: 'Order not found' }

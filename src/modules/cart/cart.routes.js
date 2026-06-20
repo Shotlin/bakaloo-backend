@@ -4,6 +4,7 @@ import { CartRepository } from './cart.repository.js'
 import { BillSummaryService } from './bill-summary.service.js'
 import { FeeConfigRepository } from '../fee-config/fee-config.repository.js'
 import { FeeConfigService } from '../fee-config/fee-config.service.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import {
   getCartSchema,
   addItemSchema,
@@ -26,10 +27,12 @@ export default async function cartRoutes(fastify) {
   const service = new CartService(repository)
   const feeConfigRepository = new FeeConfigRepository()
   const feeConfigService = new FeeConfigService(feeConfigRepository)
+  const paymentSettingsService = new PaymentSettingsService()
   const billSummaryService = new BillSummaryService({
     cartService: service,
     feeConfigService,
     cartRepository: repository,
+    paymentSettingsService,
   })
   const controller = new CartController(service, billSummaryService, repository)
 

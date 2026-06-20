@@ -5,6 +5,7 @@ import { razorpay } from '../../config/razorpay.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -17,6 +18,7 @@ export class PaymentsService {
   constructor(repository) {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
+    this.paymentSettingsService = new PaymentSettingsService()
   }
 
   /**
@@ -25,6 +27,11 @@ export class PaymentsService {
   async createPaymentOrder(userId, orderId) {
     if (!razorpay) {
       return { success: false, message: 'Online payments are not configured' }
+    }
+
+    const { razorpayEnabled } = await this.paymentSettingsService.getConfig()
+    if (!razorpayEnabled) {
+      return { success: false, message: 'Online payment is currently unavailable.' }
     }
 
     const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
