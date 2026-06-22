@@ -686,11 +686,16 @@ export class DeliveryService {
   async updateLocation(riderId, latitude, longitude) {
     await this.repository.updateLocation(riderId, latitude, longitude)
 
-    // Broadcast to admin dashboard and customers tracking this rider
+    // Broadcast to admin dashboard and customers tracking this rider.
+    // Sent to both the `order:<id>` room (joined via order:track,
+    // which doesn't survive a socket reconnect unless the client
+    // explicitly rejoins) AND directly to the customer's own
+    // `user:<id>` room (joined automatically on every connect) so a
+    // dropped room join can't silently stop location updates.
     if (this.fastify?.emitOrderUpdate) {
       const orders = await this.repository.getAssignedOrders(riderId, 'IN_TRANSIT')
       for (const order of orders) {
-        this.fastify.emitOrderUpdate(order.order_id, {
+        this.fastify.emitOrderUpdate(order.order_id, [order.customer_id], {
           type: 'RIDER_LOCATION',
           lat: latitude,
           lng: longitude,
