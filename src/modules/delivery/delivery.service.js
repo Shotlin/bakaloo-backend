@@ -568,12 +568,22 @@ export class DeliveryService {
         process.env.ALLOW_DEMO_DELIVERY_ACTIONS === 'true')
 
     if (!allowDemoDelivery && !cleanOtp && !cleanProof) {
-      throw new Error('OTP or delivery proof is required')
+      throw {
+        statusCode: 400,
+        message: 'OTP or delivery proof is required',
+        code: 'OTP_OR_PROOF_REQUIRED',
+      }
     }
 
     if (cleanOtp) {
       const valid = await this.repository.verifyDeliveryOtp(orderId, cleanOtp)
-      if (!valid) throw new Error('Invalid delivery OTP')
+      if (!valid) {
+        throw {
+          statusCode: 400,
+          message: 'OTP did not match. Ask the customer to read it again',
+          code: 'INVALID_OTP',
+        }
+      }
     }
 
     const assignmentId = this._resolveAssignmentId(assignment)
