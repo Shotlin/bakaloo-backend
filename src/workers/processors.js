@@ -10,6 +10,13 @@ import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/
 import { emit as emitAudit } from '../utils/audit-log.js'
 
 const DEFAULT_RIDER_EARNING = 25
+// Auto-assign fans out to every online rider sorted by distance with no
+// cutoff — without this, a rider hundreds/thousands of km from the
+// pickup store (anywhere with no other online riders nearby) gets
+// offered the delivery, since "closest of all candidates" still
+// matches even when the closest candidate is absurdly far away.
+const MAX_AUTO_ASSIGN_DISTANCE_KM =
+  Number(process.env.AUTO_ASSIGN_MAX_DISTANCE_KM) || 15
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED']
 const CLAIMED_ASSIGNMENT_STATUSES = ['ACCEPTED', 'PICKED_UP', 'IN_TRANSIT']
 const OPEN_ASSIGNMENT_STATUSES = ['ASSIGNED', ...CLAIMED_ASSIGNMENT_STATUSES]
@@ -517,7 +524,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
 
   // Task 12.2: Select riders with status AVAILABLE, is_active=true, no non-terminal assignment
   const { rows: candidateRiders } = await query(
-    `SELECT rp.user_id, rp.current_lat, rp.current_lng, rp.last_active_at
+    `SELECT rp.user_id, rp.current_lat, rp.current_lng, rp.updated_at
      FROM rider_profiles rp
      JOIN users u ON u.id = rp.user_id
      WHERE rp.is_approved = true
@@ -528,7 +535,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
          WHERE da.rider_id = rp.user_id
            AND da.status IN ('ASSIGNED', 'ACCEPTED', 'IN_TRANSIT')
        )
-     ORDER BY rp.last_active_at ASC NULLS LAST
+     ORDER BY rp.updated_at ASC NULLS LAST
      LIMIT 10000`
   )
 
@@ -572,13 +579,39 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
     })
   }
 
-  candidatesWithDistance.sort((a, b) => {
+  // Drop riders whose KNOWN distance puts them outside any realistic
+  // delivery range. Riders with no resolvable location (distanceKm
+  // null) are kept — we can't confirm they're too far — but sort
+  // last, same as before.
+  const inRangeCandidates = candidatesWithDistance.filter(
+    (c) => c.distanceKm === null || c.distanceKm <= MAX_AUTO_ASSIGN_DISTANCE_KM
+  )
+
+  if (!inRangeCandidates.length) {
+    logger.warn(
+      {
+        orderId,
+        orderNumber: order.order_number,
+        shopId: order.shop_id,
+        candidateCount: candidatesWithDistance.length,
+        nearestKnownDistanceKm: candidatesWithDistance
+          .map((c) => c.distanceKm)
+          .filter((d) => Number.isFinite(d))
+          .sort((a, b) => a - b)[0] ?? null,
+        maxDistanceKm: MAX_AUTO_ASSIGN_DISTANCE_KM,
+      },
+      'Auto-assign skipped: no online riders within range of the pickup store'
+    )
+    return { assigned: false, reason: 'NO_RIDERS_IN_RANGE' }
+  }
+
+  inRangeCandidates.sort((a, b) => {
     const aDistance = Number.isFinite(a.distanceKm) ? a.distanceKm : Number.POSITIVE_INFINITY
     const bDistance = Number.isFinite(b.distanceKm) ? b.distanceKm : Number.POSITIVE_INFINITY
     return aDistance - bDistance
   })
 
-  const selectedCandidates = candidatesWithDistance
+  const selectedCandidates = inRangeCandidates
 
   if (!selectedCandidates.length) {
     return { assigned: false, reason: 'NO_AVAILABLE_RIDERS' }
@@ -784,6 +817,7 @@ async function queueAutoAssign(orderId, source) {
       {
         jobId: `auto-assign-${orderId}`,
         removeOnComplete: true,
+        removeOnFail: true,
       }
     )
     return true

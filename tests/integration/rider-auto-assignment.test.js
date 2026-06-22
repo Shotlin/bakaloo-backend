@@ -118,6 +118,12 @@ function makeShopRow(shopId, coords = {}) {
 describe('Task 23.5 — Rider auto-assignment uses shop coordinates', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // clearAllMocks() resets call history but NOT queued
+    // mockResolvedValueOnce() responses — a test that mocks more
+    // calls than the code under test actually makes (e.g. because a
+    // candidate gets filtered out before reaching that call) leaks
+    // its leftover queued responses into the next test otherwise.
+    mockQuery.mockReset()
     mockClient.query.mockReset()
     mockClient.release.mockReset()
   })
@@ -243,6 +249,38 @@ describe('Task 23.5 — Rider auto-assignment uses shop coordinates', () => {
       expect(result.offers.length).toBeGreaterThanOrEqual(1)
       // First offer should be the nearest rider
       expect(result.offers[0].riderId).toBe('rider-near')
+    })
+
+    it('excludes online riders far outside any realistic delivery range, even when they are the only candidate', async () => {
+      // Regression: a rider in Surat, Gujarat was being offered a
+      // pickup from a Thakurnagar, West Bengal store ~1650km away,
+      // because auto-assign offered the order to "nearest of all
+      // online riders" with no maximum-distance cutoff at all.
+      const shopLat = 22.92444 // Thakurnagar, West Bengal
+      const shopLng = 88.77778
+      const farAwayRider = {
+        user_id: 'rider-far-away',
+        current_lat: 21.1959, // Mota Varachha, Surat, Gujarat
+        current_lng: 72.8302,
+        last_active_at: new Date().toISOString(),
+      }
+
+      mockQuery
+        .mockResolvedValueOnce({ rows: [makeOrderRow(SHOP_ID_WITH_COORDS)] })
+        .mockResolvedValueOnce({
+          rows: [makeShopRow(SHOP_ID_WITH_COORDS, { pickup_lat: shopLat, pickup_lng: shopLng })],
+        })
+        .mockResolvedValueOnce({ rows: [farAwayRider] })
+
+      const result = await processOrderJob({
+        data: { type: 'auto-assign', orderId: ORDER_ID, source: 'TEST' },
+      })
+
+      expect(result.assigned).toBe(false)
+      expect(result.reason).toBe('NO_RIDERS_IN_RANGE')
+      // No assignment INSERT should have been attempted for the
+      // out-of-range rider.
+      expect(mockClient.query).not.toHaveBeenCalled()
     })
   })
 
