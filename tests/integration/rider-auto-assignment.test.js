@@ -52,6 +52,10 @@ vi.mock('../../src/plugins/socketio.plugin.js', () => ({
   getSocketIo: () => mockIo,
 }))
 
+vi.mock('../../src/plugins/socket-emitter.js', () => ({
+  getSocketEmitter: () => mockIo,
+}))
+
 vi.mock('../../src/utils/audit-log.js', () => ({
   emit: (...args) => mockAuditEmit(...args),
 }))

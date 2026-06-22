@@ -1,5 +1,6 @@
 import fp from 'fastify-plugin'
 import { Server } from 'socket.io'
+import { createAdapter } from '@socket.io/redis-adapter'
 import { env } from '../config/env.js'
 import { logger } from '../config/logger.js'
 import jwt from 'jsonwebtoken'
@@ -76,6 +77,19 @@ async function socketioPlugin(fastify) {
     pingInterval: 25000,
     transports: ['websocket', 'polling'],
   })
+
+  // The bakaloo-worker process (auto-assignment, notifications) runs
+  // as a separate Node process with no HTTP server of its own, so it
+  // has no real Socket.IO server instance to broadcast from. Without
+  // this adapter, events the worker tries to emit (order:assigned,
+  // auto_assignment_failed, theme/section updates) are silent no-ops
+  // — `getSocketIo()` in that process always returns null. The
+  // adapter lets this server receive broadcasts published over Redis
+  // by the worker's redis-emitter (see plugins/socket-emitter.js) and
+  // deliver them to the real connected clients.
+  const pubClient = redis.duplicate()
+  const subClient = redis.duplicate()
+  io.adapter(createAdapter(pubClient, subClient))
 
   // ─── AUTH MIDDLEWARE ──────────────────────────────────
   io.use((socket, next) => {
@@ -417,6 +431,8 @@ async function socketioPlugin(fastify) {
   fastify.addHook('onClose', () => {
     clearInterval(riderLocationInterval)
     io.close()
+    pubClient.quit().catch(() => {})
+    subClient.quit().catch(() => {})
   })
 
   logger.info('Socket.IO initialized')

@@ -4,7 +4,7 @@ import { logger } from '../config/logger.js'
 import { getClient, query } from '../config/database.js'
 import { redis } from '../config/redis.js'
 import { orderQueue } from '../config/bullmq.js'
-import { getSocketIo } from '../plugins/socketio.plugin.js'
+import { getSocketEmitter } from '../plugins/socket-emitter.js'
 import { cacheDeletePattern } from '../utils/cache.js'
 import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/theme-cache.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
@@ -211,7 +211,7 @@ async function handleScheduledActivation({ themeId }) {
     await cacheDeletePattern('bakaloo:tab_home:*')
     await cacheDeletePattern('bakaloo:admin_theme_tabs:*')
 
-    const io = getSocketIo()
+    const io = getSocketEmitter()
     if (io) {
       io.to('themes:live').emit('theme:update', {
         tabKey: theme.tab_key,
@@ -326,7 +326,7 @@ async function handleApplySectionLayout({ versionId, tabId }) {
     await cacheDeletePattern('bakaloo:tab_manifest:*')
     await cacheDeletePattern('bakaloo:tab_home:*')
 
-    const io = getSocketIo()
+    const io = getSocketEmitter()
     if (io) {
       io.to('themes:live').emit('section:update', {
         tab_key: version.tab_key,
@@ -500,7 +500,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
       `UPDATE orders SET auto_assignment_status = 'MANUAL_REQUIRED', updated_at = NOW() WHERE id = $1`,
       [orderId]
     )
-    const io = getSocketIo()
+    const io = getSocketEmitter()
     if (io) {
       io.to('hq:global').emit('order.auto_assignment_failed', {
         orderId,
@@ -765,7 +765,7 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
     }
   }
 
-  const io = getSocketIo()
+  const io = getSocketEmitter()
 
   for (const assignment of assignments) {
     const payload = buildAssignedPayload({

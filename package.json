@@ -34,6 +34,8 @@
     "@fastify/static": "^7.0.4",
     "@fastify/swagger": "^8.14.0",
     "@fastify/swagger-ui": "^4.0.0",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "@socket.io/redis-emitter": "^5.1.0",
     "axios": "^1.7.3",
     "bcrypt": "^5.1.1",
     "bullmq": "^5.70.0",
