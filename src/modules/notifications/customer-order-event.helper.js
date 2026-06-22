@@ -14,9 +14,14 @@ export function buildCustomerOrderEventNotification({
   orderNumber,
   timelineType,
   status,
+  otp,
 }) {
   const normalizedTimelineType = normalizeTimelineType(timelineType)
   const normalizedStatus = `${status || ''}`.trim().toUpperCase()
+  const cleanOtp = `${otp || ''}`.trim()
+  const otpSuffix = cleanOtp
+    ? ` Your delivery OTP is ${cleanOtp} — share it with your delivery partner when they arrive.`
+    : ''
 
   const messageMap = {
     ORDER_PLACED: {
@@ -29,7 +34,11 @@ export function buildCustomerOrderEventNotification({
     },
     PICKED_UP: {
       title: '📦 Your order is on the way',
-      body: `Order ${orderNumber} has been picked up and is now heading to you.`,
+      body: `Order ${orderNumber} has been picked up and is now heading to you.${otpSuffix}`,
+    },
+    OTP_RESENT: {
+      title: '🔑 Your delivery OTP',
+      body: `Your delivery OTP for order ${orderNumber} is ${cleanOtp}. Share it with your delivery partner to confirm delivery.`,
     },
     DELIVERED: {
       title: '✅ Delivered successfully',
@@ -54,6 +63,7 @@ export function buildCustomerOrderEventNotification({
       orderNumber,
       timelineType: normalizedTimelineType,
       status: normalizedStatus,
+      ...(cleanOtp ? { deliveryOtp: cleanOtp } : {}),
     },
   }
 }

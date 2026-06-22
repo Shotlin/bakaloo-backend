@@ -3,7 +3,6 @@ import { redis } from '../../config/redis.js'
 import { logger } from '../../config/logger.js'
 
 const RIDER_LOCATION_PREFIX = 'rider:location:'
-const DELIVERY_OTP_PREFIX = 'delivery:otp:'
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED']
 const OPEN_ASSIGNMENT_STATUSES = ['ASSIGNED', 'ACCEPTED', 'PICKED_UP', 'IN_TRANSIT']
 
@@ -384,7 +383,8 @@ export class DeliveryRepository {
 
       let { rows: [assignment] } = await client.query(
         `UPDATE delivery_assignments
-         SET status = 'DELIVERED', delivered_at = NOW(), proof_photo_url = $2, updated_at = NOW()
+         SET status = 'DELIVERED', delivered_at = NOW(), proof_photo_url = $2,
+             delivery_otp = NULL, updated_at = NOW()
          WHERE id = $1 AND status = 'IN_TRANSIT'
          RETURNING *`,
         [assignmentId, proofPhotoUrl || null]
@@ -575,14 +575,22 @@ export class DeliveryRepository {
   // ─── DELIVERY OTP ───────────────────────────────────
 
   async storeDeliveryOtp(orderId, otp) {
-    await redis.setex(`${DELIVERY_OTP_PREFIX}${orderId}`, 600, otp)
+    await query(
+      `UPDATE delivery_assignments
+       SET delivery_otp = $2, updated_at = NOW()
+       WHERE order_id = $1 AND status IN ('ACCEPTED', 'IN_TRANSIT')`,
+      [orderId, otp]
+    )
   }
 
   async verifyDeliveryOtp(orderId, otp) {
-    const stored = await redis.get(`${DELIVERY_OTP_PREFIX}${orderId}`)
-    if (!stored || stored !== otp) return false
-    await redis.del(`${DELIVERY_OTP_PREFIX}${orderId}`)
-    return true
+    const { rows } = await query(
+      `SELECT delivery_otp FROM delivery_assignments
+       WHERE order_id = $1 AND status IN ('ACCEPTED', 'IN_TRANSIT')`,
+      [orderId]
+    )
+    const stored = rows[0]?.delivery_otp
+    return Boolean(stored) && stored === otp
   }
 
   // ─── STATS ──────────────────────────────────────────

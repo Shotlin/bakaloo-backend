@@ -394,10 +394,51 @@ export class DeliveryService {
         orderNumber: assignment.order_number,
         timelineType: 'PICKED_UP',
         status: 'OUT_FOR_DELIVERY',
+        otp: assignment.delivery_otp,
       })
     )
 
     return result
+  }
+
+  /**
+   * Regenerates the delivery OTP and re-notifies the customer with the
+   * new code. Used when the rider is in front of the customer but the
+   * original OTP was lost, mistyped too many times, or the customer
+   * didn't see the earlier notification.
+   */
+  async resendOtp(riderId, orderId) {
+    const assignment = await this.repository.getAssignmentByOrderAndRider(orderId, riderId)
+    if (!assignment || !['ACCEPTED', 'IN_TRANSIT'].includes(assignment.status)) {
+      throw {
+        statusCode: 409,
+        message: 'Order must be accepted before resending the OTP',
+        code: 'ORDER_NOT_ACTIVE',
+      }
+    }
+
+    const otp = crypto.randomInt(1000, 9999).toString()
+    await this.repository.storeDeliveryOtp(orderId, otp)
+
+    this._logDeliveryAction('otp:resend', {
+      orderId,
+      riderId,
+      assignmentId: this._resolveAssignmentId(assignment),
+      assignmentStatus: assignment.status,
+    })
+
+    await this._queueNotification(
+      assignment.customer_id,
+      buildCustomerOrderEventNotification({
+        orderId,
+        orderNumber: assignment.order_number,
+        timelineType: 'OTP_RESENT',
+        status: assignment.order_status,
+        otp,
+      })
+    )
+
+    return { deliveryOtp: otp }
   }
 
   async markDelivered(riderId, orderId, otp, proofPhotoUrl, demoMode = false) {

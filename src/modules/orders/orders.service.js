@@ -807,20 +807,37 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation] = await Promise.all([
+    const [statusHistory, riderLocation, deliveryOtp] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
         : Promise.resolve(null),
+      order.riderId ? this._getActiveDeliveryOtp(order.id) : Promise.resolve(null),
     ])
 
     const [enriched] = await this._attachItemThumbnails([order])
 
     return {
       ...enriched,
+      deliveryOtp,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
     }
+  }
+
+  /**
+   * Delivery OTP for the order's current rider assignment, or null once
+   * there's no active (ACCEPTED/IN_TRANSIT) assignment — e.g. before a
+   * rider has accepted, or after the order is delivered/cancelled.
+   */
+  async _getActiveDeliveryOtp(orderId) {
+    const { rows } = await query(
+      `SELECT delivery_otp FROM delivery_assignments
+       WHERE order_id = $1 AND status IN ('ACCEPTED', 'IN_TRANSIT')
+       ORDER BY assigned_at DESC LIMIT 1`,
+      [orderId]
+    )
+    return rows[0]?.delivery_otp || null
   }
 
   /**

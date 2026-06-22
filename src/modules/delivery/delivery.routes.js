@@ -4,6 +4,7 @@ import { DeliveryRepository } from './delivery.repository.js'
 import {
   getAssignedOrdersSchema,
   acceptOrderSchema,
+  resendOtpSchema,
   rejectOrderSchema,
   markPickedUpSchema,
   markDeliveredSchema,
@@ -71,6 +72,11 @@ export default async function deliveryRoutes(fastify) {
   fastify.patch('/orders/:id/reject', {
     schema: rejectOrderSchema,
   }, controller.rejectOrder.bind(controller))
+
+  // PATCH /orders/:id/resend-otp — Regenerate and re-notify delivery OTP
+  fastify.patch('/orders/:id/resend-otp', {
+    schema: resendOtpSchema,
+  }, controller.resendOtp.bind(controller))
 
   // PATCH /orders/:id/pickup — Mark picked up
   fastify.patch('/orders/:id/pickup', {

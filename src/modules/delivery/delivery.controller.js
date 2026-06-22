@@ -114,6 +114,15 @@ export class DeliveryController {
   }
 
   /**
+   * PATCH /orders/:id/resend-otp — Regenerate and re-notify the delivery OTP
+   */
+  async resendOtp(request, reply) {
+    const { id } = request.params
+    const result = await this.service.resendOtp(request.user.id, id)
+    return reply.code(200).send(success(result, 'OTP resent to customer'))
+  }
+
+  /**
    * PATCH /orders/:id/pickup — Mark order as picked up
    */
   async markPickedUp(request, reply) {

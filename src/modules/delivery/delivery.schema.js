@@ -31,6 +31,18 @@ export const acceptOrderSchema = {
   },
 }
 
+export const resendOtpSchema = {
+  tags: ['Delivery'],
+  summary: 'Regenerate and re-notify the delivery OTP',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
 export const rejectOrderSchema = {
   tags: ['Delivery'],
   summary: 'Reject delivery assignment',
