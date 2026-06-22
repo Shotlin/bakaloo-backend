@@ -296,6 +296,59 @@ export class DeliveryRepository {
     }
   }
 
+  /**
+   * Cancels a delivery the rider has already accepted/picked up —
+   * e.g. the customer refuses the order or can't be reached at the
+   * drop location. Unlike [rejectOrder] (pre-accept only, requeues
+   * for another rider), this is terminal: the order itself is
+   * cancelled, not handed to a different rider.
+   */
+  async cancelDelivery(assignmentId, orderId, riderId, reason) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows: [order] } = await client.query(
+        `SELECT status FROM orders WHERE id = $1 FOR UPDATE`,
+        [orderId]
+      )
+
+      const { rows: [assignment] } = await client.query(
+        `UPDATE delivery_assignments
+         SET status = 'CANCELLED', cancel_reason = $2, cancelled_at = NOW(),
+             delivery_otp = NULL, updated_at = NOW()
+         WHERE id = $1 AND status IN ('ACCEPTED', 'IN_TRANSIT')
+         RETURNING *`,
+        [assignmentId, reason]
+      )
+      if (!assignment) {
+        await client.query('ROLLBACK')
+        return null
+      }
+
+      await client.query(
+        `UPDATE orders
+         SET status = 'CANCELLED', cancelled_reason = $2, updated_at = NOW()
+         WHERE id = $1`,
+        [orderId, reason]
+      )
+
+      await client.query(
+        `INSERT INTO order_status_history (order_id, from_status, to_status, changed_by, note)
+         VALUES ($1, $2, 'CANCELLED', $3, $4)`,
+        [orderId, order?.status || assignment.status, riderId, `Delivery cancelled by rider: ${reason}`]
+      )
+
+      await client.query('COMMIT')
+      return assignment
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
   async markPickedUp(assignmentId, orderId) {
     const client = await getClient()
     try {

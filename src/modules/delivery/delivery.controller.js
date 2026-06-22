@@ -123,6 +123,17 @@ export class DeliveryController {
   }
 
   /**
+   * PATCH /orders/:id/cancel — Cancel an accepted/in-transit delivery
+   * (customer refused or unreachable at the drop location)
+   */
+  async cancelDelivery(request, reply) {
+    const { id } = request.params
+    const { reason } = request.body || {}
+    const result = await this.service.cancelDelivery(request.user.id, id, reason)
+    return reply.code(200).send(success(result, 'Delivery cancelled'))
+  }
+
+  /**
    * PATCH /orders/:id/pickup — Mark order as picked up
    */
   async markPickedUp(request, reply) {

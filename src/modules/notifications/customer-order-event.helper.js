@@ -44,6 +44,10 @@ export function buildCustomerOrderEventNotification({
       title: '✅ Delivered successfully',
       body: `Order ${orderNumber} has been delivered. Enjoy your purchase.`,
     },
+    CANCELLED: {
+      title: '❌ Order cancelled',
+      body: `Order ${orderNumber} was cancelled because the delivery could not be completed.`,
+    },
   }
 
   const fallback = {

@@ -318,6 +318,70 @@ export class DeliveryService {
     return result.assignment
   }
 
+  /**
+   * Cancels a delivery the rider has already accepted/picked up —
+   * the customer refuses the order at the door, doesn't answer calls,
+   * or can't be reached. Terminal: the order is cancelled outright,
+   * not requeued for another rider (unlike the pre-accept [rejectOrder]).
+   */
+  async cancelDelivery(riderId, orderId, reason) {
+    const cancelReason = `${reason || 'OTHER'}`.trim() || 'OTHER'
+    const assignment = await this.repository.getAssignmentByOrderAndRider(orderId, riderId)
+    if (!assignment || !['ACCEPTED', 'IN_TRANSIT'].includes(assignment.status)) {
+      throw {
+        statusCode: 409,
+        message: 'Order is no longer active',
+        code: 'ORDER_NOT_AVAILABLE',
+      }
+    }
+
+    const assignmentId = this._resolveAssignmentId(assignment)
+    this._logDeliveryAction('cancel:lookup', {
+      orderId,
+      riderId,
+      assignmentId,
+      assignmentStatus: assignment.status,
+      reason: cancelReason,
+    })
+
+    const result = await this.repository.cancelDelivery(assignmentId, orderId, riderId, cancelReason)
+    if (!result) {
+      throw {
+        statusCode: 409,
+        message: 'Order is no longer active',
+        code: 'ORDER_NOT_AVAILABLE',
+      }
+    }
+
+    this._emitOrderUpdate(orderId, {
+      status: 'CANCELLED',
+      orderStatus: 'CANCELLED',
+      timelineType: 'CANCELLED',
+      riderId,
+      message: 'Your delivery was cancelled by the rider',
+    }, [assignment.customer_id, riderId])
+
+    await this._queueNotification(
+      assignment.customer_id,
+      buildCustomerOrderEventNotification({
+        orderId,
+        orderNumber: assignment.order_number,
+        timelineType: 'CANCELLED',
+        status: 'CANCELLED',
+      })
+    )
+
+    this._logDeliveryAction('cancel:success', {
+      orderId,
+      riderId,
+      assignmentId,
+      assignmentStatus: 'CANCELLED',
+      reason: cancelReason,
+    })
+
+    return result
+  }
+
   async markPickedUp(riderId, orderId) {
     const assignment = await this.repository.getAssignmentByOrderAndRider(orderId, riderId)
     if (!assignment) {

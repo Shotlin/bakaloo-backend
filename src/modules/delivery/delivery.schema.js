@@ -65,6 +65,28 @@ export const rejectOrderSchema = {
   },
 }
 
+export const cancelDeliverySchema = {
+  tags: ['Delivery'],
+  summary: 'Cancel an accepted/in-transit delivery',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+  body: {
+    type: 'object',
+    required: ['reason'],
+    properties: {
+      reason: {
+        type: 'string',
+        enum: ['CUSTOMER_REFUSED', 'CUSTOMER_UNREACHABLE', 'CUSTOMER_NOT_HOME', 'OTHER'],
+      },
+    },
+  },
+}
+
 export const markPickedUpSchema = {
   tags: ['Delivery'],
   summary: 'Mark order as picked up from store',
