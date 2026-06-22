@@ -60,6 +60,31 @@ const trackingSchema = {
   },
 }
 
+// Snapshot of the address selected at checkout (orders.delivery_address).
+// Mirrors addresses.schema.js's addressProperties — Fastify's AJV
+// serializer (removeAdditional: 'all') strips any nested key not
+// declared here, so this must list every field the snapshot can carry.
+const deliveryAddressSchema = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    label: { type: 'string' },
+    name: { type: ['string', 'null'] },
+    phone: { type: ['string', 'null'] },
+    addressLine1: { type: 'string' },
+    addressLine2: { type: ['string', 'null'] },
+    landmark: { type: ['string', 'null'] },
+    city: { type: 'string' },
+    state: { type: ['string', 'null'] },
+    pincode: { type: 'string' },
+    lat: { type: ['number', 'null'] },
+    lng: { type: ['number', 'null'] },
+    isDefault: { type: 'boolean' },
+    createdAt: { type: 'string' },
+    updatedAt: { type: 'string' },
+  },
+}
+
 const orderResponseSchema = {
   type: 'object',
   properties: {
@@ -77,7 +102,7 @@ const orderResponseSchema = {
     paymentMethod: { type: 'string' },
     paymentStatus: { type: 'string' },
     couponCode: { type: ['string', 'null'] },
-    deliveryAddress: { type: 'object' },
+    deliveryAddress: deliveryAddressSchema,
     deliveryNotes: { type: ['string', 'null'] },
     handlingFee: { type: 'number' },
     lateNightFee: { type: 'number' },
@@ -90,6 +115,7 @@ const orderResponseSchema = {
     riderId: { type: ['string', 'null'] },
     riderName: { type: ['string', 'null'] },
     riderPhone: { type: ['string', 'null'] },
+    deliveryOtp: { type: ['string', 'null'] },
     // Delivery slot fields
     deliveryMode: { type: 'string', enum: ['ASAP', 'SCHEDULED'] },
     scheduledDeliveryAt: { type: ['string', 'null'] },
