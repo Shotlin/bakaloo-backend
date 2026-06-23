@@ -64,7 +64,9 @@ export class CategoriesController {
   async delete(request, reply) {
     const result = await this.service.delete(request.params.id)
     if (!result.success) {
-      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+      const notFound = result.message === 'Category not found'
+      return reply.code(notFound ? 404 : 400)
+        .send(error(result.message, notFound ? 'NOT_FOUND' : 'HAS_CHILDREN'))
     }
     return reply.code(200).send(success(null, 'Category deleted'))
   }

@@ -105,7 +105,7 @@ export class ProductsRepository {
     groupOptions = false,
   }) {
     const offset = (page - 1) * limit
-    const conditions = []
+    const conditions = ['p.deleted_at IS NULL']
     const params = []
     let paramIdx = 1
 
@@ -1083,7 +1083,7 @@ export class ProductsRepository {
    */
   async delete(id) {
     await query(
-      `UPDATE products SET is_active = false, updated_at = NOW() WHERE id = $1`,
+      `UPDATE products SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1`,
       [id]
     )
   }

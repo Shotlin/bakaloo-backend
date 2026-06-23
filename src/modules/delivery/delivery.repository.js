@@ -49,8 +49,8 @@ export class DeliveryRepository {
 
   async getDocuments(riderId) {
     const { rows } = await query(
-      `SELECT id, doc_type, doc_url, verified, verified_at, uploaded_at 
-       FROM rider_documents 
+      `SELECT id, doc_type, doc_url, verified, verified_at, uploaded_at, rejection_reason
+       FROM rider_documents
        WHERE rider_id = $1
        ORDER BY uploaded_at DESC`,
       [riderId]

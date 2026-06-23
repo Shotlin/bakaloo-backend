@@ -148,6 +148,11 @@ export class CategoriesService {
       return { success: false, message: 'A category with this name already exists' }
     }
 
+    if (data.parent_id) {
+      const depthError = await this._checkParentDepth(data.parent_id)
+      if (depthError) return depthError
+    }
+
     const category = await this.repo.create({ ...data, slug })
 
     // Invalidate cache
@@ -173,6 +178,25 @@ export class CategoriesService {
       }
     }
 
+    if (data.parent_id && data.parent_id !== existing.parent_id) {
+      if (data.parent_id === id) {
+        return { success: false, message: 'A category cannot be its own parent' }
+      }
+      const depthError = await this._checkParentDepth(data.parent_id)
+      if (depthError) return depthError
+      // The category being edited may itself have children (it's a
+      // top-level category) — re-parenting it under another category
+      // would make it a subcategory while still having its own
+      // children, producing the same 3-level nesting we're preventing.
+      const children = await this.repo.findChildren(id)
+      if (children.length > 0) {
+        return {
+          success: false,
+          message: 'This category has its own subcategories — move or delete them first',
+        }
+      }
+    }
+
     const category = await this.repo.update(id, data)
 
     await cacheDeletePattern('categories:*')
@@ -182,11 +206,36 @@ export class CategoriesService {
   }
 
   /**
+   * Categories are limited to two levels: a top-level category and its
+   * direct subcategories. Returns an error object if `parentId` is
+   * itself a subcategory (i.e. already has a parent), otherwise null.
+   */
+  async _checkParentDepth(parentId) {
+    const parent = await this.repo.findById(parentId)
+    if (!parent) return { success: false, message: 'Parent category not found' }
+    if (parent.parent_id) {
+      return {
+        success: false,
+        message: 'Subcategories cannot have their own subcategories — choose a top-level category as the parent',
+      }
+    }
+    return null
+  }
+
+  /**
    * Delete (deactivate) a category [ADMIN]
    */
   async delete(id) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Category not found' }
+
+    const children = await this.repo.findChildren(id)
+    if (children.length > 0) {
+      return {
+        success: false,
+        message: 'Delete or move this category\'s subcategories first',
+      }
+    }
 
     await this.repo.delete(id)
 

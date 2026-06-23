@@ -108,7 +108,8 @@ export class AdminProductsRepository {
     const { rows: [p] } = await query('SELECT * FROM products WHERE id = $1', [productId])
     if (!p) return null
 
-    const newSlug = p.slug + '-copy-' + Date.now().toString(36)
+    const suffix = Date.now().toString(36)
+    const newSlug = p.slug + '-copy-' + suffix
     const { rows: [newProduct] } = await query(
       `INSERT INTO products (name, slug, description, price, sale_price, cost_price, category_id,
          stock_quantity, unit, thumbnail_url, images, tags, is_active, is_featured, sku, low_stock_threshold)
@@ -117,7 +118,7 @@ export class AdminProductsRepository {
       [
         p.name + ' (Copy)', newSlug, p.description, p.price, p.sale_price, p.cost_price,
         p.category_id, 0, p.unit, p.thumbnail_url, JSON.stringify(p.images || []),
-        p.tags, p.sku ? p.sku + '-COPY' : null, p.low_stock_threshold,
+        p.tags, p.sku ? p.sku + '-COPY-' + suffix : null, p.low_stock_threshold,
       ]
     )
     return newProduct

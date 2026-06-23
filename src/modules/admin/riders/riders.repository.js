@@ -180,9 +180,11 @@ export class AdminRidersRepository {
   async verifyDocument(documentId, status, note, adminId) {
     const isApproved = status === 'APPROVED'
     const { rows: [doc] } = await query(
-      `UPDATE rider_documents SET verified = $1, verified_by = $2, verified_at = NOW()
-       WHERE id = $3 RETURNING *`,
-      [isApproved, adminId, documentId]
+      `UPDATE rider_documents
+       SET verified = $1, verified_by = $2, verified_at = NOW(),
+           rejection_reason = $3
+       WHERE id = $4 RETURNING *`,
+      [isApproved, adminId, isApproved ? null : (note || null), documentId]
     )
     return doc
   }

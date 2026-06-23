@@ -12,6 +12,7 @@ export class CategoriesRepository {
       `SELECT c.id, c.name, c.slug, c.description, c.image_url, c.parent_id, c.sort_order, c.is_active, c.created_at,
               (SELECT COUNT(*)::int FROM products p WHERE p.category_id = c.id AND p.is_active = true) AS product_count
        FROM categories c
+       WHERE c.deleted_at IS NULL
        ORDER BY c.sort_order ASC, c.name ASC`
     )
     return rows
@@ -27,6 +28,18 @@ export class CategoriesRepository {
       [id]
     )
     return rows[0] || null
+  }
+
+  /**
+   * Find direct children of a category (used to block re-parenting a
+   * category that already has its own subcategories).
+   */
+  async findChildren(parentId) {
+    const { rows } = await query(
+      `SELECT id FROM categories WHERE parent_id = $1 AND deleted_at IS NULL`,
+      [parentId]
+    )
+    return rows
   }
 
   /**
@@ -87,7 +100,7 @@ export class CategoriesRepository {
    */
   async delete(id) {
     await query(
-      `UPDATE categories SET is_active = false, updated_at = NOW() WHERE id = $1`,
+      `UPDATE categories SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1`,
       [id]
     )
   }
