@@ -65,7 +65,7 @@ export const duplicateSchema = {
   params: {
     type: 'object',
     required: ['id'],
-    properties: { id: { type: 'integer' } },
+    properties: { id: { type: 'string', format: 'uuid' } },
   },
 }
 
