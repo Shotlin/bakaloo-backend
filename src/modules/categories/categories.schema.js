@@ -24,6 +24,7 @@ export const listCategoriesSchema = {
               parent_id: { type: ['string', 'null'] },
               sort_order: { type: 'integer' },
               is_active: { type: 'boolean' },
+              category_type: { type: 'string', enum: ['STANDARD', 'BUNDLE'] },
               product_count: { type: 'integer' },
               created_at: { type: 'string' },
             },
@@ -60,7 +61,10 @@ export const getCategoryProductsSchema = {
     type: 'object',
     properties: {
       page: { type: 'integer', minimum: 1, default: 1 },
-      limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
+      // Max raised from 50 to 200 (2026-07-03) so the admin dashboard's
+      // product-ranking panel can load a whole category in one page —
+      // customer-facing defaults (default: 20) are unaffected.
+      limit: { type: 'integer', minimum: 1, maximum: 200, default: 20 },
       sort: { type: 'string', enum: ['price_asc', 'price_desc', 'newest', 'popular'] },
       inStock: { type: 'boolean' },
       groupOptions: { type: 'boolean', default: false },
@@ -82,6 +86,7 @@ export const createCategorySchema = {
       parent_id: { oneOf: [{ type: 'string', format: 'uuid' }, { type: 'null' }] },
       sort_order: { type: 'integer', minimum: 0, default: 0 },
       is_active: { type: 'boolean' },
+      category_type: { type: 'string', enum: ['STANDARD', 'BUNDLE'], default: 'STANDARD' },
     },
   },
 }
@@ -106,6 +111,7 @@ export const updateCategorySchema = {
       parent_id: { oneOf: [{ type: 'string', format: 'uuid' }, { type: 'null' }] },
       sort_order: { type: 'integer', minimum: 0 },
       is_active: { type: 'boolean' },
+      category_type: { type: 'string', enum: ['STANDARD', 'BUNDLE'] },
     },
   },
 }
@@ -119,6 +125,78 @@ export const deleteCategorySchema = {
     required: ['id'],
     properties: {
       id: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
+export const listBundlesSchema = {
+  tags: ['Categories'],
+  summary: 'List all bundle (promo-only) categories [ADMIN]',
+  security: [{ bearerAuth: [] }],
+  querystring: {
+    type: 'object',
+    properties: {
+      // When given, each bundle in the response also carries `is_member`
+      // for this product — powers the product edit form's bundle toggle.
+      productId: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
+export const toggleBundleMembershipSchema = {
+  tags: ['Categories'],
+  summary: 'Add/remove a single product from a bundle [ADMIN]',
+  security: [{ bearerAuth: [] }],
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+  body: {
+    type: 'object',
+    required: ['productId', 'isMember'],
+    properties: {
+      productId: { type: 'string', format: 'uuid' },
+      isMember: { type: 'boolean' },
+    },
+  },
+}
+
+export const getCategoryProductRanksSchema = {
+  tags: ['Categories'],
+  summary: 'Get a category\'s current product ranking [ADMIN]',
+  security: [{ bearerAuth: [] }],
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
+export const setCategoryProductsSchema = {
+  tags: ['Categories'],
+  summary: 'Replace a category\'s product membership/order (bundle members, or a standard category\'s explicit ranking) [ADMIN]',
+  security: [{ bearerAuth: [] }],
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+  body: {
+    type: 'object',
+    required: ['productIds'],
+    properties: {
+      productIds: {
+        type: 'array',
+        items: { type: 'string', format: 'uuid' },
+        maxItems: 200,
+      },
     },
   },
 }

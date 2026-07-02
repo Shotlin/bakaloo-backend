@@ -8,6 +8,10 @@ import {
   createCategorySchema,
   updateCategorySchema,
   deleteCategorySchema,
+  listBundlesSchema,
+  getCategoryProductRanksSchema,
+  setCategoryProductsSchema,
+  toggleBundleMembershipSchema,
 } from './categories.schema.js'
 
 /**
@@ -45,6 +49,12 @@ export default async function categoriesRoutes(fastify) {
     schema: listCategoriesSchema,
   }, controller.list.bind(controller))
 
+  // GET /bundles — All bundle (promo-only) categories [ADMIN]
+  fastify.get('/bundles', {
+    schema: listBundlesSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.listBundles.bind(controller))
+
   // GET /:id — Single category
   fastify.get('/:id', {
     schema: getCategorySchema,
@@ -73,4 +83,22 @@ export default async function categoriesRoutes(fastify) {
     schema: deleteCategorySchema,
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.delete.bind(controller))
+
+  // GET /:id/products/ranks — Current product ranking for a category [ADMIN]
+  fastify.get('/:id/products/ranks', {
+    schema: getCategoryProductRanksSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.getProductRanks.bind(controller))
+
+  // PUT /:id/products — Replace bundle members / standard-category ranking [ADMIN]
+  fastify.put('/:id/products', {
+    schema: setCategoryProductsSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.setProducts.bind(controller))
+
+  // PUT /:id/membership — Add/remove one product from a bundle [ADMIN]
+  fastify.put('/:id/membership', {
+    schema: toggleBundleMembershipSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.toggleBundleMembership.bind(controller))
 }

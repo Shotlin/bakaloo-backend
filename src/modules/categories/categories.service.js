@@ -124,6 +124,7 @@ export class CategoriesService {
       inStock: filters.inStock,
       groupOptions: filters.groupOptions === true || filters.groupOptions === 'true',
       allocatedShopIds,
+      categoryType: category.category_type,
     })
 
     return {
@@ -243,6 +244,89 @@ export class CategoriesService {
     logger.info({ categoryId: id }, 'Category deleted')
 
     return { success: true }
+  }
+
+  /**
+   * List all BUNDLE-type categories [ADMIN] — powers the dashboard's
+   * "Bundles" tab, and (with productId) the product edit form's "also show
+   * in bundles" multi-select.
+   */
+  async listBundles(productId = null) {
+    return this._normalizeCategories(await this.repo.findBundles(productId))
+  }
+
+  /**
+   * Add/remove a single product from a bundle [ADMIN] — used by the
+   * product edit form's "also show in bundles" toggle.
+   */
+  async toggleBundleMembership(categoryId, productId, isMember) {
+    const category = await this.repo.findById(categoryId)
+    if (!category) return { success: false, message: 'Bundle not found' }
+    if (category.category_type !== 'BUNDLE') {
+      return { success: false, message: 'Not a bundle category' }
+    }
+
+    const [product] = await this.repo.findProductsByIds([productId])
+    if (!product || !product.is_active) {
+      return { success: false, message: 'Product not found' }
+    }
+
+    await this.repo.toggleBundleMembership(categoryId, productId, isMember)
+    await cacheDeletePattern('categories:*')
+
+    return { success: true }
+  }
+
+  /**
+   * Get a category's current product ranking [ADMIN] — powers the
+   * dashboard's product-ranking panel before the admin drags to reorder.
+   */
+  async getCategoryProductRanks(categoryId) {
+    const category = await this.repo.findById(categoryId)
+    if (!category) return { success: false, message: 'Category not found' }
+    const ranks = await this.repo.getCategoryProductRanks(categoryId)
+    return { success: true, products: this._normalizeProducts(ranks) }
+  }
+
+  /**
+   * Set a category's product membership/order [ADMIN].
+   *
+   * Sending the full ordered id list both defines a bundle's member
+   * products and "replaces"/"shuffles" a standard category's ranking in
+   * one call — the array index becomes each product's rank.
+   *
+   * For a BUNDLE category any active product may be added (that's the
+   * entire point — group products that live in different real
+   * categories). For a STANDARD category, ranking only ever applies to
+   * products that already belong there via category_id — anything else in
+   * the list is silently dropped rather than erroring, so a stale id in an
+   * in-flight admin edit can't 500 the whole reorder.
+   */
+  async setCategoryProducts(categoryId, productIds) {
+    const category = await this.repo.findById(categoryId)
+    if (!category) return { success: false, message: 'Category not found' }
+
+    const ids = Array.isArray(productIds) ? [...new Set(productIds)] : []
+    const found = await this.repo.findProductsByIds(ids)
+    const foundById = new Map(found.map((p) => [p.id, p]))
+
+    const isBundle = category.category_type === 'BUNDLE'
+    const validIds = ids.filter((id) => {
+      const product = foundById.get(id)
+      if (!product || !product.is_active) return false
+      if (!isBundle && product.category_id !== categoryId) return false
+      return true
+    })
+
+    const ranks = await this.repo.setCategoryProducts(categoryId, validIds)
+
+    await cacheDeletePattern('categories:*')
+    logger.info(
+      { categoryId, categoryType: category.category_type, productCount: validIds.length },
+      'Category product ranking updated'
+    )
+
+    return { success: true, products: this._normalizeProducts(ranks) }
   }
 
   _normalizeCategories(categories = []) {

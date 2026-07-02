@@ -70,4 +70,38 @@ export class CategoriesController {
     }
     return reply.code(200).send(success(null, 'Category deleted'))
   }
+
+  /** GET /bundles [ADMIN] */
+  async listBundles(request, reply) {
+    const bundles = await this.service.listBundles(request.query?.productId || null)
+    return reply.code(200).send(success(bundles, 'Bundles fetched'))
+  }
+
+  /** PUT /:id/membership [ADMIN] */
+  async toggleBundleMembership(request, reply) {
+    const { productId, isMember } = request.body
+    const result = await this.service.toggleBundleMembership(request.params.id, productId, isMember)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(null, 'Bundle membership updated'))
+  }
+
+  /** GET /:id/products/ranks [ADMIN] */
+  async getProductRanks(request, reply) {
+    const result = await this.service.getCategoryProductRanks(request.params.id)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(result.products, 'Category product ranking fetched'))
+  }
+
+  /** PUT /:id/products [ADMIN] */
+  async setProducts(request, reply) {
+    const result = await this.service.setCategoryProducts(request.params.id, request.body.productIds)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(result.products, 'Category products updated'))
+  }
 }
