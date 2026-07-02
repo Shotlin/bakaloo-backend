@@ -193,6 +193,22 @@ export const reportPrecomputeQueue = new Queue('report-precompute', {
   },
 })
 
+/**
+ * Address purge queue — daily cron that hard-deletes soft-deleted
+ * addresses once their retention window (ADDRESS_RETENTION_DAYS) has
+ * elapsed. Single low-volume job/day, so no special retry tuning needed
+ * beyond the queue defaults.
+ */
+export const addressPurgeQueue = new Queue('address-purge', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 24 * 3600 },
+    removeOnFail: { age: 7 * 24 * 3600 },
+  },
+})
+
 // ─── WORKERS ─────────────────────────────────────────────
 
 const workers = []
@@ -499,6 +515,35 @@ export function startReportPrecomputeWorker(processor) {
 }
 
 /**
+ * Start address-purge worker — runs the daily job that hard-deletes
+ * soft-deleted addresses past their retention window.
+ */
+export function startAddressPurgeWorker(processor) {
+  const worker = new Worker('address-purge', processor, {
+    connection,
+    concurrency: 1,
+  })
+
+  worker.on('completed', (job) => {
+    logger.info(
+      { jobId: job.id, name: job.name, result: job.returnvalue },
+      'Address-purge job completed'
+    )
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message, action: 'address_purge_job_failed' },
+      'Address-purge job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Address-purge worker started')
+  return worker
+}
+
+/**
  * Close all queues and workers (graceful shutdown)
  */
 export async function closeBullMQ() {
@@ -515,5 +560,6 @@ export async function closeBullMQ() {
   await payoutQueue.close()
   await stockNotificationsQueue.close()
   await reportPrecomputeQueue.close()
+  await addressPurgeQueue.close()
   logger.info('BullMQ queues and workers closed')
 }

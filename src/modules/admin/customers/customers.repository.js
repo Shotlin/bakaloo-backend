@@ -108,9 +108,18 @@ export class AdminCustomersRepository {
     }
   }
 
+  /**
+   * Returns every address a customer has ever saved, active ones first
+   * (default first, then newest), followed by soft-deleted ones (newest
+   * removal first) — admins need to see recently-removed addresses too,
+   * for delivery-dispute/security review during their retention window
+   * (see ADDRESS_RETENTION_DAYS).
+   */
   async getCustomerAddresses(customerId) {
     const { rows } = await query(
-      'SELECT * FROM addresses WHERE user_id = $1 ORDER BY is_default DESC, created_at DESC',
+      `SELECT * FROM addresses
+        WHERE user_id = $1
+        ORDER BY (deleted_at IS NULL) DESC, is_default DESC, COALESCE(deleted_at, created_at) DESC`,
       [customerId]
     )
     return rows

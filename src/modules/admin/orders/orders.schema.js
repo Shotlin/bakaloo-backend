@@ -122,10 +122,12 @@ export const refundOrderSchema = {
   body: {
     type: 'object',
     properties: {
-      amount: { type: 'number', minimum: 0.01 },
+      // No `amount` field — the refund amount is never admin-editable, it's
+      // always exactly what the customer paid (see refundOrder in the
+      // service). Accepting an amount here would let an admin refund more
+      // (or less) than was ever collected.
       reason: { type: 'string', maxLength: 500 },
-      refundTo: { type: 'string', enum: ['wallet', 'original', 'manual'], default: 'wallet' },
-      method: { type: 'string', enum: ['WALLET', 'ORIGINAL'], default: 'WALLET' },
+      refundTo: { type: 'string', enum: ['wallet', 'original', 'none'], default: 'wallet' },
     },
   },
 }

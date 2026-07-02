@@ -6,6 +6,12 @@ import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const MAX_ADDRESSES = 10
 
+// How long a soft-deleted address is kept before the purge cron
+// permanently removes it (security/dispute-review window — see
+// `AddressPurgeWorker`). Shared with the admin customer-addresses view so
+// the "removed, purges in N days" countdown always matches reality.
+export const ADDRESS_RETENTION_DAYS = 40
+
 // ─── Serviceable pincodes — aggregated from active shops ─────────────
 // The old implementation read from app_settings (a global static list),
 // which missed pincodes added to individual shops. This version queries

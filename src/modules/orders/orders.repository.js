@@ -417,13 +417,31 @@ export class OrdersRepository {
   }
 
   /**
-   * Update order status
+   * Update order status (and/or payment-related fields).
+   *
+   * `status` is optional — several callers (e.g. `createPaymentOrder`
+   * recording a Razorpay order's expiry, or a failed-payment webhook) only
+   * need to update payment fields without touching order status, and pass
+   * `status` as `undefined` to mean "leave it alone". Previously this
+   * method always included `status = $1` in the SET clause regardless, and
+   * node-postgres binds an `undefined` parameter as SQL NULL — so every
+   * online-payment checkout silently wiped the order's status to NULL the
+   * moment the Razorpay order was created (before the customer even paid).
+   * A NULL status is invisible to every status filter/tab in the admin
+   * dashboard, AND to the payment-expiry cleanup worker's
+   * `WHERE status = 'PENDING'` guard — so an abandoned online checkout
+   * never got auto-cancelled either, it just sat there forever. Only
+   * write `status` when the caller actually passed one.
    */
   async updateStatus(id, status, extra = {}) {
-    const sets = ['status = $1', 'updated_at = NOW()']
-    const params = [status]
-    let idx = 2
+    const sets = ['updated_at = NOW()']
+    const params = []
+    let idx = 1
 
+    if (status) {
+      sets.push(`status = $${idx++}`)
+      params.push(status)
+    }
     if (extra.cancelledReason) {
       sets.push(`cancelled_reason = $${idx++}`)
       params.push(extra.cancelledReason)
@@ -435,6 +453,10 @@ export class OrdersRepository {
     if (extra.paymentStatus) {
       sets.push(`payment_status = $${idx++}`)
       params.push(extra.paymentStatus)
+    }
+    if (extra.paymentExpiresAt) {
+      sets.push(`payment_expires_at = $${idx++}`)
+      params.push(extra.paymentExpiresAt)
     }
 
     params.push(id)

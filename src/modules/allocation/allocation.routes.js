@@ -161,6 +161,7 @@ export default async function allocationRoutes(fastify) {
            FROM addresses
           WHERE user_id = $1
             AND is_default = true
+            AND deleted_at IS NULL
             AND lat IS NOT NULL
             AND lng IS NOT NULL
             AND pincode IS NOT NULL

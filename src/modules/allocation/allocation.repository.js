@@ -304,6 +304,7 @@ export class AllocationRepository {
          JOIN addresses addr
            ON addr.user_id = u.id
           AND addr.is_default = true
+          AND addr.deleted_at IS NULL
          CROSS JOIN target t
         WHERE (
                 addr.pincode = ANY(t.serviceable_pincodes)

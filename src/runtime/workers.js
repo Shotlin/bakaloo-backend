@@ -3,6 +3,7 @@ import {
   orderQueue,
   settlementQueue,
   payoutQueue,
+  addressPurgeQueue,
   closeBullMQ,
   startNotificationWorker,
   startOrderWorker,
@@ -14,6 +15,7 @@ import {
   startScheduledOrderWorker,
   startStockNotificationsWorker,
   startReportPrecomputeWorker,
+  startAddressPurgeWorker,
 } from '../config/bullmq.js'
 
 export async function startWorkerRuntime() {
@@ -49,6 +51,10 @@ export async function startWorkerRuntime() {
     '../workers/report-precompute.worker.js'
   )
 
+  const { createAddressPurgeProcessor, scheduleAddressPurgeCron } = await import(
+    '../workers/address-purge.worker.js'
+  )
+
   const { startEventLoopMonitor } = await import(
     '../utils/event-loop-monitor.js'
   )
@@ -74,6 +80,9 @@ export async function startWorkerRuntime() {
   // Report-precompute worker (task 13.4) — runs slow report queries
   // (>100ms median) and caches results to Redis under deterministic keys.
   startReportPrecomputeWorker(createReportPrecomputeProcessor())
+  // Address-purge worker — daily job that hard-deletes soft-deleted
+  // addresses once their security/audit retention window has elapsed.
+  startAddressPurgeWorker(createAddressPurgeProcessor())
 
   // Event-loop blocking detector (task 13.6) — logs warning when
   // the event loop is blocked for >100ms.
@@ -94,6 +103,15 @@ export async function startWorkerRuntime() {
     logger.warn(
       { err: err.message },
       'Payout weekly cron registration failed'
+    )
+  }
+
+  try {
+    await scheduleAddressPurgeCron(addressPurgeQueue)
+  } catch (err) {
+    logger.warn(
+      { err: err.message },
+      'Address-purge daily cron registration failed'
     )
   }
 

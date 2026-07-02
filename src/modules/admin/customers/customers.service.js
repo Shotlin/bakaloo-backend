@@ -2,10 +2,12 @@ import { AdminCustomersRepository } from './customers.repository.js'
 import { WalletService } from '../../wallet/wallet.service.js'
 import { WalletRepository } from '../../wallet/wallet.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
+import { ADDRESS_RETENTION_DAYS } from '../../addresses/addresses.service.js'
 import ExcelJS from 'exceljs'
 
 const repo = new AdminCustomersRepository()
 const walletService = new WalletService(new WalletRepository())
+const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 export class AdminCustomersService {
   async list({ page = 1, limit = 20, search, status, sortBy, sortOrder }) {
@@ -23,7 +25,34 @@ export class AdminCustomersService {
   }
 
   async getAddresses(customerId) {
-    return repo.getCustomerAddresses(customerId)
+    const rows = await repo.getCustomerAddresses(customerId)
+    return rows.map((row) => {
+      const deletedAt = row.deleted_at
+      let purgeAt = null
+      let daysUntilPurge = null
+      if (deletedAt) {
+        purgeAt = new Date(new Date(deletedAt).getTime() + ADDRESS_RETENTION_DAYS * MS_PER_DAY)
+        daysUntilPurge = Math.max(0, Math.ceil((purgeAt.getTime() - Date.now()) / MS_PER_DAY))
+      }
+      return {
+        id: row.id,
+        label: row.label,
+        addressLine1: row.address_line1,
+        addressLine2: row.address_line2,
+        landmark: row.landmark,
+        city: row.city,
+        state: row.state,
+        pincode: row.pincode,
+        lat: row.lat != null ? parseFloat(row.lat) : null,
+        lng: row.lng != null ? parseFloat(row.lng) : null,
+        isDefault: row.is_default,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        deletedAt,
+        purgeAt,
+        daysUntilPurge,
+      }
+    })
   }
 
   async getLTV() {

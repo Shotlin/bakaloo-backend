@@ -176,7 +176,17 @@ export class AdminOrdersService {
     return workbook.csv.writeBuffer()
   }
 
-  async refundOrder(orderId, { amount, reason, method }, adminId, ip) {
+  /**
+   * Refund a delivered/cancelled order. The refund amount is never
+   * caller-supplied — it's always exactly what the customer actually paid
+   * (from the `payments` row for online orders, or `total_amount` for a
+   * COD order marked PAID on delivery — see `delivery.repository.js`'s
+   * `payment_status = 'PAID'` write, the single source of truth for
+   * "money actually changed hands" across both payment methods). An order
+   * that was never paid (e.g. a COD order cancelled before delivery) has
+   * nothing to refund and is rejected outright.
+   */
+  async refundOrder(orderId, { reason, refundTo = 'wallet' }, adminId, ip) {
     const order = await this.repository.findById(orderId)
     if (!order) throw { statusCode: 404, message: 'Order not found' }
 
@@ -185,29 +195,61 @@ export class AdminOrdersService {
       throw { statusCode: 400, message: `Cannot refund an order with status ${order.status}` }
     }
 
-    const refundAmount = amount || parseFloat(order.total_amount)
+    if (order.payment_status !== 'PAID') {
+      throw { statusCode: 400, message: 'This order was never paid — there is nothing to refund' }
+    }
 
-    // Credit wallet
-    const { AdminCustomersRepository } = await import('../customers/customers.repository.js')
-    const customersRepo = new AdminCustomersRepository()
-    await customersRepo.creditWallet(
-      order.user_id,
-      refundAmount,
-      reason || `Refund for order ${order.order_number}`
-    )
+    const payment = await this.repository.getOrderPayment(orderId)
+    const paidAmount = payment ? parseFloat(payment.amount) : parseFloat(order.total_amount)
+    const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
+    const refundAmount = refundTo === 'none' ? 0 : paidAmount
 
-    // Update order status to REFUNDED
+    if (refundTo === 'original') {
+      if (!hasGatewayPayment) {
+        throw {
+          statusCode: 400,
+          message: 'No online payment on this order to refund to the original method — use Wallet instead',
+        }
+      }
+      const { PaymentsService } = await import('../../payments/payments.service.js')
+      const { PaymentsRepository } = await import('../../payments/payments.repository.js')
+      const result = await new PaymentsService(new PaymentsRepository()).refund(payment.id, {
+        reason: reason || `Refund for order ${order.order_number}`,
+      })
+      if (!result.success) {
+        throw { statusCode: 400, message: result.message || 'Refund failed' }
+      }
+    } else if (refundTo === 'wallet') {
+      const { AdminCustomersRepository } = await import('../customers/customers.repository.js')
+      const customersRepo = new AdminCustomersRepository()
+      await customersRepo.creditWallet(
+        order.user_id,
+        refundAmount,
+        reason || `Refund for order ${order.order_number}`
+      )
+    }
+    // refundTo === 'none' moves no money — order still gets marked
+    // REFUNDED below so it's recorded as closed-out, just with ₹0 back.
+
+    // Update order status to REFUNDED (also true when PaymentsService.refund
+    // already flipped it — this call is idempotent and adds the
+    // admin-attributed order_status_history row for the audit trail).
     const oldStatus = await this.repository.updateStatus(orderId, 'REFUNDED', adminId, reason || 'Refund issued')
 
-    logAdminActivity(adminId, `Refund ₹${refundAmount} for order ${order.order_number}`, 'order', orderId,
-      { status: oldStatus }, { status: 'REFUNDED', refundAmount }, ip)
+    logAdminActivity(
+      adminId,
+      `Refund ₹${refundAmount} (${refundTo}) for order ${order.order_number}`,
+      'order', orderId,
+      { status: oldStatus }, { status: 'REFUNDED', refundTo, refundAmount },
+      ip
+    )
 
     await notificationQueue.add('order-status-changed', {
       orderId, userId: order.user_id, riderId: order.rider_id,
       newStatus: 'REFUNDED', orderNumber: order.order_number,
     })
 
-    return { orderId, refundAmount, status: 'REFUNDED' }
+    return { orderId, refundAmount, refundTo, status: 'REFUNDED' }
   }
 
   async cancelOrder(orderId, body, adminId, ip) {
@@ -225,28 +267,58 @@ export class AdminOrdersService {
     // Cancel the order
     const oldStatus = await this.repository.updateStatus(orderId, 'CANCELLED', adminId, reason || 'Cancelled by admin')
 
-    // Handle refund to wallet if requested
+    // Refund only makes sense once money has actually changed hands — most
+    // cancellations happen on PENDING/CONFIRMED orders that were never
+    // paid (COD, or an online order cancelled before capture), so skip any
+    // money movement unless payment_status is actually PAID. Mirrors the
+    // same gate as `refundOrder`.
     let refundAmount = 0
-    if (refundTo === 'wallet') {
-      refundAmount = parseFloat(order.total_amount)
-      const { AdminCustomersRepository } = await import('../customers/customers.repository.js')
-      const customersRepo = new AdminCustomersRepository()
-      await customersRepo.creditWallet(
-        order.user_id,
-        refundAmount,
-        reason || `Refund for cancelled order ${order.order_number}`
-      )
+    let appliedRefundTo = 'none'
+    if (refundTo && refundTo !== 'none' && order.payment_status === 'PAID') {
+      const payment = await this.repository.getOrderPayment(orderId)
+      const paidAmount = payment ? parseFloat(payment.amount) : parseFloat(order.total_amount)
+      const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
+
+      if (refundTo === 'original' && hasGatewayPayment) {
+        const { PaymentsService } = await import('../../payments/payments.service.js')
+        const { PaymentsRepository } = await import('../../payments/payments.repository.js')
+        const result = await new PaymentsService(new PaymentsRepository()).refund(payment.id, {
+          reason: reason || `Refund for cancelled order ${order.order_number}`,
+        })
+        if (result.success) {
+          refundAmount = paidAmount
+          appliedRefundTo = 'original'
+        }
+      } else {
+        // 'wallet', or 'original' requested but no gateway payment on file
+        // (e.g. COD collected then cancelled) — fall back to wallet credit
+        // rather than silently doing nothing.
+        const { AdminCustomersRepository } = await import('../customers/customers.repository.js')
+        const customersRepo = new AdminCustomersRepository()
+        await customersRepo.creditWallet(
+          order.user_id,
+          paidAmount,
+          reason || `Refund for cancelled order ${order.order_number}`
+        )
+        refundAmount = paidAmount
+        appliedRefundTo = 'wallet'
+      }
     }
 
-    logAdminActivity(adminId, `Cancelled order ${order.order_number}${refundTo === 'wallet' ? ` (refunded ₹${refundAmount} to wallet)` : ''}`, 'order', orderId,
-      { status: oldStatus }, { status: 'CANCELLED', refundTo, refundAmount }, ip)
+    logAdminActivity(
+      adminId,
+      `Cancelled order ${order.order_number}${refundAmount > 0 ? ` (refunded ₹${refundAmount} via ${appliedRefundTo})` : ''}`,
+      'order', orderId,
+      { status: oldStatus }, { status: 'CANCELLED', refundTo: appliedRefundTo, refundAmount },
+      ip
+    )
 
     await notificationQueue.add('order-status-changed', {
       orderId, userId: order.user_id, riderId: order.rider_id,
       newStatus: 'CANCELLED', orderNumber: order.order_number,
     })
 
-    return { orderId, status: 'CANCELLED', refundAmount, refundTo: refundTo || 'none' }
+    return { orderId, status: 'CANCELLED', refundAmount, refundTo: appliedRefundTo }
   }
 
   async bulkUpdateStatus(orderIds, newStatus, adminId, ip) {

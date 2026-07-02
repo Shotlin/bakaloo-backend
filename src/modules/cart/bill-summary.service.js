@@ -353,7 +353,7 @@ export class BillSummaryService {
     try {
       if (addressId) {
         const { rows } = await query(
-          `SELECT lat, lng FROM addresses WHERE id = $1 AND user_id = $2 LIMIT 1`,
+          `SELECT lat, lng FROM addresses WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL LIMIT 1`,
           [addressId, userId]
         )
         if (rows[0] && rows[0].lat != null && rows[0].lng != null) {
@@ -362,7 +362,7 @@ export class BillSummaryService {
       }
       const { rows } = await query(
         `SELECT lat, lng FROM addresses
-          WHERE user_id = $1 AND lat IS NOT NULL AND lng IS NOT NULL
+          WHERE user_id = $1 AND lat IS NOT NULL AND lng IS NOT NULL AND deleted_at IS NULL
           ORDER BY is_default DESC, created_at DESC
           LIMIT 1`,
         [userId]

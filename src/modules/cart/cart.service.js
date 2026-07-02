@@ -870,7 +870,7 @@ export class CartService {
       // Look up default address
       const { rows } = await query(
         `SELECT lat, lng, pincode FROM addresses
-          WHERE user_id = $1 AND is_default = true
+          WHERE user_id = $1 AND is_default = true AND deleted_at IS NULL
             AND lat IS NOT NULL AND lng IS NOT NULL AND pincode IS NOT NULL
           LIMIT 1`,
         [userId]

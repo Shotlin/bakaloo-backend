@@ -12,7 +12,7 @@ export class AddressesRepository {
       `SELECT id, label, address_line1, address_line2, landmark, city, state, pincode,
               lat, lng, is_default, created_at
        FROM addresses
-       WHERE user_id = $1
+       WHERE user_id = $1 AND deleted_at IS NULL
        ORDER BY is_default DESC, created_at DESC`,
       [userId]
     )
@@ -20,14 +20,16 @@ export class AddressesRepository {
   }
 
   /**
-   * Find a single address by ID + user ownership check
+   * Find a single address by ID + user ownership check. Excludes
+   * soft-deleted rows so a removed address can no longer be selected at
+   * checkout or edited while it sits in its retention window.
    */
   async findByIdAndUser(id, userId) {
     const { rows } = await query(
       `SELECT id, label, address_line1, address_line2, landmark, city, state, pincode,
               lat, lng, is_default, created_at, updated_at
        FROM addresses
-       WHERE id = $1 AND user_id = $2`,
+       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [id, userId]
     )
     return rows[0] ? this._format(rows[0]) : null
@@ -92,7 +94,7 @@ export class AddressesRepository {
 
     const { rows } = await query(
       `UPDATE addresses SET ${fields.join(', ')}
-       WHERE id = $${idx} AND user_id = $${idx + 1}
+       WHERE id = $${idx} AND user_id = $${idx + 1} AND deleted_at IS NULL
        RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at, updated_at`,
       params
     )
@@ -100,30 +102,50 @@ export class AddressesRepository {
   }
 
   /**
-   * Delete an address
+   * Soft-delete an address. The row is kept (with `deleted_at` set) for a
+   * retention window — for delivery-dispute/security review against past
+   * orders — and only hard-deleted later by the purge cron
+   * (see `purgeDeletedOlderThan`). A soft-deleted address also loses
+   * `is_default` immediately so it can't linger as the (invisible)
+   * checkout default.
    */
   async delete(id, userId) {
     const result = await query(
-      `DELETE FROM addresses WHERE id = $1 AND user_id = $2`,
+      `UPDATE addresses SET deleted_at = NOW(), is_default = false, updated_at = NOW()
+       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [id, userId]
     )
     return result.rowCount > 0
   }
 
   /**
-   * Set an address as default (unset all others first — transaction)
+   * Permanently remove addresses whose retention window has elapsed.
+   * Called by the daily purge cron. Returns the number of rows removed.
+   */
+  async purgeDeletedOlderThan(days) {
+    const result = await query(
+      `DELETE FROM addresses WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - ($1 || ' days')::interval`,
+      [days]
+    )
+    return result.rowCount
+  }
+
+  /**
+   * Set an address as default (unset all others first — transaction).
+   * Scoped to non-deleted rows so a soft-deleted address can never be
+   * promoted back to default.
    */
   async setDefault(id, userId) {
     const client = await getClient()
     try {
       await client.query('BEGIN')
       await client.query(
-        `UPDATE addresses SET is_default = false, updated_at = NOW() WHERE user_id = $1`,
+        `UPDATE addresses SET is_default = false, updated_at = NOW() WHERE user_id = $1 AND deleted_at IS NULL`,
         [userId]
       )
       const { rows } = await client.query(
         `UPDATE addresses SET is_default = true, updated_at = NOW()
-         WHERE id = $1 AND user_id = $2
+         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
          RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at, updated_at`,
         [id, userId]
       )
@@ -142,7 +164,7 @@ export class AddressesRepository {
    */
   async countByUser(userId) {
     const { rows } = await query(
-      `SELECT COUNT(*)::int AS count FROM addresses WHERE user_id = $1`,
+      `SELECT COUNT(*)::int AS count FROM addresses WHERE user_id = $1 AND deleted_at IS NULL`,
       [userId]
     )
     return rows[0].count

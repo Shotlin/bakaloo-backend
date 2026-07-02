@@ -336,10 +336,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/payment-offers',
   })
 
-  // Fee Config (admin) — legacy row-per-type config (kept for backward compat)
-  await app.register(import('./modules/fee-config/fee-config.routes.js'), {
-    prefix: '/api/v1/admin/fee-config',
-  })
+  // NOTE: the legacy row-per-type "Fee Config" admin API (/api/v1/admin/fee-config,
+  // module at src/modules/fee-config/) has been retired (2026-07-02). It was never
+  // read by any order/cart calculation — TotalsEngine reads exclusively from
+  // `fee_settings` below — so saves against it silently had zero effect. The
+  // module files are kept for reference but intentionally no longer registered.
+  // See migration 065_cleanup_dead_settings_and_cod_fix.sql.
 
   // Fee Settings (admin) — canonical dynamic fee + distance-based delivery engine
   await app.register(import('./modules/fee-settings/fee-settings.routes.js'), {

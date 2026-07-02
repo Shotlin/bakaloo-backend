@@ -593,7 +593,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT pincode
          FROM addresses
-        WHERE user_id = $1
+        WHERE user_id = $1 AND deleted_at IS NULL
         ORDER BY is_default DESC, updated_at DESC
         LIMIT 1`,
       [userId]
