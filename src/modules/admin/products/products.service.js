@@ -1,5 +1,6 @@
 import { AdminProductsRepository } from './products.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
+import { cacheDeletePattern } from '../../../utils/cache.js'
 import ExcelJS from 'exceljs'
 
 const repo = new AdminProductsRepository()
@@ -53,6 +54,8 @@ export class AdminProductsService {
 
   async bulkUpdate(updates, adminId, ip) {
     const results = await repo.bulkUpdate(updates)
+    await cacheDeletePattern('products:*')
+    await cacheDeletePattern('categories:*')
     logAdminActivity(adminId, 'BULK_UPDATE_PRODUCTS', 'product', null, null, { count: results.length }, ip)
     return results
   }
@@ -60,6 +63,7 @@ export class AdminProductsService {
   async duplicate(productId, adminId, ip) {
     const newProduct = await repo.duplicate(productId)
     if (newProduct) {
+      await cacheDeletePattern('products:*')
       logAdminActivity(adminId, 'DUPLICATE_PRODUCT', 'product', newProduct.id, null, { source_id: productId }, ip)
     }
     return newProduct

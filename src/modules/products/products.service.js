@@ -517,6 +517,9 @@ export class ProductsService {
     // Invalidate list/featured caches
     await cacheDeletePattern('products:list:*')
     await cacheDeletePattern('products:featured*')
+    // The categories list embeds a per-category product_count, which
+    // goes stale the moment a product is added to a category.
+    await cacheDeletePattern('categories:*')
     logger.info({ productId: product.id, action: 'products.create' }, 'Product created')
 
     return { success: true, product: this._normalizeProduct(product) }
@@ -539,6 +542,9 @@ export class ProductsService {
     const product = await this.repo.update(id, updateData)
 
     await cacheDeletePattern('products:*')
+    // category_id or is_active may have changed — the categories
+    // list's cached product_count needs to reflect that.
+    await cacheDeletePattern('categories:*')
     logger.info({ productId: id, action: 'products.update' }, 'Product updated')
 
     return { success: true, product: this._normalizeProduct(product) }
@@ -569,6 +575,7 @@ export class ProductsService {
     await this.repo.delete(id)
 
     await cacheDeletePattern('products:*')
+    await cacheDeletePattern('categories:*')
     logger.info({ productId: id, action: 'products.delete' }, 'Product deleted')
 
     return { success: true }
