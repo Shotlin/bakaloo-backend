@@ -78,6 +78,14 @@ export class WalletController {
   }
 
   /**
+   * Search users by phone number prefix (recipient picker)
+   */
+  async searchRecipient(request, reply) {
+    const results = await this.service.searchRecipient(request.user.id, request.query.q)
+    return reply.send(success(results, 'Recipients fetched'))
+  }
+
+  /**
    * Transfer money to another user
    */
   async transfer(request, reply) {

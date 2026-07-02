@@ -7,6 +7,7 @@ import { razorpay } from '../../config/razorpay.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
+import { WalletSettingsService } from '../wallet-settings/wallet-settings.service.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -20,6 +21,7 @@ export class WalletService {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
     this.paymentSettingsService = new PaymentSettingsService()
+    this.walletSettingsService = new WalletSettingsService()
   }
 
   /**
@@ -99,6 +101,16 @@ export class WalletService {
     }
 
     const wallet = await this.repo.getOrCreate(userId)
+
+    const { maxWalletBalance } = await this.walletSettingsService.getConfig()
+    if (wallet.balance + normalizedAmount > maxWalletBalance) {
+      const remaining = Math.max(0, maxWalletBalance - wallet.balance)
+      return {
+        success: false,
+        message: `Adding ₹${normalizedAmount} would exceed your ₹${maxWalletBalance} wallet limit. You can add up to ₹${remaining} more.`,
+      }
+    }
+
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(normalizedAmount * 100),
       currency: 'INR',
@@ -191,6 +203,19 @@ export class WalletService {
       await client.query('COMMIT')
 
       logger.info({ userId, amount: topup.amount, orderId }, 'Wallet top-up verified and credited')
+
+      // Money is already captured by Razorpay at this point — never refuse
+      // to credit it (that would leave a payment charged but un-credited).
+      // Just flag it for admin visibility if it pushed the wallet over the
+      // configured cap.
+      const { maxWalletBalance } = await this.walletSettingsService.getConfig()
+      if (result.wallet.balance > maxWalletBalance) {
+        logger.warn(
+          { userId, orderId, balance: result.wallet.balance, maxWalletBalance },
+          'Wallet top-up pushed balance above configured limit'
+        )
+      }
+
       return { success: true, ...result }
     } catch (err) {
       await client.query('ROLLBACK')
@@ -217,12 +242,15 @@ export class WalletService {
         return { success: false, message: 'Failed to create wallet' }
       }
 
+      const { maxWalletBalance } = await this.walletSettingsService.getConfig()
+
       const result = await this.repo.credit(
         client,
         walletForOp.id,
         amount,
         description || 'Money added',
-        referenceId
+        referenceId,
+        { maxBalance: maxWalletBalance }
       )
 
       await client.query('COMMIT')
@@ -349,6 +377,16 @@ export class WalletService {
       return { success: false, message: 'Cannot transfer to yourself' }
     }
 
+    const { minTransferAmount, maxTransferAmount, maxWalletBalance } =
+      await this.walletSettingsService.getConfig()
+
+    if (amount < minTransferAmount) {
+      return { success: false, message: `Minimum transfer amount is ₹${minTransferAmount}` }
+    }
+    if (amount > maxTransferAmount) {
+      return { success: false, message: `Maximum transfer amount is ₹${maxTransferAmount}` }
+    }
+
     const client = await getClient()
 
     try {
@@ -390,7 +428,8 @@ export class WalletService {
         recipientWallet.id,
         amount,
         `Transfer from user`,
-        `transfer:${userId}`
+        `transfer:${userId}`,
+        { maxBalance: maxWalletBalance }
       )
 
       await client.query('COMMIT')
@@ -408,6 +447,13 @@ export class WalletService {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Search users by phone number prefix, for the transfer recipient picker.
+   */
+  async searchRecipient(userId, q) {
+    return this.repo.searchUsersByPhonePrefix(q, userId)
   }
 
   /**

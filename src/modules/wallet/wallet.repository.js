@@ -41,14 +41,27 @@ export class WalletRepository {
   /**
    * Credit wallet (add money) within a transaction
    * Returns { wallet, transaction }
+   *
+   * When `maxBalance` is given, the UPDATE only applies if the resulting
+   * balance would stay within it — an atomic guard (mirrors debit()'s
+   * `WHERE balance >= $1`) so the cap holds even under concurrent credits,
+   * not just whatever a caller checked before opening the transaction.
    */
-  async credit(client, walletId, amount, description, referenceId) {
-    // Update balance
-    const { rows: walletRows } = await client.query(
-      `UPDATE wallets SET balance = balance + $1, updated_at = NOW()
-       WHERE id = $2 RETURNING *`,
-      [amount, walletId]
-    )
+  async credit(client, walletId, amount, description, referenceId, { maxBalance } = {}) {
+    const params = [amount, walletId]
+    let sql = `UPDATE wallets SET balance = balance + $1, updated_at = NOW() WHERE id = $2`
+    if (maxBalance != null) {
+      sql += ` AND balance + $1 <= $3`
+      params.push(maxBalance)
+    }
+    sql += ` RETURNING *`
+
+    const { rows: walletRows } = await client.query(sql, params)
+
+    if (walletRows.length === 0) {
+      throw new Error('Wallet balance limit exceeded')
+    }
+
     const wallet = this._formatWallet(walletRows[0])
 
     // Record transaction
@@ -210,6 +223,22 @@ export class WalletRepository {
       [phone]
     )
     return rows[0] || null
+  }
+
+  /**
+   * Search users by phone number prefix (for the recipient picker).
+   * Left-anchored LIKE so it's servable by an index (idx_users_phone /
+   * idx_users_phone_pattern) instead of scanning the whole users table.
+   */
+  async searchUsersByPhonePrefix(prefix, excludeUserId, limit = 8) {
+    const { rows } = await query(
+      `SELECT id, name, phone FROM users
+       WHERE phone LIKE $1 || '%' AND is_active = true AND is_blocked = false AND id != $2
+       ORDER BY phone
+       LIMIT $3`,
+      [prefix, excludeUserId, limit]
+    )
+    return rows
   }
 
   /**

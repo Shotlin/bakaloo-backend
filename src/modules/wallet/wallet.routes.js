@@ -8,6 +8,7 @@ import {
   createTopUpSchema,
   verifyTopUpSchema,
   payFromWalletSchema,
+  searchRecipientSchema,
   transferSchema,
   adminCreditSchema,
 } from './wallet.schema.js'
@@ -58,6 +59,18 @@ export default async function walletRoutes(fastify) {
     schema: payFromWalletSchema,
     preHandler: [fastify.authenticate],
   }, controller.payFromWallet.bind(controller))
+
+  // GET /recipient/search — Search recipients by phone prefix
+  fastify.get('/recipient/search', {
+    schema: searchRecipientSchema,
+    preHandler: [fastify.authenticate],
+    config: {
+      rateLimit: {
+        max: 20,
+        timeWindow: '1 minute',
+      },
+    },
+  }, controller.searchRecipient.bind(controller))
 
   // POST /transfer — Transfer to another user
   fastify.post('/transfer', {

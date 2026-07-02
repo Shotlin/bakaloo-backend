@@ -1,8 +1,11 @@
 import { AdminCustomersRepository } from './customers.repository.js'
+import { WalletService } from '../../wallet/wallet.service.js'
+import { WalletRepository } from '../../wallet/wallet.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import ExcelJS from 'exceljs'
 
 const repo = new AdminCustomersRepository()
+const walletService = new WalletService(new WalletRepository())
 
 export class AdminCustomersService {
   async list({ page = 1, limit = 20, search, status, sortBy, sortOrder }) {
@@ -36,8 +39,10 @@ export class AdminCustomersService {
   }
 
   async creditWallet(userId, amount, description, adminId, ip) {
-    const result = await repo.creditWallet(userId, amount, description)
-    logAdminActivity(adminId, 'CREDIT_WALLET', 'user', userId, null, { amount, description }, ip)
+    const result = await walletService.addMoney(userId, { amount, description })
+    if (result.success) {
+      logAdminActivity(adminId, 'CREDIT_WALLET', 'user', userId, null, { amount, description }, ip)
+    }
     return result
   }
 

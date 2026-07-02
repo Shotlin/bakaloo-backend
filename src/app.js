@@ -346,6 +346,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/admin/fee-settings',
   })
 
+  // Wallet Settings (admin) — max wallet balance + transfer amount limits
+  await app.register(import('./modules/wallet-settings/wallet-settings.routes.js'), {
+    prefix: '/api/v1/admin/wallet-settings',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

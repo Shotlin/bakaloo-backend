@@ -187,6 +187,41 @@ export const payFromWalletSchema = {
   },
 }
 
+export const searchRecipientSchema = {
+  tags: ['Wallet'],
+  summary: 'Search users by phone number prefix (recipient picker)',
+  querystring: {
+    type: 'object',
+    required: ['q'],
+    properties: {
+      // 6-10 digit prefix of an Indian mobile number. The 6-digit floor
+      // keeps result sets small/relevant and resists casual scraping —
+      // shorter prefixes alone already span huge cohorts of users.
+      q: { type: 'string', pattern: '^[6-9]\\d{5,9}$' },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              name: { type: 'string' },
+              phone: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const transferSchema = {
   tags: ['Wallet'],
   summary: 'Transfer money to another user by phone',

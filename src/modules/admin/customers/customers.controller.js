@@ -47,7 +47,10 @@ export class AdminCustomersController {
   async creditWallet(request, reply) {
     const { amount, description } = request.body
     const result = await svc.creditWallet(request.params.id, amount, description, request.user.id, request.ip)
-    return success(result, 'Wallet credited')
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'CREDIT_FAILED'))
+    }
+    return success({ wallet_balance: result.wallet.balance }, 'Wallet credited')
   }
 
   async sendNotification(request, reply) {
