@@ -8,6 +8,10 @@ import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { WalletSettingsService } from '../wallet-settings/wallet-settings.service.js'
+// CashbackService is imported dynamically inside payFromWallet() (not at
+// module top-level) — cashback.service.js itself imports WalletService, so
+// a static import here would be circular. Same convention already used in
+// this file/payments.service.js for cart/notifications one-off imports.
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -230,7 +234,7 @@ export class WalletService {
    * Internal only: add money to wallet without a payment gateway.
    * Use this for refunds or admin/manual credits, never for customer top-ups.
    */
-  async addMoney(userId, { amount, description, referenceId }) {
+  async addMoney(userId, { amount, description, referenceId, subType, sourceId, orderId }) {
     const client = await getClient()
 
     try {
@@ -250,7 +254,7 @@ export class WalletService {
         amount,
         description || 'Money added',
         referenceId,
-        { maxBalance: maxWalletBalance }
+        { maxBalance: maxWalletBalance, subType, sourceId, orderId }
       )
 
       await client.query('COMMIT')
@@ -261,6 +265,67 @@ export class WalletService {
       await client.query('ROLLBACK')
       logger.error({ err, userId, amount }, 'Wallet credit failed')
       return { success: false, message: 'Failed to add money: ' + err.message }
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Internal only: remove money from wallet without a customer-initiated
+   * debit flow. Used to claw back a previously-credited cashback when the
+   * underlying order is cancelled/refunded after the reward was credited.
+   *
+   * If the wallet balance is less than `amount` (the user already spent
+   * the cashback), debits whatever remains instead of failing outright —
+   * the cashback_transactions row is still marked CANCELLED by the caller,
+   * and the partial/zero debit is logged for reconciliation.
+   */
+  async deductMoney(userId, { amount, description, referenceId, subType, sourceId, orderId }) {
+    const client = await getClient()
+
+    try {
+      await client.query('BEGIN')
+
+      const wallet = await this.repo.getForUpdate(client, userId)
+      if (!wallet) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Wallet not found' }
+      }
+
+      const deductible = Math.min(amount, wallet.balance)
+      if (deductible <= 0) {
+        await client.query('ROLLBACK')
+        logger.warn(
+          { userId, amount, balance: wallet.balance },
+          'Cashback clawback skipped — wallet balance already zero'
+        )
+        return { success: true, deducted: 0 }
+      }
+
+      const result = await this.repo.debit(
+        client,
+        wallet.id,
+        deductible,
+        description || 'Wallet adjustment',
+        referenceId,
+        { subType, sourceId, orderId }
+      )
+
+      await client.query('COMMIT')
+
+      if (deductible < amount) {
+        logger.warn(
+          { userId, requested: amount, deducted: deductible },
+          'Cashback clawback partially applied — balance was insufficient for full reversal'
+        )
+      }
+
+      logger.info({ userId, deducted: deductible, balance: result.wallet.balance }, 'Wallet debited (clawback)')
+      return { success: true, deducted: deductible, ...result }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      logger.error({ err, userId, amount }, 'Wallet clawback failed')
+      return { success: false, message: 'Failed to deduct money: ' + err.message }
     } finally {
       client.release()
     }
@@ -322,6 +387,20 @@ export class WalletService {
         paymentStatus: 'PAID',
       })
       await this._queueAutoAssign(orderId, 'WALLET_PAY')
+
+      // Credit any cashback whose trigger is PAYMENT_SUCCESS or
+      // ORDER_CONFIRMED — wallet-pay satisfies both at the same moment.
+      // Dynamic import avoids a circular dependency (cashback.service.js
+      // imports WalletService).
+      import('../cashback/cashback.service.js').then(({ CashbackService }) => {
+        const cashbackService = new CashbackService()
+        return Promise.all([
+          cashbackService.evaluateAndCredit(orderId, 'PAYMENT_SUCCESS'),
+          cashbackService.evaluateAndCredit(orderId, 'ORDER_CONFIRMED'),
+        ])
+      }).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (wallet pay)')
+      })
 
       // Clear cart and send notification AFTER successful wallet deduction
       try {

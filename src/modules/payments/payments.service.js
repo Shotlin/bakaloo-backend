@@ -6,6 +6,7 @@ import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
+import { CashbackService } from '../cashback/cashback.service.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -19,6 +20,7 @@ export class PaymentsService {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
     this.paymentSettingsService = new PaymentSettingsService()
+    this.cashbackService = new CashbackService()
   }
 
   /**
@@ -145,6 +147,16 @@ export class PaymentsService {
     })
     await this._queueAutoAssign(payment.orderId, 'PAYMENT_VERIFY')
 
+    // Credit any cashback whose trigger is PAYMENT_SUCCESS or
+    // ORDER_CONFIRMED — this call also confirms the order, so both
+    // triggers are satisfied at the same moment. Fire-and-forget.
+    this.cashbackService.evaluateAndCredit(payment.orderId, 'PAYMENT_SUCCESS').catch((err) => {
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment verify)')
+    })
+    this.cashbackService.evaluateAndCredit(payment.orderId, 'ORDER_CONFIRMED').catch((err) => {
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment verify)')
+    })
+
     // NOW clear the cart and send "Order placed" notification — only after
     // payment is confirmed. This is the critical fix: previously the order
     // service cleared cart and sent notification at order creation time,
@@ -228,6 +240,12 @@ export class PaymentsService {
               paymentStatus: 'PAID',
             })
             await this._queueAutoAssign(payment.orderId, 'PAYMENT_WEBHOOK')
+            this.cashbackService.evaluateAndCredit(payment.orderId, 'PAYMENT_SUCCESS').catch((err) => {
+              logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
+            })
+            this.cashbackService.evaluateAndCredit(payment.orderId, 'ORDER_CONFIRMED').catch((err) => {
+              logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
+            })
             logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
           }
         }

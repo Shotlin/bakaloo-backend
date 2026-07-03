@@ -47,7 +47,14 @@ export class WalletRepository {
    * `WHERE balance >= $1`) so the cap holds even under concurrent credits,
    * not just whatever a caller checked before opening the transaction.
    */
-  async credit(client, walletId, amount, description, referenceId, { maxBalance } = {}) {
+  async credit(
+    client,
+    walletId,
+    amount,
+    description,
+    referenceId,
+    { maxBalance, subType, sourceId, orderId } = {}
+  ) {
     const params = [amount, walletId]
     let sql = `UPDATE wallets SET balance = balance + $1, updated_at = NOW() WHERE id = $2`
     if (maxBalance != null) {
@@ -66,10 +73,20 @@ export class WalletRepository {
 
     // Record transaction
     const { rows: txRows } = await client.query(
-      `INSERT INTO wallet_transactions (wallet_id, type, amount, description, reference_id, balance_after)
-       VALUES ($1, 'CREDIT', $2, $3, $4, $5)
+      `INSERT INTO wallet_transactions
+         (wallet_id, type, amount, description, reference_id, balance_after, sub_type, source_id, order_id)
+       VALUES ($1, 'CREDIT', $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [walletId, amount, description || 'Credit', referenceId || null, wallet.balance]
+      [
+        walletId,
+        amount,
+        description || 'Credit',
+        referenceId || null,
+        wallet.balance,
+        subType || null,
+        sourceId || null,
+        orderId || null,
+      ]
     )
     const transaction = this._formatTransaction(txRows[0])
 
@@ -80,7 +97,7 @@ export class WalletRepository {
    * Debit wallet (deduct money) within a transaction
    * Returns { wallet, transaction }
    */
-  async debit(client, walletId, amount, description, referenceId) {
+  async debit(client, walletId, amount, description, referenceId, { subType, sourceId, orderId } = {}) {
     // Update balance (CHECK constraint enforces >= 0)
     const { rows: walletRows } = await client.query(
       `UPDATE wallets SET balance = balance - $1, updated_at = NOW()
@@ -96,10 +113,20 @@ export class WalletRepository {
 
     // Record transaction
     const { rows: txRows } = await client.query(
-      `INSERT INTO wallet_transactions (wallet_id, type, amount, description, reference_id, balance_after)
-       VALUES ($1, 'DEBIT', $2, $3, $4, $5)
+      `INSERT INTO wallet_transactions
+         (wallet_id, type, amount, description, reference_id, balance_after, sub_type, source_id, order_id)
+       VALUES ($1, 'DEBIT', $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [walletId, amount, description || 'Debit', referenceId || null, wallet.balance]
+      [
+        walletId,
+        amount,
+        description || 'Debit',
+        referenceId || null,
+        wallet.balance,
+        subType || null,
+        sourceId || null,
+        orderId || null,
+      ]
     )
     const transaction = this._formatTransaction(txRows[0])
 
@@ -312,9 +339,12 @@ export class WalletRepository {
       walletId: row.wallet_id,
       userId: row.user_id ?? null,
       type: row.type,
+      subType: row.sub_type ?? null,
       amount: parseFloat(row.amount),
       description: row.description,
       referenceId: row.reference_id,
+      sourceId: row.source_id ?? null,
+      orderId: row.order_id ?? null,
       balanceAfter: row.balance_after != null ? parseFloat(row.balance_after) : null,
       status: row.status || 'COMPLETED',
       createdAt: row.created_at,

@@ -23,6 +23,8 @@ import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from '../cart/totals-engine.service.js'
 import { BillSummaryService } from '../cart/bill-summary.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
+import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
+import { CashbackService } from '../cashback/cashback.service.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -96,6 +98,9 @@ export class OrdersService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    this.firstTimeOffersService =
+      options.firstTimeOffersService || new FirstTimeOffersService()
+    this.cashbackService = options.cashbackService || new CashbackService()
   }
 
   /**
@@ -252,6 +257,9 @@ export class OrdersService {
     let appliedCouponCode = null
     let appliedCouponDiscount = 0
     let couponShopId = null
+    let freeDeliveryOverride = false
+    let freeDeliveryShopId = null
+    let appliedCouponCashback = null // { amount, creditTrigger } for CASHBACK-type coupons
     if (couponCode) {
       const isSingleShop = groupedByShop.size === 1
       if (!isSingleShop) {
@@ -270,6 +278,54 @@ export class OrdersService {
       // total (previously the code was stored but the discount was dropped).
       appliedCouponDiscount = Number(couponResult.discount || 0)
       couponShopId = Array.from(groupedByShop.keys())[0]
+      if (couponResult.freeDelivery) {
+        freeDeliveryOverride = true
+        freeDeliveryShopId = couponShopId
+      }
+      if (couponResult.cashbackAmount) {
+        appliedCouponCashback = {
+          amount: couponResult.cashbackAmount,
+          creditTrigger: couponResult.cashbackCreditTrigger,
+          couponId: couponResult.couponId,
+        }
+      }
+    }
+
+    // 3b. First-time offer — auto-applies for eligible first-time customers
+    // on single-shop carts. Backend validation is the final source of truth
+    // here too: resolveForCheckout() re-checks "no prior order" itself, it
+    // never trusts anything the client claims about first-order status.
+    //
+    // Discount-type rewards (FLAT_DISCOUNT/PERCENTAGE_DISCOUNT) yield to an
+    // already-applied coupon — they'd otherwise stack two separate
+    // order-level discounts through different mechanisms, which is hard to
+    // reason about and not something the product spec asked for.
+    // FREE_DELIVERY/WALLET_CASHBACK/COUPON_UNLOCK don't touch the coupon's
+    // discount bill line at all, so those always apply when eligible.
+    let firstTimeOffer = null
+    let firstTimeReward = null
+    if (groupedByShop.size === 1) {
+      const onlinePayment = normalizedPaymentMethod === 'ONLINE'
+      const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(userId, subtotal, {
+        onlinePayment,
+      })
+      if (resolvedOffer?.autoApply) {
+        const reward = this.firstTimeOffersService.computeReward(resolvedOffer, subtotal)
+        if (reward.discount && appliedCouponCode) {
+          // Coupon already occupies the discount slot — skip the stack.
+        } else {
+          firstTimeOffer = resolvedOffer
+          firstTimeReward = reward
+          if (reward.discount) {
+            appliedCouponDiscount += reward.discount
+            couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
+          }
+          if (reward.freeDelivery) {
+            freeDeliveryOverride = true
+            freeDeliveryShopId = Array.from(groupedByShop.keys())[0]
+          }
+        }
+      }
     }
 
     // 4. Resolve checkout extras (tip / instructions) — preserves the
@@ -319,6 +375,8 @@ export class OrdersService {
       shopCoords,
       couponDiscount: appliedCouponDiscount,
       couponShopId,
+      freeDeliveryOverride,
+      freeDeliveryShopId,
       // Tip applies to a single order only (single-shop checkouts).
       tipAmount: orderTipAmount,
       tipShopId: groupedByShop.size === 1 ? Array.from(groupedByShop.keys())[0] : null,
@@ -401,6 +459,38 @@ export class OrdersService {
           { shopId: couponShopId, discountAmount: appliedCouponDiscount }
         )
       }
+      // CASHBACK-type coupon follow-through: create the PENDING cashback
+      // row, same as a first-time-offer's WALLET_CASHBACK reward.
+      if (appliedCouponCashback && createdOrders.length === 1) {
+        await this.cashbackService.createPending({
+          orderId: createdOrders[0].id,
+          userId,
+          sourceType: 'COUPON',
+          sourceId: appliedCouponCashback.couponId,
+          amount: appliedCouponCashback.amount,
+          creditTrigger: appliedCouponCashback.creditTrigger,
+        })
+      }
+      // First-time offer follow-through: create the PENDING cashback row
+      // (credited later by the matching order-lifecycle hook) or unlock the
+      // reward coupon for this user. Nothing here touches the bill — that
+      // was already applied via appliedCouponDiscount/freeDeliveryOverride
+      // before the order was created.
+      if (firstTimeOffer && firstTimeReward && createdOrders.length === 1) {
+        if (firstTimeReward.cashbackAmount) {
+          await this.cashbackService.createPending({
+            orderId: createdOrders[0].id,
+            userId,
+            sourceType: 'FIRST_TIME_OFFER',
+            sourceId: firstTimeOffer.id,
+            amount: firstTimeReward.cashbackAmount,
+            creditTrigger: firstTimeOffer.cashbackCreditTrigger,
+          })
+        }
+        if (firstTimeReward.unlockCouponId) {
+          await this.couponsRepo.addTargetUser(firstTimeReward.unlockCouponId, userId)
+        }
+      }
     } catch (err) {
       logger.warn(
         { err: err.message, userId, orderIds: createdOrders.map((o) => o.id) },
@@ -461,6 +551,12 @@ export class OrdersService {
 
       if (order.status === ORDER_STATUS.CONFIRMED) {
         await this._queueAutoAssign(order.id, 'ORDER_PLACED_COD')
+        // COD orders reach CONFIRMED right here (no separate payment webhook
+        // exists for COD) — credit any cashback whose trigger is
+        // ORDER_CONFIRMED now instead of waiting for a hook that will never fire.
+        this.cashbackService.evaluateAndCredit(order.id, 'ORDER_CONFIRMED').catch((err) => {
+          logger.warn({ err: err.message, orderId: order.id }, 'Cashback evaluation failed (COD confirm)')
+        })
       }
     }
 
@@ -629,6 +725,14 @@ export class OrdersService {
       cancelledReason: reason || 'Cancelled by customer',
     })
 
+    // Reverse any cashback tied to this order — PENDING rows are simply
+    // cancelled, CREDITED rows (e.g. a PAYMENT_SUCCESS-triggered cashback
+    // credited before the customer cancelled a still-CONFIRMED order) are
+    // clawed back from the wallet. Best-effort, does not block the response.
+    this.cashbackService.cancelForOrder(orderId).catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (customer cancel)')
+    })
+
     logger.info({ orderId, userId }, 'Order cancelled')
     return { success: true, order: updated }
   }
@@ -718,6 +822,17 @@ export class OrdersService {
 
     const updated = await this.repo.updateStatus(orderId, status, extra)
     logger.info({ orderId, status }, 'Order status updated by admin')
+
+    if (status === ORDER_STATUS.DELIVERED) {
+      this.cashbackService.evaluateAndCredit(orderId, 'ORDER_DELIVERED').catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (admin deliver)')
+      })
+    }
+    if (status === ORDER_STATUS.CANCELLED) {
+      this.cashbackService.cancelForOrder(orderId).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (admin cancel)')
+      })
+    }
     return { success: true, order: updated }
   }
 

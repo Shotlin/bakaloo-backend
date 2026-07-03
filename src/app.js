@@ -139,6 +139,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/coupons',
   })
 
+  // First-Time Offers — Phase 2 of the customer-segment marketing system
+  await app.register(import('./modules/first-time-offers/first-time-offers.routes.js'), {
+    prefix: '/api/v1/first-time-offers',
+  })
+
   // Addresses — fully implemented
   await app.register(import('./modules/addresses/addresses.routes.js'), {
     prefix: '/api/v1/addresses',

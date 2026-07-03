@@ -547,6 +547,45 @@ export class CouponsService {
       return { valid: false, message: eligibility.message, code: eligibility.code }
     }
 
+    // CASHBACK and FREE_DELIVERY don't reduce the order total at all — they
+    // produce a separate effect (a pending wallet credit / a delivery-fee
+    // waiver) that the caller (orders.service.js) applies elsewhere, so
+    // `discount` stays 0 for both.
+    if (coupon.discountType === 'CASHBACK') {
+      const cashbackAmount = parseFloat(Math.min(coupon.discountValue, cartTotal).toFixed(2))
+      return {
+        valid: true,
+        discount: 0,
+        cashbackAmount,
+        cashbackCreditTrigger: coupon.cashbackCreditTrigger || 'ORDER_DELIVERED',
+        discountType: coupon.discountType,
+        discountValue: coupon.discountValue,
+        description: coupon.description ?? null,
+        terms: coupon.terms ?? null,
+        minOrderAmount: coupon.minOrderAmount || 0,
+        maxDiscount: coupon.maxDiscount || null,
+        code: coupon.code,
+        couponId: _isValidUUID(coupon.id) ? coupon.id : null,
+        isDemo: !!coupon.isDemo,
+      }
+    }
+    if (coupon.discountType === 'FREE_DELIVERY') {
+      return {
+        valid: true,
+        discount: 0,
+        freeDelivery: true,
+        discountType: coupon.discountType,
+        discountValue: coupon.discountValue,
+        description: coupon.description ?? null,
+        terms: coupon.terms ?? null,
+        minOrderAmount: coupon.minOrderAmount || 0,
+        maxDiscount: coupon.maxDiscount || null,
+        code: coupon.code,
+        couponId: _isValidUUID(coupon.id) ? coupon.id : null,
+        isDemo: !!coupon.isDemo,
+      }
+    }
+
     // Calculate discount
     let discount = 0
     if (coupon.discountType === 'PERCENTAGE') {

@@ -150,7 +150,7 @@ export class OrderSplitterService {
    * @param {object} args
    * @param {string} args.shopId
    * @param {Array<object>} args.items
-   * @param {object} args.feeContext - { deliveryCoords, shopCoords(Map), couponDiscount, couponShopId, configByShop(Map) }
+   * @param {object} args.feeContext - { deliveryCoords, shopCoords(Map), couponDiscount, couponShopId, freeDeliveryOverride, freeDeliveryShopId, configByShop(Map) }
    * @returns {Promise<{
    *   subtotal:number, deliveryFee:number, platformFee:number, handlingFee:number,
    *   smallCartFee:number, surgeFee:number, packagingFee:number, taxAmount:number,
@@ -175,6 +175,16 @@ export class OrderSplitterService {
       feeContext.tipShopId && feeContext.tipShopId === shopId
         ? Number(feeContext.tipAmount || 0)
         : 0
+
+    // A coupon (FREE_DELIVERY discountType) or first-time-offer
+    // (FREE_DELIVERY rewardType) can waive delivery for this order,
+    // scoped to the same single shop the coupon/offer was resolved
+    // against (mirrors couponShopId — single-shop carts only, same as
+    // coupons today).
+    const freeDeliveryOverride =
+      feeContext.freeDeliveryShopId && feeContext.freeDeliveryShopId === shopId
+        ? !!feeContext.freeDeliveryOverride
+        : false
 
     // Legacy fallback when no engine is wired (unit tests / safety net).
     if (!this.totalsEngine) {
@@ -222,6 +232,7 @@ export class OrderSplitterService {
       distanceKm,
       tipAmount,
       storeName: coords?.name || null,
+      forceFreeDelivery: freeDeliveryOverride,
     })
 
     return {

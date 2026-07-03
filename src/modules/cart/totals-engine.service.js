@@ -60,7 +60,7 @@ export class TotalsEngine {
    * @returns {{ amount:number, original:number, waived:boolean, reason:string|null,
    *             applicable:boolean, distanceKnown:boolean, outOfRange:boolean }}
    */
-  computeDeliveryFee(config, distanceKm, eligibleSubtotal) {
+  computeDeliveryFee(config, distanceKm, eligibleSubtotal, forceWaive = false) {
     if (!config.delivery_fee_enabled) {
       return {
         amount: 0,
@@ -111,12 +111,18 @@ export class TotalsEngine {
     const unlocked =
       freeEnabled && threshold !== null && this._num(eligibleSubtotal) >= threshold
 
-    if (unlocked) {
+    // A coupon (FREE_DELIVERY discountType) or a first-time-offer
+    // (FREE_DELIVERY rewardType) can waive delivery independently of the
+    // cart-value threshold above — checked after the threshold so the
+    // "unlocked by cart value" messaging still wins when both are true.
+    if (unlocked || forceWaive) {
       return {
         amount: 0,
         original: before,
         waived: true,
-        reason: threshold !== null ? `Free delivery unlocked on orders above ₹${this._formatMoney(threshold)}` : 'Free delivery unlocked',
+        reason: unlocked
+          ? (threshold !== null ? `Free delivery unlocked on orders above ₹${this._formatMoney(threshold)}` : 'Free delivery unlocked')
+          : 'Free delivery applied',
         applicable: true,
         distanceKnown,
         outOfRange,
@@ -170,13 +176,14 @@ export class TotalsEngine {
     tax = 0,
     tipAmount = 0,
     storeName = null,
+    forceFreeDelivery = false,
   }) {
     const subtotal = this._round(itemsSubtotal)
     const eligibleSubtotal = subtotal // post item-discount, pre fees, pre coupon
     const fees = []
 
     // ── Delivery fee ──────────────────────────────────────────
-    const delivery = this.computeDeliveryFee(config, distanceKm, eligibleSubtotal)
+    const delivery = this.computeDeliveryFee(config, distanceKm, eligibleSubtotal, forceFreeDelivery)
     const distanceLabel = formatDistanceKm(distanceKm)
     if (delivery.applicable) {
       const desc = delivery.waived

@@ -5,6 +5,7 @@ import { NotificationsRepository } from '../notifications/notifications.reposito
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../notifications/customer-order-event.helper.js'
 import { UploadsService } from '../uploads/uploads.service.js'
+import { CashbackService } from '../cashback/cashback.service.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -21,6 +22,7 @@ export class DeliveryService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    this.cashbackService = new CashbackService()
   }
 
   // ─── RIDER PROFILE ──────────────────────────────────
@@ -640,6 +642,14 @@ export class DeliveryService {
         status: 'DELIVERED',
       })
     )
+
+    // Credit any cashback whose configured trigger is ORDER_DELIVERED
+    // (the default, safest trigger — most cashback will land here).
+    // Fire-and-forget: this is a post-commit side effect and must never
+    // block or fail the rider's delivery confirmation.
+    this.cashbackService.evaluateAndCredit(orderId, 'ORDER_DELIVERED').catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (rider deliver)')
+    })
 
     return {
       ...result,

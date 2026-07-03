@@ -24,6 +24,7 @@ const COUPON_COLUMNS = `
   applicable_shop_ids, applicable_category_ids, applicable_product_ids,
   usage_limit_total, usage_limit_per_user,
   target_type, target_segment_id,
+  cashback_credit_trigger,
   created_by,
   created_at, updated_at
 `
@@ -135,6 +136,20 @@ export class CouponsRepository {
     }
   }
 
+  /**
+   * Add a single user to a coupon's individual-target list without
+   * touching existing entries — used by the COUPON_UNLOCK first-time-offer
+   * reward, which must not wipe other already-unlocked/admin-added users
+   * the way setTargetUsers()'s wholesale replace would.
+   */
+  async addTargetUser(couponId, userId) {
+    await query(
+      `INSERT INTO coupon_target_users (coupon_id, user_id) VALUES ($1, $2)
+       ON CONFLICT (coupon_id, user_id) DO NOTHING`,
+      [couponId, userId]
+    )
+  }
+
   /** List a coupon's individually-targeted customers, enriched for admin display. */
   async getTargetUsers(couponId) {
     const { rows } = await query(
@@ -209,6 +224,7 @@ export class CouponsRepository {
          applicable_shop_ids, applicable_category_ids, applicable_product_ids,
          usage_limit_total, usage_limit_per_user,
          target_type, target_segment_id,
+         cashback_credit_trigger,
          created_by
        )
        VALUES (
@@ -221,7 +237,8 @@ export class CouponsRepository {
          $14, $15, $16,
          $17, $18,
          $19, $20,
-         $21
+         $21,
+         $22
        )
        RETURNING ${COUPON_COLUMNS}`,
       [
@@ -245,6 +262,7 @@ export class CouponsRepository {
         data.usageLimitPerUser ?? 1,
         data.targetType ?? 'ALL',
         data.targetSegmentId ?? null,
+        data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
         data.createdBy ?? null,
       ]
     )
@@ -285,6 +303,7 @@ export class CouponsRepository {
       usageLimitPerUser:     'usage_limit_per_user',
       targetType:            'target_type',
       targetSegmentId:       'target_segment_id',
+      cashbackCreditTrigger: 'cashback_credit_trigger',
       createdBy:             'created_by',
     }
 
@@ -346,6 +365,7 @@ export class CouponsRepository {
       usageLimitPerUser:     row.usage_limit_per_user,
       targetType:            row.target_type,
       targetSegmentId:       row.target_segment_id,
+      cashbackCreditTrigger: row.cashback_credit_trigger,
       createdBy:             row.created_by,
       createdAt:             row.created_at,
       updatedAt:             row.updated_at,
