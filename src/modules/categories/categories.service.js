@@ -248,30 +248,44 @@ export class CategoriesService {
 
   /**
    * List all BUNDLE-type categories [ADMIN] — powers the dashboard's
-   * "Bundles" tab, and (with productId) the product edit form's "also show
-   * in bundles" multi-select.
+   * "Bundles" tab.
    */
   async listBundles(productId = null) {
     return this._normalizeCategories(await this.repo.findBundles(productId))
   }
 
   /**
-   * Add/remove a single product from a bundle [ADMIN] — used by the
-   * product edit form's "also show in bundles" toggle.
+   * Every category a product could be cross-listed into (its own primary
+   * category excluded), each flagged `is_member` [ADMIN] — powers the
+   * product edit form's "also show in other categories" multi-select. This
+   * is the multi-category feature: a product keeps its one real category
+   * (set on the product itself) and can additionally appear under any
+   * number of other categories or bundles via category_products, without
+   * duplicating the product.
    */
-  async toggleBundleMembership(categoryId, productId, isMember) {
+  async listCategoriesForProduct(productId) {
+    const [product] = await this.repo.findProductsByIds([productId])
+    if (!product) return { success: false, message: 'Product not found' }
+    const categories = await this.repo.findCategoriesForProduct(productId)
+    return { success: true, categories: this._normalizeCategories(categories) }
+  }
+
+  /**
+   * Add/remove a single product from a category [ADMIN] — used by the
+   * product edit form's "also show in other categories" toggle. Works for
+   * both STANDARD categories (multi-category cross-listing) and BUNDLE
+   * categories; the product's real category_id is never touched.
+   */
+  async toggleCategoryMembership(categoryId, productId, isMember) {
     const category = await this.repo.findById(categoryId)
-    if (!category) return { success: false, message: 'Bundle not found' }
-    if (category.category_type !== 'BUNDLE') {
-      return { success: false, message: 'Not a bundle category' }
-    }
+    if (!category) return { success: false, message: 'Category not found' }
 
     const [product] = await this.repo.findProductsByIds([productId])
     if (!product || !product.is_active) {
       return { success: false, message: 'Product not found' }
     }
 
-    await this.repo.toggleBundleMembership(categoryId, productId, isMember)
+    await this.repo.toggleCategoryMembership(categoryId, productId, isMember)
     await cacheDeletePattern('categories:*')
 
     return { success: true }
@@ -291,16 +305,18 @@ export class CategoriesService {
   /**
    * Set a category's product membership/order [ADMIN].
    *
-   * Sending the full ordered id list both defines a bundle's member
-   * products and "replaces"/"shuffles" a standard category's ranking in
-   * one call — the array index becomes each product's rank.
+   * Sending the full ordered id list both defines membership (a bundle's
+   * member products, or a standard category's cross-listed extras) and
+   * "replaces"/"shuffles" the ranking in one call — the array index
+   * becomes each product's rank.
    *
-   * For a BUNDLE category any active product may be added (that's the
-   * entire point — group products that live in different real
-   * categories). For a STANDARD category, ranking only ever applies to
-   * products that already belong there via category_id — anything else in
-   * the list is silently dropped rather than erroring, so a stale id in an
-   * in-flight admin edit can't 500 the whole reorder.
+   * Any active product may be added regardless of category type or the
+   * product's own real category_id — that's the whole point of the
+   * multi-category feature (e.g. Baby Potato keeps its real category
+   * "Fresh Vegetables" and can also be ranked into "Exotic Vegetables"
+   * here). Products that don't exist or are inactive are silently dropped
+   * rather than erroring, so a stale id in an in-flight admin edit can't
+   * 500 the whole reorder.
    */
   async setCategoryProducts(categoryId, productIds) {
     const category = await this.repo.findById(categoryId)
@@ -310,12 +326,9 @@ export class CategoriesService {
     const found = await this.repo.findProductsByIds(ids)
     const foundById = new Map(found.map((p) => [p.id, p]))
 
-    const isBundle = category.category_type === 'BUNDLE'
     const validIds = ids.filter((id) => {
       const product = foundById.get(id)
-      if (!product || !product.is_active) return false
-      if (!isBundle && product.category_id !== categoryId) return false
-      return true
+      return !!product && product.is_active
     })
 
     const ranks = await this.repo.setCategoryProducts(categoryId, validIds)

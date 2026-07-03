@@ -11,7 +11,8 @@ import {
   listBundlesSchema,
   getCategoryProductRanksSchema,
   setCategoryProductsSchema,
-  toggleBundleMembershipSchema,
+  toggleCategoryMembershipSchema,
+  listCategoriesForProductSchema,
 } from './categories.schema.js'
 
 /**
@@ -55,6 +56,13 @@ export default async function categoriesRoutes(fastify) {
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.listBundles.bind(controller))
 
+  // GET /for-product/:productId — Categories a product can be cross-listed
+  // into (its own primary category excluded), each flagged is_member [ADMIN]
+  fastify.get('/for-product/:productId', {
+    schema: listCategoriesForProductSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.listCategoriesForProduct.bind(controller))
+
   // GET /:id — Single category
   fastify.get('/:id', {
     schema: getCategorySchema,
@@ -96,9 +104,9 @@ export default async function categoriesRoutes(fastify) {
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.setProducts.bind(controller))
 
-  // PUT /:id/membership — Add/remove one product from a bundle [ADMIN]
+  // PUT /:id/membership — Add/remove one product from a category or bundle [ADMIN]
   fastify.put('/:id/membership', {
-    schema: toggleBundleMembershipSchema,
+    schema: toggleCategoryMembershipSchema,
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
-  }, controller.toggleBundleMembership.bind(controller))
+  }, controller.toggleCategoryMembership.bind(controller))
 }

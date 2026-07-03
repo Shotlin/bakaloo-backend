@@ -143,9 +143,9 @@ export const listBundlesSchema = {
   },
 }
 
-export const toggleBundleMembershipSchema = {
+export const toggleCategoryMembershipSchema = {
   tags: ['Categories'],
-  summary: 'Add/remove a single product from a bundle [ADMIN]',
+  summary: 'Add/remove a single product from a category or bundle [ADMIN]',
   security: [{ bearerAuth: [] }],
   params: {
     type: 'object',
@@ -160,6 +160,20 @@ export const toggleBundleMembershipSchema = {
     properties: {
       productId: { type: 'string', format: 'uuid' },
       isMember: { type: 'boolean' },
+    },
+  },
+}
+
+export const listCategoriesForProductSchema = {
+  tags: ['Categories'],
+  summary:
+    "Every category a product could be cross-listed into (its own primary category excluded), each flagged is_member [ADMIN]",
+  security: [{ bearerAuth: [] }],
+  params: {
+    type: 'object',
+    required: ['productId'],
+    properties: {
+      productId: { type: 'string', format: 'uuid' },
     },
   },
 }

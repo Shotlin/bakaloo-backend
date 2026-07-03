@@ -1,6 +1,22 @@
 import { query, getClient } from '../../config/database.js'
 
 /**
+ * Product count for a category, counting BOTH a product's primary
+ * category (products.category_id) AND any cross-listing via
+ * category_products — a product can belong to its real category (e.g.
+ * "Fresh Vegetables") and ALSO be cross-listed into another category (e.g.
+ * "Exotic Vegetables") without duplication, since the LEFT JOIN can match
+ * at most one category_products row per product per category (enforced by
+ * the UNIQUE(category_id, product_id) constraint).
+ */
+const PRODUCT_COUNT_EXPR = (categoryAlias) => `(
+      SELECT COUNT(DISTINCT p.id)::int
+        FROM products p
+        LEFT JOIN category_products cp ON cp.product_id = p.id AND cp.category_id = ${categoryAlias}.id
+       WHERE p.is_active = true AND (p.category_id = ${categoryAlias}.id OR cp.category_id IS NOT NULL)
+    )`
+
+/**
  * Categories repository — all SQL queries for categories
  */
 export class CategoriesRepository {
@@ -17,7 +33,7 @@ export class CategoriesRepository {
   async findAll() {
     const { rows } = await query(
       `SELECT c.id, c.name, c.slug, c.description, c.image_url, c.parent_id, c.sort_order, c.is_active, c.category_type, c.created_at,
-              (SELECT COUNT(*)::int FROM products p WHERE p.category_id = c.id AND p.is_active = true) AS product_count
+              ${PRODUCT_COUNT_EXPR('c')} AS product_count
        FROM categories c
        WHERE c.deleted_at IS NULL AND c.is_active = true AND c.category_type != 'BUNDLE'
        ORDER BY c.sort_order ASC, c.name ASC`
@@ -78,11 +94,39 @@ export class CategoriesRepository {
   }
 
   /**
-   * Add or remove a single product from a bundle without disturbing the
-   * rest of its ranking — used by the product edit form's "also show in
-   * bundles" toggle, which only knows about one product at a time.
+   * Every category a product could be cross-listed into (its own primary
+   * category is excluded — that's set on the product itself, not here),
+   * each flagged `is_member`. Powers the product edit form's "also show in
+   * other categories" multi-select — the dashboard side of the
+   * multi-category feature: a product keeps its one real category, and
+   * this lists every OTHER category (standard or bundle) it can
+   * additionally appear under.
    */
-  async toggleBundleMembership(categoryId, productId, isMember) {
+  async findCategoriesForProduct(productId) {
+    const { rows } = await query(
+      `SELECT c.id, c.name, c.category_type, c.is_active,
+              EXISTS (
+                SELECT 1 FROM category_products cp
+                WHERE cp.category_id = c.id AND cp.product_id = $1
+              ) AS is_member
+         FROM categories c
+        WHERE c.deleted_at IS NULL
+          AND c.id != COALESCE((SELECT category_id FROM products WHERE id = $1), '00000000-0000-0000-0000-000000000000'::uuid)
+        ORDER BY c.category_type ASC, c.sort_order ASC, c.name ASC`,
+      [productId]
+    )
+    return rows
+  }
+
+  /**
+   * Add or remove a single product from a category (its real category via
+   * category_id is untouched either way) without disturbing the rest of
+   * the category's ranking — used by the product edit form's "also show in
+   * other categories" toggle, which only knows about one product at a
+   * time. Works for both STANDARD categories (multi-category cross-
+   * listing) and BUNDLE categories.
+   */
+  async toggleCategoryMembership(categoryId, productId, isMember) {
     if (isMember) {
       const { rows } = await query(
         `SELECT COALESCE(MAX(rank), -1) + 1 AS next_rank FROM category_products WHERE category_id = $1`,
@@ -210,12 +254,17 @@ export class CategoriesRepository {
    * @param {string} [opts.categoryType='STANDARD'] - When 'BUNDLE', product
    *   membership comes exclusively from the category_products join table
    *   (never p.category_id) and results are always ordered by the admin's
-   *   curated rank. When 'STANDARD', membership is the existing
-   *   p.category_id = categoryId, and an explicit per-product rank in
-   *   category_products — if the admin has set one — takes priority over
-   *   the customer-facing sort, falling back to a deterministic
-   *   created_at DESC, id ASC order (fixes the previous nondeterministic
-   *   tie-break) when nothing has been ranked.
+   *   curated rank. When 'STANDARD', membership is the UNION of the
+   *   product's real category (p.category_id = categoryId) and any
+   *   cross-listing into this category via category_products — this is
+   *   the multi-category feature: a product keeps showing under its real
+   *   category (e.g. "Fresh Vegetables") while ALSO appearing under
+   *   another category it's been cross-listed into (e.g. "Exotic
+   *   Vegetables"), without duplicating the product. An explicit
+   *   per-product rank in category_products — if the admin has set one —
+   *   takes priority over the customer-facing sort, falling back to a
+   *   deterministic created_at DESC, id ASC order (fixes the previous
+   *   nondeterministic tie-break) when nothing has been ranked.
    */
   async findProducts(
     categoryId,
@@ -226,7 +275,9 @@ export class CategoriesRepository {
     const params = [categoryId]
     let paramIdx = 2
 
-    conditions.push(isBundle ? 'cp.category_id IS NOT NULL' : 'p.category_id = $1')
+    conditions.push(
+      isBundle ? 'cp.category_id IS NOT NULL' : '(p.category_id = $1 OR cp.category_id IS NOT NULL)'
+    )
 
     if (inStock) {
       conditions.push('p.stock_quantity > 0')
@@ -275,12 +326,11 @@ export class CategoriesRepository {
     }
     const orderSpec = isBundle ? bundleOrder : sortMap[sort] || rankAwareDefault
     const where = conditions.join(' AND ')
-    // BUNDLE membership always needs the join (it's the condition itself);
-    // STANDARD only needs it when the default rank-aware order is in play.
-    const needsCategoryProductsJoin = isBundle || orderSpec === rankAwareDefault
-    const categoryProductsJoin = needsCategoryProductsJoin
-      ? 'LEFT JOIN category_products cp ON cp.category_id = $1 AND cp.product_id = p.id'
-      : ''
+    // Always needed now: for BUNDLE it's the membership condition itself;
+    // for STANDARD the cross-listing half of the union condition above
+    // (`cp.category_id IS NOT NULL`) references it directly too.
+    const categoryProductsJoin =
+      'LEFT JOIN category_products cp ON cp.category_id = $1 AND cp.product_id = p.id'
 
     const optionCountExpr = `COALESCE(
       (SELECT COUNT(*)::int FROM products sib
@@ -290,7 +340,7 @@ export class CategoriesRepository {
 
     const selectCols = `
       p.id, p.name, p.slug, p.price, p.sale_price, p.stock_quantity,
-      p.unit, p.thumbnail_url, p.is_featured, p.total_sold,
+      p.category_id, p.unit, p.thumbnail_url, p.is_featured, p.total_sold,
       p.product_family_id, p.option_label, p.option_sort_order,
       p.is_default_option, p.food_type, p.origin_tag,
       p.custom_badges, p.display_delivery_minutes,
@@ -312,7 +362,7 @@ export class CategoriesRepository {
           ${categoryProductsJoin}
           WHERE ${where}
         )
-        SELECT id, name, slug, price, sale_price, stock_quantity,
+        SELECT id, name, slug, price, sale_price, stock_quantity, category_id,
                unit, thumbnail_url, is_featured, total_sold,
                product_family_id, option_label, option_sort_order,
                is_default_option, food_type, origin_tag,

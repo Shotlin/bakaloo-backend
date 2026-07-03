@@ -41,8 +41,10 @@ function makeRepoMock(overrides = {}) {
     findProductsByIds: vi.fn().mockResolvedValue([]),
     setCategoryProducts: vi.fn().mockResolvedValue([]),
     findBundles: vi.fn().mockResolvedValue([]),
+    findCategoriesForProduct: vi.fn().mockResolvedValue([]),
     getCategoryProductRanks: vi.fn().mockResolvedValue([]),
     findProducts: vi.fn().mockResolvedValue({ data: [], total: 0 }),
+    toggleCategoryMembership: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   }
 }
@@ -105,22 +107,24 @@ describe('CategoriesService.setCategoryProducts — validation (positive + negat
     expect(repo.setCategoryProducts).toHaveBeenCalledWith(BUNDLE_ID, [DAIRY_PRODUCT, FRUIT_PRODUCT])
   })
 
-  it('STANDARD category silently drops products that do not actually belong to it (negative)', async () => {
+  it('STANDARD category accepts a product whose real category is elsewhere (positive — multi-category cross-listing)', async () => {
+    // Baby Potato's real category is "Fresh Vegetables" (STANDARD_ID) but
+    // the admin wants it to ALSO show under "Exotic Vegetables"
+    // (OTHER_CATEGORY_ID) without duplicating the product or changing its
+    // real category_id.
+    const OTHER_CATEGORY_ID = '33333333-3333-3333-3333-333333333333'
     const repo = makeRepoMock({
-      findById: vi.fn().mockResolvedValue({ id: STANDARD_ID, category_type: 'STANDARD' }),
+      findById: vi.fn().mockResolvedValue({ id: OTHER_CATEGORY_ID, category_type: 'STANDARD' }),
       findProductsByIds: vi.fn().mockResolvedValue([
         { id: DAIRY_PRODUCT, category_id: STANDARD_ID, is_active: true },
-        { id: FRUIT_PRODUCT, category_id: 'some-other-category', is_active: true },
       ]),
     })
     const service = new CategoriesService(repo)
 
-    const result = await service.setCategoryProducts(STANDARD_ID, [DAIRY_PRODUCT, FRUIT_PRODUCT])
+    const result = await service.setCategoryProducts(OTHER_CATEGORY_ID, [DAIRY_PRODUCT])
 
     expect(result.success).toBe(true)
-    // Only the product that actually belongs to this category is ranked —
-    // FRUIT_PRODUCT is silently excluded, not an error.
-    expect(repo.setCategoryProducts).toHaveBeenCalledWith(STANDARD_ID, [DAIRY_PRODUCT])
+    expect(repo.setCategoryProducts).toHaveBeenCalledWith(OTHER_CATEGORY_ID, [DAIRY_PRODUCT])
   })
 
   it('drops inactive and nonexistent product ids for both category types (negative)', async () => {
@@ -178,54 +182,80 @@ describe('CategoriesService.listBundles / getCategoryProductRanks', () => {
   })
 })
 
-describe('CategoriesService.toggleBundleMembership — product edit form toggle (positive + negative)', () => {
+describe('CategoriesService.toggleCategoryMembership — product edit form toggle (positive + negative)', () => {
   it('adds a product to a bundle (positive)', async () => {
     const repo = makeRepoMock({
       findById: vi.fn().mockResolvedValue({ id: BUNDLE_ID, category_type: 'BUNDLE' }),
       findProductsByIds: vi.fn().mockResolvedValue([{ id: DAIRY_PRODUCT, is_active: true }]),
-      toggleBundleMembership: vi.fn().mockResolvedValue(undefined),
     })
     const service = new CategoriesService(repo)
 
-    const result = await service.toggleBundleMembership(BUNDLE_ID, DAIRY_PRODUCT, true)
+    const result = await service.toggleCategoryMembership(BUNDLE_ID, DAIRY_PRODUCT, true)
 
     expect(result.success).toBe(true)
-    expect(repo.toggleBundleMembership).toHaveBeenCalledWith(BUNDLE_ID, DAIRY_PRODUCT, true)
+    expect(repo.toggleCategoryMembership).toHaveBeenCalledWith(BUNDLE_ID, DAIRY_PRODUCT, true)
   })
 
-  it('rejects toggling membership on a STANDARD category (negative)', async () => {
+  it('also allows cross-listing a product into a STANDARD category (positive — multi-category)', async () => {
     const repo = makeRepoMock({
       findById: vi.fn().mockResolvedValue({ id: STANDARD_ID, category_type: 'STANDARD' }),
-      toggleBundleMembership: vi.fn(),
+      findProductsByIds: vi.fn().mockResolvedValue([{ id: FRUIT_PRODUCT, is_active: true }]),
     })
     const service = new CategoriesService(repo)
 
-    const result = await service.toggleBundleMembership(STANDARD_ID, DAIRY_PRODUCT, true)
+    const result = await service.toggleCategoryMembership(STANDARD_ID, FRUIT_PRODUCT, true)
 
-    expect(result.success).toBe(false)
-    expect(repo.toggleBundleMembership).not.toHaveBeenCalled()
+    expect(result.success).toBe(true)
+    expect(repo.toggleCategoryMembership).toHaveBeenCalledWith(STANDARD_ID, FRUIT_PRODUCT, true)
   })
 
   it('rejects an inactive/nonexistent product (negative)', async () => {
     const repo = makeRepoMock({
       findById: vi.fn().mockResolvedValue({ id: BUNDLE_ID, category_type: 'BUNDLE' }),
       findProductsByIds: vi.fn().mockResolvedValue([]),
-      toggleBundleMembership: vi.fn(),
     })
     const service = new CategoriesService(repo)
 
-    const result = await service.toggleBundleMembership(BUNDLE_ID, UNKNOWN_PRODUCT, true)
+    const result = await service.toggleCategoryMembership(BUNDLE_ID, UNKNOWN_PRODUCT, true)
 
     expect(result.success).toBe(false)
-    expect(repo.toggleBundleMembership).not.toHaveBeenCalled()
+    expect(repo.toggleCategoryMembership).not.toHaveBeenCalled()
   })
 
-  it('rejects a missing bundle (negative)', async () => {
+  it('rejects a missing category (negative)', async () => {
     const repo = makeRepoMock({ findById: vi.fn().mockResolvedValue(null) })
     const service = new CategoriesService(repo)
 
-    const result = await service.toggleBundleMembership(BUNDLE_ID, DAIRY_PRODUCT, false)
+    const result = await service.toggleCategoryMembership(BUNDLE_ID, DAIRY_PRODUCT, false)
 
     expect(result.success).toBe(false)
+  })
+})
+
+describe('CategoriesService.listCategoriesForProduct — "also show in other categories" picker (positive + negative)', () => {
+  it('lists categories excluding the product primary one, each flagged is_member (positive)', async () => {
+    const repo = makeRepoMock({
+      findProductsByIds: vi.fn().mockResolvedValue([{ id: DAIRY_PRODUCT, category_id: STANDARD_ID, is_active: true }]),
+      findCategoriesForProduct: vi.fn().mockResolvedValue([
+        { id: BUNDLE_ID, category_type: 'BUNDLE', is_member: true, image_url: null },
+      ]),
+    })
+    const service = new CategoriesService(repo)
+
+    const result = await service.listCategoriesForProduct(DAIRY_PRODUCT)
+
+    expect(result.success).toBe(true)
+    expect(result.categories).toHaveLength(1)
+    expect(repo.findCategoriesForProduct).toHaveBeenCalledWith(DAIRY_PRODUCT)
+  })
+
+  it('rejects a nonexistent product (negative)', async () => {
+    const repo = makeRepoMock({ findProductsByIds: vi.fn().mockResolvedValue([]) })
+    const service = new CategoriesService(repo)
+
+    const result = await service.listCategoriesForProduct(UNKNOWN_PRODUCT)
+
+    expect(result.success).toBe(false)
+    expect(repo.findCategoriesForProduct).not.toHaveBeenCalled()
   })
 })

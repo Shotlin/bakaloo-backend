@@ -78,13 +78,22 @@ export class CategoriesController {
   }
 
   /** PUT /:id/membership [ADMIN] */
-  async toggleBundleMembership(request, reply) {
+  async toggleCategoryMembership(request, reply) {
     const { productId, isMember } = request.body
-    const result = await this.service.toggleBundleMembership(request.params.id, productId, isMember)
+    const result = await this.service.toggleCategoryMembership(request.params.id, productId, isMember)
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }
-    return reply.code(200).send(success(null, 'Bundle membership updated'))
+    return reply.code(200).send(success(null, 'Category membership updated'))
+  }
+
+  /** GET /for-product/:productId [ADMIN] */
+  async listCategoriesForProduct(request, reply) {
+    const result = await this.service.listCategoriesForProduct(request.params.productId)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(result.categories, 'Categories fetched'))
   }
 
   /** GET /:id/products/ranks [ADMIN] */

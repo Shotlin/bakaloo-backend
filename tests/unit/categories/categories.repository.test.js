@@ -76,8 +76,8 @@ describe('CategoriesRepository.findProducts — BUNDLE category (positive)', () 
   })
 })
 
-describe('CategoriesRepository.findProducts — STANDARD category (positive + negative)', () => {
-  it('uses p.category_id membership and a rank-aware deterministic default order when no sort is given', async () => {
+describe('CategoriesRepository.findProducts — STANDARD category / multi-category (positive + negative)', () => {
+  it('membership is the union of the real category_id AND any cross-listing via category_products (multi-category)', async () => {
     databaseMock.query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     databaseMock.query.mockResolvedValueOnce({ rows: [{ total: 0 }], rowCount: 1 })
 
@@ -89,13 +89,18 @@ describe('CategoriesRepository.findProducts — STANDARD category (positive + ne
     })
 
     const [dataSql] = databaseMock.query.mock.calls[0]
-    expect(dataSql).toMatch(/p\.category_id = \$1/)
+    // A product shows up here if it's the product's real category OR it's
+    // been cross-listed — e.g. Baby Potato stays under "Fresh Vegetables"
+    // (its real category_id) and can also appear under "Exotic Vegetables"
+    // (cross-listed via category_products) without duplication.
+    expect(dataSql).toMatch(/\(p\.category_id = \$1 OR cp\.category_id IS NOT NULL\)/)
+    expect(dataSql).toMatch(/LEFT JOIN category_products cp ON cp\.category_id = \$1 AND cp\.product_id = p\.id/)
     // Deterministic fallback: rank first, then a fixed tie-breaker chain —
     // this is the fix for "sometimes alphabetical, sometimes by date".
     expect(dataSql).toMatch(/ORDER BY COALESCE\(cp\.rank, 2147483647\) ASC, p\.created_at DESC, p\.id ASC/)
   })
 
-  it('keeps the customer-chosen sort untouched and skips the rank join when a sort is explicitly given', async () => {
+  it('keeps the customer-chosen sort untouched when a sort is explicitly given (join still present for cross-listing)', async () => {
     databaseMock.query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     databaseMock.query.mockResolvedValueOnce({ rows: [{ total: 0 }], rowCount: 1 })
 
@@ -109,7 +114,9 @@ describe('CategoriesRepository.findProducts — STANDARD category (positive + ne
 
     const [dataSql] = databaseMock.query.mock.calls[0]
     expect(dataSql).toMatch(/ORDER BY p\.price ASC, p\.id ASC/)
-    expect(dataSql).not.toMatch(/category_products/)
+    // The join stays even with an explicit sort — it's now part of the
+    // membership condition itself, not just the default ordering.
+    expect(dataSql).toMatch(/LEFT JOIN category_products cp/)
   })
 
   it('every sort branch ends in a deterministic p.id tie-breaker (negative: no more unordered ties)', async () => {
