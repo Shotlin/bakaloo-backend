@@ -596,72 +596,118 @@ async function getProductsByIds(productIds) {
   return rows
 }
 
-async function getProductsByCategoryIds(categoryIds, limit, excludeIds = []) {
+/**
+ * Products belonging to any of the given categories — either as a
+ * product's real/primary category (products.category_id) OR via
+ * cross-listing through category_products (the multi-category feature: a
+ * product can additionally appear under a category that isn't its primary
+ * one, e.g. "Exotic Vegetables" cross-listing a product whose real
+ * category is "Fresh Vegetables"). Missing this half of the union was the
+ * root cause of cross-listed products never showing up in category-bound
+ * home sections/widgets even though they correctly appear on the regular
+ * category browse page (which already unions both — see
+ * categories.repository.js#findProducts).
+ *
+ * When multiple categoryIds are given, results are interleaved fairly
+ * across categories (every category's #1 pick before any category's #2
+ * pick, etc.) via a per-category ROW_NUMBER, rather than one global
+ * ORDER BY/LIMIT — otherwise a single large/high-selling category could
+ * crowd out every product from the other requested categories.
+ */
+export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = []) {
   if (!Array.isArray(categoryIds) || categoryIds.length === 0 || limit <= 0) {
     return []
   }
 
   const params = [categoryIds, limit]
-  let where = `
-    p.is_active = true
-    AND p.stock_quantity > 0
-    AND p.category_id = ANY($1::uuid[])
-  `
-
+  let excludeClause = ''
   if (excludeIds.length > 0) {
     params.push(excludeIds)
-    where += ` AND NOT (p.id = ANY($3::uuid[]))`
+    excludeClause = ' AND NOT (p.id = ANY($3::uuid[]))'
   }
 
-  const limitPlaceholder = excludeIds.length > 0 ? '$2' : '$2'
-
   const { rows } = await query(
-    `SELECT
-       p.id,
-       p.name,
-       p.slug,
-       p.price,
-       p.sale_price,
-       p.stock_quantity,
-       p.unit,
-       p.thumbnail_url,
-       p.category_id,
-       c.name AS category_name,
-       COALESCE(p.images, '[]'::jsonb) AS images,
-       COALESCE(p.tags, ARRAY[]::text[]) AS tags,
-       p.is_active,
-       p.is_featured,
-       p.total_sold,
-       p.description,
-       p.ingredients,
-       p.nutrition_info,
-       p.storage_instructions,
-       p.product_family_id,
-       pf.name AS family_name,
-       p.option_label,
-       p.option_sort_order,
-       p.is_default_option,
-       p.food_type,
-       p.origin_tag,
-       p.custom_badges,
-       p.display_delivery_minutes,
-       p.net_quantity,
-       p.brand,
-       p.brand_logo_url,
-       p.avg_rating,
-       p.rating_count,
-       COALESCE(
-         (SELECT COUNT(*)::int FROM products ps
-          WHERE ps.product_family_id = p.product_family_id
-            AND ps.is_active = true AND ps.stock_quantity > 0),
-         1
-       ) AS option_count
-     FROM products p
-     LEFT JOIN categories c ON c.id = p.category_id
-     LEFT JOIN product_families pf ON pf.id = p.product_family_id
-     WHERE ${where}
-     ORDER BY p.is_featured DESC, p.total_sold DESC, p.created_at DESC
-     LIMIT ${limitPlaceholder}`,
+    `WITH matches AS (
+       SELECT p.id AS product_id, cat.id AS matched_category_id, cat.ord
+       FROM unnest($1::uuid[]) WITH ORDINALITY AS cat(id, ord)
+       JOIN products p ON (
+         p.category_id = cat.id
+         OR EXISTS (
+           SELECT 1 FROM category_products cp
+           WHERE cp.product_id = p.id AND cp.category_id = cat.id
+         )
+       )
+       WHERE p.is_active = true AND p.stock_quantity > 0${excludeClause}
+     ),
+     best_match AS (
+       -- A product reachable via more than one of the requested categories
+       -- (e.g. cross-listed into two of them) keeps only its first match,
+       -- by input order, so it's never returned twice.
+       SELECT DISTINCT ON (product_id) product_id, matched_category_id
+       FROM matches
+       ORDER BY product_id, ord ASC
+     ),
+     ranked AS (
+       SELECT
+         p.id,
+         p.name,
+         p.slug,
+         p.price,
+         p.sale_price,
+         p.stock_quantity,
+         p.unit,
+         p.thumbnail_url,
+         p.category_id,
+         c.name AS category_name,
+         COALESCE(p.images, '[]'::jsonb) AS images,
+         COALESCE(p.tags, ARRAY[]::text[]) AS tags,
+         p.is_active,
+         p.is_featured,
+         p.total_sold,
+         p.description,
+         p.ingredients,
+         p.nutrition_info,
+         p.storage_instructions,
+         p.product_family_id,
+         pf.name AS family_name,
+         p.option_label,
+         p.option_sort_order,
+         p.is_default_option,
+         p.food_type,
+         p.origin_tag,
+         p.custom_badges,
+         p.display_delivery_minutes,
+         p.net_quantity,
+         p.brand,
+         p.brand_logo_url,
+         p.avg_rating,
+         p.rating_count,
+         COALESCE(
+           (SELECT COUNT(*)::int FROM products ps
+            WHERE ps.product_family_id = p.product_family_id
+              AND ps.is_active = true AND ps.stock_quantity > 0),
+           1
+         ) AS option_count,
+         ROW_NUMBER() OVER (
+           PARTITION BY bm.matched_category_id
+           ORDER BY p.is_featured DESC, p.total_sold DESC, p.created_at DESC
+         ) AS local_rank
+       FROM best_match bm
+       JOIN products p ON p.id = bm.product_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN product_families pf ON pf.id = p.product_family_id
+     )
+     SELECT
+       id, name, slug, price, sale_price, stock_quantity, unit, thumbnail_url,
+       category_id, category_name, images, tags, is_active, is_featured,
+       total_sold, description, ingredients, nutrition_info, storage_instructions,
+       product_family_id, family_name, option_label, option_sort_order,
+       is_default_option, food_type, origin_tag, custom_badges,
+       display_delivery_minutes, net_quantity, brand, brand_logo_url,
+       avg_rating, rating_count, option_count
+     FROM ranked
+     ORDER BY local_rank ASC, is_featured DESC, total_sold DESC, created_at DESC
+     LIMIT $2`,
     params
   )
 

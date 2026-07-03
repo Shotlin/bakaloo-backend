@@ -287,6 +287,7 @@ export class CategoriesService {
 
     await this.repo.toggleCategoryMembership(categoryId, productId, isMember)
     await cacheDeletePattern('categories:*')
+    await this._invalidateHomeSectionCaches()
 
     return { success: true }
   }
@@ -334,12 +335,27 @@ export class CategoriesService {
     const ranks = await this.repo.setCategoryProducts(categoryId, validIds)
 
     await cacheDeletePattern('categories:*')
+    await this._invalidateHomeSectionCaches()
     logger.info(
       { categoryId, categoryType: category.category_type, productCount: validIds.length },
       'Category product ranking updated'
     )
 
     return { success: true, products: this._normalizeProducts(ranks) }
+  }
+
+  /**
+   * Category-membership edits change what a category-bound home
+   * section/widget should show, but the theme module caches its resolved
+   * output separately (bakaloo:sections:*, bakaloo:tab_home:*,
+   * bakaloo:tab_manifest:* — see sections.service.js#invalidateSectionCaches)
+   * with its own 5-minute TTL. Without this, a cross-listing/ranking change
+   * here wouldn't reach home sections until that TTL expired.
+   */
+  async _invalidateHomeSectionCaches() {
+    await cacheDeletePattern('bakaloo:sections:*')
+    await cacheDeletePattern('bakaloo:tab_home:*')
+    await cacheDeletePattern('bakaloo:tab_manifest:*')
   }
 
   _normalizeCategories(categories = []) {

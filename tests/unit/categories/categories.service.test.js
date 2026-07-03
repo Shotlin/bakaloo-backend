@@ -26,6 +26,7 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+import { cacheDeletePattern } from '../../../src/utils/cache.js'
 import { CategoriesService } from '../../../src/modules/categories/categories.service.js'
 
 const BUNDLE_ID = '11111111-1111-1111-1111-111111111111'
@@ -257,5 +258,46 @@ describe('CategoriesService.listCategoriesForProduct — "also show in other cat
 
     expect(result.success).toBe(false)
     expect(repo.findCategoriesForProduct).not.toHaveBeenCalled()
+  })
+})
+
+describe('Cache invalidation reaches home sections, not just categories (positive)', () => {
+  // A category-membership edit changes what a category-bound home section
+  // should show, but the theme module caches its resolved output
+  // separately (bakaloo:sections:*, bakaloo:tab_home:*,
+  // bakaloo:tab_manifest:*) — missing this was why cross-listing/ranking
+  // changes could take up to 5 minutes (the theme cache TTL) to appear.
+  const HOME_SECTION_PATTERNS = ['bakaloo:sections:*', 'bakaloo:tab_home:*', 'bakaloo:tab_manifest:*']
+
+  it('setCategoryProducts invalidates home-section caches in addition to categories:*', async () => {
+    const repo = makeRepoMock({
+      findById: vi.fn().mockResolvedValue({ id: STANDARD_ID, category_type: 'STANDARD' }),
+      findProductsByIds: vi.fn().mockResolvedValue([{ id: DAIRY_PRODUCT, category_id: STANDARD_ID, is_active: true }]),
+    })
+    const service = new CategoriesService(repo)
+
+    await service.setCategoryProducts(STANDARD_ID, [DAIRY_PRODUCT])
+
+    const calledPatterns = cacheDeletePattern.mock.calls.map((c) => c[0])
+    expect(calledPatterns).toContain('categories:*')
+    for (const pattern of HOME_SECTION_PATTERNS) {
+      expect(calledPatterns).toContain(pattern)
+    }
+  })
+
+  it('toggleCategoryMembership invalidates home-section caches in addition to categories:*', async () => {
+    const repo = makeRepoMock({
+      findById: vi.fn().mockResolvedValue({ id: BUNDLE_ID, category_type: 'BUNDLE' }),
+      findProductsByIds: vi.fn().mockResolvedValue([{ id: DAIRY_PRODUCT, is_active: true }]),
+    })
+    const service = new CategoriesService(repo)
+
+    await service.toggleCategoryMembership(BUNDLE_ID, DAIRY_PRODUCT, true)
+
+    const calledPatterns = cacheDeletePattern.mock.calls.map((c) => c[0])
+    expect(calledPatterns).toContain('categories:*')
+    for (const pattern of HOME_SECTION_PATTERNS) {
+      expect(calledPatterns).toContain(pattern)
+    }
   })
 })
