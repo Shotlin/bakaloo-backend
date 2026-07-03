@@ -664,6 +664,7 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
          p.is_active,
          p.is_featured,
          p.total_sold,
+         p.created_at,
          p.description,
          p.ingredients,
          p.nutrition_info,

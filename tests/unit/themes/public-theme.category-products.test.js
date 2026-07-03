@@ -79,6 +79,31 @@ describe('getProductsByCategoryIds — multi-category cross-listing (positive/ne
     expect(params[0]).toEqual([CATEGORY_A, CATEGORY_B])
   })
 
+  it('every column referenced in the outer ORDER BY is actually selected inside the ranked CTE (regression guard)', async () => {
+    // A raw-SQL regression that string-matching alone won't catch: the
+    // outer ORDER BY can only reference columns Postgres can actually see
+    // on `ranked` (its own SELECT list) — referencing p.created_at inside
+    // the window function's own ORDER BY does NOT make `created_at`
+    // available outside the CTE. This caught a real "column created_at
+    // does not exist" 500 in production before this test existed.
+    await getProductsByCategoryIds([CATEGORY_A], 10)
+
+    const [sql] = databaseMock.query.mock.calls[0]
+    const cteBody = sql.slice(sql.indexOf('ranked AS ('), sql.indexOf('FROM ranked'))
+    const orderByMatch = sql.match(/ORDER BY ([^\n]+)\s*LIMIT/)
+    expect(orderByMatch).not.toBeNull()
+    const orderColumns = orderByMatch[1]
+      .split(',')
+      .map((part) => part.trim().split(/\s+/)[0])
+    for (const column of orderColumns) {
+      // local_rank is defined by the window function itself, not a plain
+      // column — everything else must appear as `p.<column>` (or an alias)
+      // in the CTE body.
+      if (column === 'local_rank') continue
+      expect(cteBody).toMatch(new RegExp(`p\\.${column}\\b`))
+    }
+  })
+
   it('deduplicates a product reachable via more than one requested category (negative: never returned twice)', async () => {
     await getProductsByCategoryIds([CATEGORY_A, CATEGORY_B], 20)
 
