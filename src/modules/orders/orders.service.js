@@ -25,6 +25,7 @@ import { BillSummaryService } from '../cart/bill-summary.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
+import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -101,6 +102,8 @@ export class OrdersService {
     this.firstTimeOffersService =
       options.firstTimeOffersService || new FirstTimeOffersService()
     this.cashbackService = options.cashbackService || new CashbackService()
+    this.cartMilestonesService =
+      options.cartMilestonesService || new CartMilestonesService()
   }
 
   /**
@@ -328,6 +331,33 @@ export class OrdersService {
       }
     }
 
+    // 3c. Cart milestone — the highest cart-value tier this user is
+    // eligible for and has already reached with this cart (applies to
+    // every order, not just a customer's first). `stackableWithCoupon`
+    // is a hard admin toggle: false means the milestone is skipped
+    // outright whenever a coupon code was applied to this order, of any
+    // reward type. When it does apply, a FLAT_DISCOUNT reward still
+    // yields to a coupon/first-time-offer discount already occupying the
+    // bill's single discount slot, same rule as first-time offers above.
+    let cartMilestone = null
+    let cartMilestoneReward = null
+    if (groupedByShop.size === 1) {
+      const milestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotal)
+      if (milestone && !(appliedCouponCode && !milestone.stackableWithCoupon)) {
+        const reward = this.cartMilestonesService.computeReward(milestone, subtotal)
+        if (reward.discount && (appliedCouponCode || firstTimeReward?.discount)) {
+          // Discount slot already taken by a coupon or first-time offer.
+        } else {
+          cartMilestone = milestone
+          cartMilestoneReward = reward
+          if (reward.discount) {
+            appliedCouponDiscount += reward.discount
+            couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
+          }
+        }
+      }
+    }
+
     // 4. Resolve checkout extras (tip / instructions) — preserves the
     //    pre-multi-vendor behaviour for single-shop carts.
     const hasTipAmount = Object.prototype.hasOwnProperty.call(body, 'tipAmount')
@@ -489,6 +519,22 @@ export class OrdersService {
         }
         if (firstTimeReward.unlockCouponId) {
           await this.couponsRepo.addTargetUser(firstTimeReward.unlockCouponId, userId)
+        }
+      }
+      // Cart milestone follow-through — same pattern as first-time offers.
+      if (cartMilestone && cartMilestoneReward && createdOrders.length === 1) {
+        if (cartMilestoneReward.cashbackAmount) {
+          await this.cashbackService.createPending({
+            orderId: createdOrders[0].id,
+            userId,
+            sourceType: 'CART_MILESTONE',
+            sourceId: cartMilestone.id,
+            amount: cartMilestoneReward.cashbackAmount,
+            creditTrigger: cartMilestone.cashbackCreditTrigger,
+          })
+        }
+        if (cartMilestoneReward.unlockCouponId) {
+          await this.couponsRepo.addTargetUser(cartMilestoneReward.unlockCouponId, userId)
         }
       }
     } catch (err) {

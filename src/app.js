@@ -144,6 +144,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/first-time-offers',
   })
 
+  // Cart Milestones — Phase 3 of the customer-segment marketing system
+  await app.register(import('./modules/cart-milestones/cart-milestones.routes.js'), {
+    prefix: '/api/v1/cart-milestones',
+  })
+
   // Addresses — fully implemented
   await app.register(import('./modules/addresses/addresses.routes.js'), {
     prefix: '/api/v1/addresses',

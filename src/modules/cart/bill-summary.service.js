@@ -3,6 +3,7 @@ import { CartService } from './cart.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from './totals-engine.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
+import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
 import { haversineKm } from '../../utils/distance.js'
 import { query } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
@@ -31,6 +32,7 @@ export class BillSummaryService {
     feeSettingsService = null,
     totalsEngine = null,
     paymentSettingsService = null,
+    cartMilestonesService = null,
   } = {}) {
     this.cartRepository = cartRepository ?? new CartRepository()
     this.cartService = cartService ?? new CartService(this.cartRepository)
@@ -38,6 +40,7 @@ export class BillSummaryService {
     this.totalsEngine =
       totalsEngine ?? new TotalsEngine({ feeSettingsService: this.feeSettingsService })
     this.paymentSettingsService = paymentSettingsService ?? new PaymentSettingsService()
+    this.cartMilestonesService = cartMilestonesService ?? new CartMilestonesService()
   }
 
   /**
@@ -167,6 +170,16 @@ export class BillSummaryService {
     const deliveryEstimateMinutes = this._toNumber(config.delivery_eta_minutes) || 30
     const freeThreshold = aggregate.freeDelivery.threshold
 
+    // Cart milestone progress (Phase 3) — powers the mobile Smart Bottom
+    // Bar's "Add ₹X more to unlock…" state. Best-effort: a milestone
+    // lookup failure must never break the cart summary itself.
+    let cartMilestone = { unlocked: null, next: null }
+    try {
+      cartMilestone = await this.cartMilestonesService.getProgress(userId, itemTotalDiscounted)
+    } catch (err) {
+      logger.warn({ userId, err: err.message, action: 'bill_summary_milestone' }, 'Cart milestone progress failed')
+    }
+
     // ── Legacy-compatible shape + new canonical fields ──────────
     return {
       // legacy keys (current Flutter)
@@ -224,6 +237,7 @@ export class BillSummaryService {
       smallCartFee: { amount: smallCartFee, isFree: smallCartFee <= 0 },
       totalPayable: toPayFinal,
       paymentMethods: this._buildPaymentMethods(paymentConfig, toPayFinal),
+      cartMilestone,
     }
   }
 
@@ -416,6 +430,7 @@ export class BillSummaryService {
       smallCartFee: { amount: 0, isFree: true },
       totalPayable: 0,
       paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
+      cartMilestone: { unlocked: null, next: null },
     }
   }
 
