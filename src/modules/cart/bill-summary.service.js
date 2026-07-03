@@ -171,11 +171,26 @@ export class BillSummaryService {
     const freeThreshold = aggregate.freeDelivery.threshold
 
     // Cart milestone progress (Phase 3) — powers the mobile Smart Bottom
-    // Bar's "Add ₹X more to unlock…" state. Best-effort: a milestone
-    // lookup failure must never break the cart summary itself.
-    let cartMilestone = { unlocked: null, next: null }
+    // Bar's "Add ₹X more to unlock…" state, plus a full merged ladder (free
+    // delivery + every cart-milestone tier this user is eligible for, in
+    // one ascending sequence) so the bar can render a single segmented
+    // progress track instead of resetting to 0% every time a tier is
+    // crossed — each tier fills its own segment as the cart approaches it,
+    // and every earlier segment stays fully filled once passed.
+    // Best-effort: a milestone lookup failure must never break the cart summary itself.
+    let cartMilestone = { unlocked: null, next: null, ladder: [] }
     try {
-      cartMilestone = await this.cartMilestonesService.getProgress(userId, itemTotalDiscounted)
+      const [progress, eligibleTiers] = await Promise.all([
+        this.cartMilestonesService.getProgress(userId, itemTotalDiscounted),
+        this.cartMilestonesService.getEligibleTiers(userId),
+      ])
+      const ladder = this._buildRewardLadder({
+        freeDeliveryEnabled: aggregate.freeDelivery.enabled,
+        freeDeliveryThreshold: freeThreshold,
+        tiers: eligibleTiers,
+        cartTotal: itemTotalDiscounted,
+      })
+      cartMilestone = { ...progress, ladder }
     } catch (err) {
       logger.warn({ userId, err: err.message, action: 'bill_summary_milestone' }, 'Cart milestone progress failed')
     }
@@ -362,6 +377,49 @@ export class BillSummaryService {
     return fees
   }
 
+  /**
+   * Merge the free-delivery threshold and every eligible cart-milestone
+   * tier into a single ascending sequence of "checkpoints", each with a
+   * self-contained 0–1 `segmentProgress` — how far the cart has filled
+   * *that* checkpoint's own span (from the previous checkpoint's amount up
+   * to this one), not the overall cart-vs-final-tier fraction. This is
+   * what lets the mobile Smart Bottom Bar render one continuous segmented
+   * progress track (each tier its own segment, with a gap marker at every
+   * boundary) instead of a single bar that resets to 0% each time a tier
+   * is crossed.
+   */
+  _buildRewardLadder({ freeDeliveryEnabled, freeDeliveryThreshold, tiers, cartTotal }) {
+    const checkpoints = []
+    if (freeDeliveryEnabled && freeDeliveryThreshold != null && freeDeliveryThreshold > 0) {
+      checkpoints.push({
+        id: 'free-delivery',
+        label: 'Free delivery',
+        minAmount: this._round(freeDeliveryThreshold),
+      })
+    }
+    for (const tier of tiers) {
+      checkpoints.push({
+        id: tier.id,
+        label: tier.name,
+        minAmount: this._round(tier.minCartAmount),
+      })
+    }
+    checkpoints.sort((a, b) => a.minAmount - b.minAmount)
+
+    let previousAmount = 0
+    return checkpoints.map((checkpoint) => {
+      const span = checkpoint.minAmount - previousAmount
+      const achieved = cartTotal >= checkpoint.minAmount
+      const segmentProgress = achieved
+        ? 1
+        : span > 0
+          ? Math.max(0, Math.min(1, (cartTotal - previousAmount) / span))
+          : 0
+      previousAmount = checkpoint.minAmount
+      return { ...checkpoint, achieved, segmentProgress: this._round(segmentProgress) }
+    })
+  }
+
   /** Resolve the delivery address (selected or default) with coordinates. */
   async _resolveAddress(userId, addressId) {
     try {
@@ -430,7 +488,7 @@ export class BillSummaryService {
       smallCartFee: { amount: 0, isFree: true },
       totalPayable: 0,
       paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
-      cartMilestone: { unlocked: null, next: null },
+      cartMilestone: { unlocked: null, next: null, ladder: [] },
     }
   }
 

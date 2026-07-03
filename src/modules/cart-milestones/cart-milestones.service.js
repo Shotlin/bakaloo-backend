@@ -33,6 +33,16 @@ export class CartMilestonesService {
     return true
   }
 
+  /** All active milestones this user is eligible for, ordered ascending by tier — the raw ladder, independent of cart value. */
+  async getEligibleTiers(userId) {
+    const active = await this.repo.findAllActive()
+    const eligible = []
+    for (const m of active) {
+      if (await this._isEligible(m, userId)) eligible.push(m)
+    }
+    return eligible
+  }
+
   /**
    * Build the "next milestone" progress for the Smart Bottom Bar / bill
    * summary: the highest tier already unlocked by the current cart value
@@ -40,11 +50,7 @@ export class CartMilestonesService {
    * milestones this user is actually eligible for.
    */
   async getProgress(userId, cartTotal) {
-    const active = await this.repo.findAllActive()
-    const eligible = []
-    for (const m of active) {
-      if (await this._isEligible(m, userId)) eligible.push(m)
-    }
+    const eligible = await this.getEligibleTiers(userId)
 
     let unlockedMilestone = null
     let nextMilestone = null
