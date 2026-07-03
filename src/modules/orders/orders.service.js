@@ -397,7 +397,8 @@ export class OrdersService {
         await this.couponsService.recordUsage(
           appliedCouponCode,
           userId,
-          createdOrders[0].id
+          createdOrders[0].id,
+          { shopId: couponShopId, discountAmount: appliedCouponDiscount }
         )
       }
     } catch (err) {

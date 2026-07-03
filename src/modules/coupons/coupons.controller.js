@@ -81,6 +81,12 @@ export class CouponsController {
     return reply.code(200).send(success(result.coupon, 'Coupon updated'))
   }
 
+  /** GET /:id/target-users — Admin */
+  async getTargetUsers(request, reply) {
+    const users = await this.service.getTargetUsers(request.params.id)
+    return reply.code(200).send(success(users, 'Coupon target users fetched'))
+  }
+
   /** DELETE /:id — Admin */
   async delete(request, reply) {
     const actor = this._actorCtx(request)

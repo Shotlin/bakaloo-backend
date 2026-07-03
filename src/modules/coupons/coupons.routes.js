@@ -56,6 +56,11 @@ export default async function couponsRoutes(fastify) {
     preHandler: [fastify.authenticate, requirePermission('shop_coupons.create')],
   }, controller.create.bind(controller))
 
+  // GET /:id/target-users — Individually-targeted customers [ADMIN]
+  fastify.get('/:id/target-users', {
+    preHandler: [fastify.authenticate, requirePermission('shop_coupons.view')],
+  }, controller.getTargetUsers.bind(controller))
+
   // PUT /:id — Update coupon [HQ or shop staff with shop_coupons.update]
   fastify.put('/:id', {
     schema: updateCouponSchema,

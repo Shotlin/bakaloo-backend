@@ -320,6 +320,20 @@ function buildSegmentWhere(segment, segmentValue) {
         params,
       }
 
+    case 'custom_segment': {
+      // Admin-defined customer segment (see customer_segments/customer_segment_members).
+      if (segmentValue) {
+        params.push(segmentValue)
+        return {
+          where: `${customerBaseWhere} AND u.id IN (
+            SELECT user_id FROM customer_segment_members WHERE segment_id = $${params.length}
+          )`,
+          params,
+        }
+      }
+      return { where: customerBaseWhere, params }
+    }
+
     default:
       return { where: customerBaseWhere, params }
   }

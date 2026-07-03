@@ -19,6 +19,8 @@ const couponProperties = {
   isActive:        { type: 'boolean' },
   createdAt:       { type: 'string' },
   terms:           { type: ['string', 'null'] },
+  targetType:      { type: 'string' },
+  targetSegmentId: { type: ['string', 'null'] },
 }
 
 const couponResponse = {
@@ -131,6 +133,9 @@ export const createCouponSchema = {
       applicableProductIds:  { type: 'array', items: { type: 'string', format: 'uuid' } },
       usageLimitTotal:       { type: 'integer', minimum: 1 },
       usageLimitPerUser:     { type: 'integer', minimum: 1, default: 1 },
+      targetType:            { type: 'string', enum: ['ALL', 'SEGMENT', 'INDIVIDUAL', 'FIRST_TIME'], default: 'ALL' },
+      targetSegmentId:       { type: 'string', format: 'uuid' },
+      targetUserIds:         { type: 'array', items: { type: 'string', format: 'uuid' } },
     },
   },
   response: { 201: couponResponse },
@@ -158,6 +163,9 @@ export const updateCouponSchema = {
       validFrom:       { type: 'string', format: 'date-time' },
       validUntil:      { type: 'string', format: 'date-time' },
       isActive:        { type: 'boolean' },
+      targetType:      { type: 'string', enum: ['ALL', 'SEGMENT', 'INDIVIDUAL', 'FIRST_TIME'] },
+      targetSegmentId: { type: 'string', format: 'uuid' },
+      targetUserIds:   { type: 'array', items: { type: 'string', format: 'uuid' } },
     },
   },
   response: { 200: couponResponse },
