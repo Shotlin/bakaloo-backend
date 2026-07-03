@@ -1,5 +1,6 @@
 import { FeeSettingsRepository } from './fee-settings.repository.js'
 import { logger } from '../../config/logger.js'
+import { cacheDeletePattern } from '../../utils/cache.js'
 
 /**
  * Fee Settings service — read/write the canonical fee configuration.
@@ -28,6 +29,14 @@ export class FeeSettingsService {
   /** Update the GLOBAL config. */
   async updateGlobal(data, actor = null) {
     const updated = await this.repo.updateGlobal(data, actor?.id || null)
+
+    // The public GET /theme/tabs response embeds delivery_eta_minutes from
+    // this GLOBAL config (see public.controller.js#getTabThemes) and caches
+    // it for 300s — without this, an admin's change here wouldn't reach the
+    // app's home screen for up to 5 minutes.
+    await cacheDeletePattern('bakaloo:tab_manifest:*')
+    await cacheDeletePattern('bakaloo:tab_home:*')
+
     logger.info(
       { userId: actor?.id || null, action: 'fee_settings_updated', scope: 'GLOBAL' },
       'Fee settings updated'

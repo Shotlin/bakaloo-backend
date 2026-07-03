@@ -10,6 +10,7 @@ import {
   getTabManifestCacheKey,
 } from './theme-cache.js'
 import { STORE_KEYS } from '../theme-tabs/theme-tabs.shared.js'
+import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 
 const CACHE_TTL = 300
 
@@ -43,6 +44,10 @@ const HOME_CAPS = {
 const HOME_MANIFEST_SECTION_CAP = 12
 
 export class PublicThemeController {
+  constructor() {
+    this.feeSettingsService = new FeeSettingsService()
+  }
+
   async getActiveTheme(request, reply) {
     const cached = await redis.get(ACTIVE_THEME_CACHE_KEY)
     if (cached) {
@@ -84,6 +89,16 @@ export class PublicThemeController {
 
     const rows = await getTabManifestRows(storeKey)
     const responseData = buildTabManifestResponse(storeKey, rows)
+
+    // Admin-configurable delivery-time display badge (e.g. "45 mins
+    // delivery") shown on the app's home header — a plain manually-set
+    // number, not a computed ETA. Reuses fee_settings.delivery_eta_minutes
+    // (already existed, "display only" per migration 055) rather than a
+    // new column; this is a GLOBAL value so it's a top-level sibling of
+    // store_key/tabs, not nested per-tab.
+    const feeSettings = await this.feeSettingsService.getGlobal()
+    responseData.delivery_eta_minutes = feeSettings.delivery_eta_minutes ?? null
+
     const etag = createHash('md5').update(JSON.stringify(responseData)).digest('hex')
 
     await redis.set(
