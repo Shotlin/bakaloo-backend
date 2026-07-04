@@ -32,12 +32,39 @@ async function errorHandlerPlugin(fastify) {
       })
     }
 
+    // 401/403 from a *thrown* error (as opposed to an explicit
+    // `reply.code(401).send(...)`, which never reaches this handler) is
+    // trustworthy only when it's a genuine Fastify/plugin error — those
+    // carry a `FST_`-prefixed `code` (e.g. the JWT plugin's expired/
+    // invalid-token errors). Third-party SDKs (Razorpay, etc.) throw
+    // errors whose `statusCode` mirrors THEIR API's response, not ours
+    // — a Razorpay account misconfiguration returning 401 must not be
+    // forwarded as if the customer's own session were invalid, or every
+    // provider-side outage looks like "you're logged out" to the app.
+    const isTrustedAuthStatus =
+      (statusCode !== 401 && statusCode !== 403) ||
+      (typeof code === 'string' && code.startsWith('FST_'))
+
     // Known HTTP errors
-    if (statusCode < 500) {
+    if (statusCode < 500 && isTrustedAuthStatus) {
       return reply.code(statusCode).send({
         success: false,
         message,
         code: code || 'ERROR',
+      })
+    }
+
+    if (statusCode < 500) {
+      // Untrusted 401/403 from an unrecognized thrown error — surface as
+      // a normal failed-request 502, not a fake auth rejection.
+      request.log.error(
+        { err: error, statusCode },
+        'Non-Fastify error carried a 401/403 statusCode — remapped to 502'
+      )
+      return reply.code(502).send({
+        success: false,
+        message: 'A required service is temporarily unavailable. Please try again shortly.',
+        code: 'UPSTREAM_ERROR',
       })
     }
 

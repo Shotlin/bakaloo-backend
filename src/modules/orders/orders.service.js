@@ -26,6 +26,8 @@ import { PaymentSettingsService } from '../payment-settings/payment-settings.ser
 import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
+import { getStoreStatusService } from '../store-status/store-status.routes.js'
+import { getDeliveryCalendarService } from '../delivery-calendar/delivery-calendar.routes.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -104,6 +106,14 @@ export class OrdersService {
     this.cashbackService = options.cashbackService || new CashbackService()
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService()
+    // Resolved lazily via the shared singleton getters (not `new`d here) so
+    // every module reads/writes the same store-status/calendar state —
+    // mirrors how getStoreStatusService()/getDeliveryCalendarService() are
+    // consumed elsewhere (banners, the calendar's own public route).
+    this.storeStatusService =
+      options.storeStatusService || getStoreStatusService()
+    this.deliveryCalendarService =
+      options.deliveryCalendarService || getDeliveryCalendarService()
   }
 
   /**
@@ -147,6 +157,8 @@ export class OrdersService {
       scheduledSlotStart,
       scheduledSlotEnd,
       scheduledSlotLabel,
+      // Quick Delivery — explicit opt-in only, never a silent default fee.
+      quickDeliverySelected,
     } = body
 
     // Validate delivery slot
@@ -190,15 +202,29 @@ export class OrdersService {
           code: 'INVALID_SLOT_RANGE',
         }
       }
-      // Max 7 days ahead
-      const maxAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+      // Max ahead = however far the admin has actually generated the
+      // delivery calendar (was a hardcoded 7 days; the calendar now
+      // genuinely extends forward, so this reflects that instead of
+      // silently re-imposing the old cap).
+      const maxAhead = await this._resolveMaxScheduledAhead(now)
       if (slotStart > maxAhead) {
         return {
           success: false,
-          message: 'Scheduled delivery cannot be more than 7 days in the future',
+          message: 'Scheduled delivery time is beyond the currently available calendar',
           code: 'SLOT_TOO_FAR_AHEAD',
         }
       }
+    }
+
+    // Closed-store gate: an ASAP order must not be accepted while the store
+    // is closed (manual override or outside weekly hours) — the mobile app
+    // steers customers to SCHEDULED before submit, but the API must not
+    // trust the client alone. Scheduled orders are unaffected — a customer
+    // can always book a future slot regardless of whether the store happens
+    // to be closed at the moment they're checking out.
+    if (resolvedDeliveryMode === 'ASAP') {
+      const storeClosedFailure = await this._checkStoreOpenForAsap()
+      if (storeClosedFailure) return storeClosedFailure
     }
 
     // 1. Validate cart (re-checks allocations, shop active, stock,
@@ -410,6 +436,10 @@ export class OrdersService {
       // Tip applies to a single order only (single-shop checkouts).
       tipAmount: orderTipAmount,
       tipShopId: groupedByShop.size === 1 ? Array.from(groupedByShop.keys())[0] : null,
+      // Quick Delivery surcharge — only meaningful for ASAP orders, same
+      // single-shop assignment convention as tip.
+      quickDeliverySelected: resolvedDeliveryMode === 'ASAP' && !!quickDeliverySelected,
+      quickDeliveryShopId: groupedByShop.size === 1 ? Array.from(groupedByShop.keys())[0] : null,
     }
 
     // 5. Transaction: split + create orders + decrement stock atomically
@@ -636,6 +666,39 @@ export class OrdersService {
   _toNumber(value, fallback = 0) {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  /**
+   * The furthest a SCHEDULED slot may start — however far the admin has
+   * actually generated the delivery calendar. Falls back to the old
+   * hardcoded 7-day cap only if the calendar has genuinely never been
+   * generated (defensive; the generation worker runs on every boot).
+   */
+  async _resolveMaxScheduledAhead(now) {
+    const maxGeneratedDate = await this.deliveryCalendarService.getMaxGeneratedDate()
+    if (!maxGeneratedDate) {
+      return new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+    }
+    const dateStr =
+      maxGeneratedDate instanceof Date
+        ? maxGeneratedDate.toISOString().slice(0, 10)
+        : maxGeneratedDate
+    return new Date(`${dateStr}T23:59:59.999Z`)
+  }
+
+  /**
+   * Blocks ASAP ordering while the store is closed. Returns a
+   * `{ success: false, ... }` payload (matching every other early-return
+   * in `placeOrder`) when closed, or `null` when it's fine to proceed.
+   */
+  async _checkStoreOpenForAsap() {
+    const { isOpen } = await this.storeStatusService.isOpen()
+    if (isOpen) return null
+    return {
+      success: false,
+      message: 'The store is currently closed. Please choose a scheduled delivery time instead.',
+      code: 'STORE_CLOSED_ASAP_UNAVAILABLE',
+    }
   }
 
   /**

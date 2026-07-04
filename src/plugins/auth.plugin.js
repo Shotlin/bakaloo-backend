@@ -4,6 +4,7 @@ import cookie from '@fastify/cookie'
 import { env } from '../config/env.js'
 import { query } from '../config/database.js'
 import { ERROR_CODES } from '../constants/errors.js'
+import { logger } from '../config/logger.js'
 
 /**
  * Auth plugin — registers JWT + Cookie support
@@ -104,6 +105,14 @@ async function authPlugin(fastify) {
         }
       }
     } catch (err) {
+      // `err.name` distinguishes TokenExpiredError / JsonWebTokenError /
+      // NotBeforeError from unrelated failures (e.g. the DB lookup above
+      // throwing). Logged at warn so production auth failures are
+      // diagnosable without guessing from response timing alone.
+      logger.warn(
+        { err: err.message, name: err.name, path: request.url },
+        'Authenticate preHandler rejected request'
+      )
       reply.code(401).send({
         success: false,
         message: 'Unauthorized — invalid or expired token',

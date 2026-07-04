@@ -55,16 +55,34 @@ export class PaymentsService {
       return { success: false, message: 'Payment already completed' }
     }
 
-    // Create Razorpay order
-    const rzpOrder = await razorpay.orders.create({
-      amount: Math.round(order.totalAmount * 100), // paise
-      currency: 'INR',
-      receipt: order.orderNumber,
-      notes: {
-        orderId: order.id,
-        userId,
-      },
-    })
+    // Create Razorpay order. The razorpay SDK throws errors carrying a
+    // `statusCode` mirrored from Razorpay's own API response (e.g. 401
+    // when our API credentials are rejected) — left uncaught, that
+    // error reaches the global error handler, which forwards
+    // `error.statusCode` verbatim (errorHandler.plugin.js). A 401 from
+    // Razorpay would then look identical to the customer's own session
+    // being invalid, sending them on a wild goose chase re-logging in
+    // for a problem that's actually on our Razorpay account config.
+    // Catching here keeps upstream provider failures mapped to this
+    // module's normal `{ success: false }` contract (→ HTTP 400).
+    let rzpOrder
+    try {
+      rzpOrder = await razorpay.orders.create({
+        amount: Math.round(order.totalAmount * 100), // paise
+        currency: 'INR',
+        receipt: order.orderNumber,
+        notes: {
+          orderId: order.id,
+          userId,
+        },
+      })
+    } catch (err) {
+      logger.error(
+        { err: err.error || err.message, statusCode: err.statusCode, orderId },
+        'Razorpay order creation failed'
+      )
+      return { success: false, message: 'Unable to start online payment right now. Please try again shortly.' }
+    }
 
     // Payment expires in 15 minutes — after this the cleanup worker will
     // cancel the order and release any reserved stock.

@@ -30,6 +30,7 @@ export const FEE_CODES = Object.freeze({
   SMALL_CART: 'SMALL_CART_FEE',
   SURGE: 'SURGE_FEE',
   PACKAGING: 'PACKAGING_FEE',
+  QUICK_DELIVERY: 'QUICK_DELIVERY_SURCHARGE',
 })
 
 export class TotalsEngine {
@@ -177,6 +178,7 @@ export class TotalsEngine {
     tipAmount = 0,
     storeName = null,
     forceFreeDelivery = false,
+    quickDeliverySelected = false,
   }) {
     const subtotal = this._round(itemsSubtotal)
     const eligibleSubtotal = subtotal // post item-discount, pre fees, pre coupon
@@ -293,12 +295,32 @@ export class TotalsEngine {
       }
     }
 
+    // ── Quick Delivery surcharge ──────────────────────────────
+    // Double-gated: only applies when the admin has enabled it AND the
+    // customer explicitly opted into Quick Delivery — never a silent
+    // default fee on a plain ASAP order (confirmed product decision).
+    let quickDeliverySurcharge = 0
+    if (config.quick_delivery_surcharge_enabled && quickDeliverySelected) {
+      quickDeliverySurcharge = this._round(config.quick_delivery_surcharge_amount)
+      if (quickDeliverySurcharge > 0) {
+        fees.push({
+          code: FEE_CODES.QUICK_DELIVERY,
+          label: config.quick_delivery_surcharge_label || 'Quick delivery fee',
+          amount: quickDeliverySurcharge,
+          originalAmount: quickDeliverySurcharge,
+          waived: false,
+          description: 'Charged for immediate/priority delivery.',
+          metadata: {},
+        })
+      }
+    }
+
     const couponDisc = this._round(Math.max(0, this._num(couponDiscount)))
     const taxAmount = this._round(tax)
     const tip = this._round(Math.max(0, this._num(tipAmount)))
 
     const feesTotal = this._round(
-      delivery.amount + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee
+      delivery.amount + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge
     )
 
     let totalPayable = this._round(
@@ -335,6 +357,7 @@ export class TotalsEngine {
       smallCartFee,
       surgeFee,
       packagingFee,
+      quickDeliverySurcharge,
       tax: taxAmount,
       tipAmount: tip,
       totalSavings,

@@ -126,6 +126,24 @@ export class AdminOrdersRepository {
     }
   }
 
+  /** Plain field update — no status-machine transition involved, unlike updateStatus(). */
+  async rescheduleDelivery(orderId, { scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel }) {
+    const { rows } = await query(
+      `UPDATE orders
+       SET delivery_mode = 'SCHEDULED',
+           scheduled_delivery_at = $1,
+           scheduled_slot_start = $1,
+           scheduled_slot_end = $2,
+           scheduled_slot_label = $3,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, user_id, rider_id, order_number, status,
+                 scheduled_slot_start, scheduled_slot_end, scheduled_slot_label`,
+      [scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel, orderId]
+    )
+    return rows[0] || null
+  }
+
   async assignRider(orderId, riderId) {
     const client = await getClient()
     try {

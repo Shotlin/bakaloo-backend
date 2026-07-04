@@ -34,15 +34,15 @@ export class OrdersRepository {
         delivery_notes, estimated_delivery,
         handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
         delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
-        fee_breakdown
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+        fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
       RETURNING id, order_number, user_id, shop_id, rider_id, status, items,
                 subtotal, discount_amount, delivery_fee, platform_fee, tax_amount, total_amount,
                 payment_method, payment_status, coupon_code, delivery_address, delivery_notes,
                 estimated_delivery, delivered_at, proof_photo_url, cancelled_reason,
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
                 delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
-                fee_breakdown,
+                fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount,
                 created_at, updated_at`,
       [
         orderData.orderNumber,
@@ -73,6 +73,8 @@ export class OrdersRepository {
         orderData.scheduledSlotEnd || null,
         orderData.scheduledSlotLabel || null,
         JSON.stringify(orderData.feeBreakdown || {}),
+        orderData.quickDeliverySelected || false,
+        orderData.quickDeliverySurchargeAmount || 0,
       ]
     )
 
@@ -591,6 +593,8 @@ export class OrdersRepository {
       scheduledSlotStart: row.scheduled_slot_start || null,
       scheduledSlotEnd: row.scheduled_slot_end || null,
       scheduledSlotLabel: row.scheduled_slot_label || null,
+      quickDeliverySelected: row.quick_delivery_selected || false,
+      quickDeliverySurchargeAmount: parseFloat(row.quick_delivery_surcharge_amount || 0),
       feeBreakdown:
         row.fee_breakdown == null
           ? null

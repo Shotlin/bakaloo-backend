@@ -179,6 +179,12 @@ export const validateCartSchema = {
 export const getCartSummarySchema = {
   tags: ['Cart'],
   summary: 'Get full bill summary with fees, savings, and delivery estimate',
+  querystring: {
+    type: 'object',
+    properties: {
+      quickDeliverySelected: { type: 'boolean', default: false },
+    },
+  },
   response: {
     200: {
       type: 'object',

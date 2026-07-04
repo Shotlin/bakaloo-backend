@@ -8,7 +8,7 @@ export class AdminBannersRepository {
               COALESCE(cta_text, 'none') AS link_type,
               cta_link AS link_value,
               display_order AS sort_order,
-              is_active, start_date, end_date, created_at, updated_at
+              is_active, start_date, end_date, trigger_type, created_at, updated_at
        FROM banners ORDER BY display_order ASC, created_at DESC`
     )
     return rows
@@ -21,37 +21,38 @@ export class AdminBannersRepository {
               COALESCE(cta_text, 'none') AS link_type,
               cta_link AS link_value,
               display_order AS sort_order,
-              is_active, start_date, end_date, created_at, updated_at
+              is_active, start_date, end_date, trigger_type, created_at, updated_at
        FROM banners WHERE id = $1`,
       [id]
     )
     return b || null
   }
 
-  async create({ title, subtitle, imageUrl, ctaText, ctaLink, bannerType, isActive, startDate, endDate }) {
+  async create({ title, subtitle, imageUrl, ctaText, ctaLink, bannerType, isActive, startDate, endDate, triggerType }) {
     // Get the highest display_order
     const { rows: [{ max: maxOrder }] } = await query('SELECT COALESCE(MAX(display_order), 0) AS max FROM banners')
     const { rows: [b] } = await query(
-      `INSERT INTO banners (title, subtitle, image_url, cta_text, cta_link, banner_type, is_active, start_date, end_date, display_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO banners (title, subtitle, image_url, cta_text, cta_link, banner_type, is_active, start_date, end_date, display_order, trigger_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, title, subtitle, image_url,
                 CASE WHEN banner_type = 'hero' THEN 'carousel' ELSE COALESCE(banner_type, 'carousel') END AS banner_type,
                 COALESCE(cta_text, 'none') AS link_type,
                 cta_link AS link_value,
                 display_order AS sort_order,
-                is_active, start_date, end_date, created_at, updated_at`,
-      [title, subtitle || null, imageUrl, ctaText || null, ctaLink || null, bannerType || 'hero', isActive !== false, startDate || null, endDate || null, (maxOrder || 0) + 1]
+                is_active, start_date, end_date, trigger_type, created_at, updated_at`,
+      [title, subtitle || null, imageUrl, ctaText || null, ctaLink || null, bannerType || 'hero', isActive !== false, startDate || null, endDate || null, (maxOrder || 0) + 1, triggerType || 'ALWAYS']
     )
     return b
   }
 
   async update(id, data) {
     const sets = []; const params = []; let idx = 1
-    const fields = ['title', 'subtitle', 'image_url', 'cta_text', 'cta_link', 'banner_type', 'is_active', 'start_date', 'end_date']
+    const fields = ['title', 'subtitle', 'image_url', 'cta_text', 'cta_link', 'banner_type', 'is_active', 'start_date', 'end_date', 'trigger_type']
     const bodyMap = {
       title: 'title', subtitle: 'subtitle', image_url: 'imageUrl',
       cta_text: 'ctaText', cta_link: 'ctaLink', banner_type: 'bannerType',
       is_active: 'isActive', start_date: 'startDate', end_date: 'endDate',
+      trigger_type: 'triggerType',
     }
 
     for (const col of fields) {
@@ -72,7 +73,7 @@ export class AdminBannersRepository {
                 COALESCE(cta_text, 'none') AS link_type,
                 cta_link AS link_value,
                 display_order AS sort_order,
-                is_active, start_date, end_date, created_at, updated_at`,
+                is_active, start_date, end_date, trigger_type, created_at, updated_at`,
       params
     )
     return b
@@ -114,6 +115,29 @@ export class AdminBannersRepository {
          AND (start_date IS NULL OR start_date <= NOW())
          AND (end_date IS NULL OR end_date >= NOW())
        ORDER BY display_order ASC`
+    )
+    return rows
+  }
+
+  /**
+   * Same as findActive() but also applies each banner's trigger_type:
+   * 'ALWAYS' banners always qualify; 'STORE_CLOSED' banners only qualify
+   * when the store is currently closed.
+   */
+  async findActiveForStoreStatus(isOpen) {
+    const { rows } = await query(
+      `SELECT id, title, subtitle, image_url,
+              CASE WHEN banner_type = 'hero' THEN 'carousel' ELSE COALESCE(banner_type, 'carousel') END AS banner_type,
+              COALESCE(cta_text, 'none') AS link_type,
+              cta_link AS link_value,
+              trigger_type
+       FROM banners
+       WHERE is_active = true
+         AND (start_date IS NULL OR start_date <= NOW())
+         AND (end_date IS NULL OR end_date >= NOW())
+         AND (trigger_type = 'ALWAYS' OR (trigger_type = 'STORE_CLOSED' AND $1 = false))
+       ORDER BY display_order ASC`,
+      [isOpen]
     )
     return rows
   }

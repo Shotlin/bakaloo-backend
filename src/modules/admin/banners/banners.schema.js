@@ -21,6 +21,7 @@ export const createBannerSchema = {
       isActive: { type: 'boolean', default: true },
       startDate: { type: 'string', format: 'date-time' },
       endDate: { type: 'string', format: 'date-time' },
+      triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'], default: 'ALWAYS' },
     },
   },
 }
@@ -42,6 +43,7 @@ export const updateBannerSchema = {
       isActive: { type: 'boolean' },
       startDate: { type: ['string', 'null'], format: 'date-time' },
       endDate: { type: ['string', 'null'], format: 'date-time' },
+      triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'] },
     },
   },
 }

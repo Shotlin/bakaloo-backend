@@ -1,10 +1,19 @@
 import { AdminBannersRepository } from './banners.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../../config/cloudinary.js'
+import { getStoreStatusService } from '../../store-status/store-status.routes.js'
 
 const repo = new AdminBannersRepository()
 
 export class AdminBannersService {
+  constructor(storeStatusService = null) {
+    this._storeStatusService = storeStatusService
+  }
+
+  get storeStatusService() {
+    return this._storeStatusService || getStoreStatusService()
+  }
+
   async list() {
     return this._normalizeBanners(await repo.findAll())
   }
@@ -24,6 +33,7 @@ export class AdminBannersService {
       isActive: data.isActive,
       startDate: data.startDate,
       endDate: data.endDate,
+      triggerType: data.triggerType,
     }
     const banner = await repo.create(mapped)
     logAdminActivity(adminId, 'CREATE_BANNER', 'banner', banner.id, null, null, ip)
@@ -40,6 +50,7 @@ export class AdminBannersService {
       ...(data.isActive !== undefined && { isActive: data.isActive }),
       ...(data.startDate !== undefined && { startDate: data.startDate }),
       ...(data.endDate !== undefined && { endDate: data.endDate }),
+      ...(data.triggerType !== undefined && { triggerType: data.triggerType }),
     }
     const banner = await repo.update(id, mapped)
     logAdminActivity(adminId, 'UPDATE_BANNER', 'banner', id, null, null, ip)
@@ -60,6 +71,16 @@ export class AdminBannersService {
 
   async getActive() {
     return this._normalizeBanners(await repo.findActive())
+  }
+
+  /**
+   * Public-facing banner list filtered by each banner's trigger_type against
+   * the current store-open/closed state — 'ALWAYS' banners always included,
+   * 'STORE_CLOSED' banners only included while the store is closed.
+   */
+  async getActiveForStoreStatus() {
+    const { isOpen } = await this.storeStatusService.isOpen()
+    return this._normalizeBanners(await repo.findActiveForStoreStatus(isOpen))
   }
 
   _normalizeBanners(banners = []) {

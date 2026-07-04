@@ -48,7 +48,7 @@ export class BillSummaryService {
    * @param {string} userId
    * @param {string|null} [addressId] - optional selected address; defaults to the user's default address
    */
-  async getBillSummary(userId, addressId = null) {
+  async getBillSummary(userId, addressId = null, { quickDeliverySelected = false } = {}) {
     const cart = await this.cartService.getCart(userId)
     const paymentConfig = await this.paymentSettingsService.getConfig()
     if (!cart.items || cart.items.length === 0) {
@@ -125,6 +125,7 @@ export class BillSummaryService {
       distanceKm: primaryDistanceKm,
       tipAmount,
       storeName: primaryStoreName,
+      quickDeliverySelected,
     })
 
     // Override the aggregate's per-fee numbers with the summed per-shop values
@@ -140,12 +141,17 @@ export class BillSummaryService {
     aggregate.freeDelivery.amountToUnlock = aggregate.deliveryFeeWaived ? 0 : amountToUnlock
     aggregate.freeDelivery.unlocked = aggregate.deliveryFeeWaived
 
+    // Quick Delivery surcharge is order-level (not per-shop-distance like
+    // delivery fee), so the aggregate breakdown's own value is authoritative
+    // — no per-shop summing needed, unlike the fees above.
+    const quickDeliverySurcharge = aggregate.quickDeliverySurcharge || 0
+
     const feesTotal = this._round(
-      deliveryFee + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee
+      deliveryFee + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge
     )
     const toPayFinal = this._round(itemTotalDiscounted + feesTotal + tipAmount)
     const toPayOriginal = this._round(
-      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + tipAmount
+      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + tipAmount
     )
     aggregate.totalPayable = toPayFinal
     aggregate.itemsSubtotal = itemTotalDiscounted
@@ -162,6 +168,7 @@ export class BillSummaryService {
       smallCartFee,
       surgeFee,
       packagingFee,
+      quickDeliverySurcharge,
       distanceKm: primaryDistanceKm,
       storeName: primaryStoreName,
       amountToUnlock,
@@ -253,6 +260,14 @@ export class BillSummaryService {
       totalPayable: toPayFinal,
       paymentMethods: this._buildPaymentMethods(paymentConfig, toPayFinal),
       cartMilestone,
+      // Whether the "Quick Delivery" opt-in is available at all right now —
+      // independent of the fees[] line, which only appears once the
+      // customer has actually selected it (see quickDeliverySelected param).
+      quickDelivery: {
+        enabled: !!config.quick_delivery_surcharge_enabled,
+        amount: this._toNumber(config.quick_delivery_surcharge_amount) || 0,
+        label: config.quick_delivery_surcharge_label || 'Quick delivery fee',
+      },
     }
   }
 
@@ -298,6 +313,7 @@ export class BillSummaryService {
     smallCartFee,
     surgeFee,
     packagingFee,
+    quickDeliverySurcharge = 0,
     distanceKm,
     storeName,
     amountToUnlock,
@@ -371,6 +387,17 @@ export class BillSummaryService {
         originalAmount: packagingFee,
         waived: false,
         description: config.packaging_fee_description || 'Covers packaging materials.',
+        metadata: {},
+      })
+    }
+    if (quickDeliverySurcharge > 0) {
+      fees.push({
+        code: 'QUICK_DELIVERY_SURCHARGE',
+        label: config.quick_delivery_surcharge_label || 'Quick delivery fee',
+        amount: quickDeliverySurcharge,
+        originalAmount: quickDeliverySurcharge,
+        waived: false,
+        description: 'Charged for immediate/priority delivery.',
         metadata: {},
       })
     }
@@ -489,6 +516,7 @@ export class BillSummaryService {
       totalPayable: 0,
       paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
       cartMilestone: { unlocked: null, next: null, ladder: [] },
+      quickDelivery: { enabled: false, amount: 0, label: 'Quick delivery fee' },
     }
   }
 

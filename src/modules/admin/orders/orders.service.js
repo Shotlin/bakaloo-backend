@@ -91,6 +91,61 @@ export class AdminOrdersService {
     return { orderId, oldStatus, newStatus }
   }
 
+  /**
+   * Change an order's scheduled delivery slot after the fact — the
+   * mistake-correction path (e.g. store closed unexpectedly and existing
+   * pending orders need their promised slot pushed). Not a status
+   * transition, so it doesn't go through ALLOWED_TRANSITIONS; instead it's
+   * blocked once the order has reached a state where delivery timing is
+   * no longer meaningful to change.
+   */
+  async rescheduleDelivery(orderId, { scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel, reason }, adminId, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+
+    const TERMINAL_STATUSES = new Set(['OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED', 'REFUNDED'])
+    if (TERMINAL_STATUSES.has(order.status)) {
+      throw {
+        statusCode: 400,
+        message: `Cannot reschedule delivery for an order that is ${order.status}`,
+      }
+    }
+
+    const before = {
+      deliveryMode: order.delivery_mode,
+      scheduledSlotStart: order.scheduled_slot_start,
+      scheduledSlotEnd: order.scheduled_slot_end,
+      scheduledSlotLabel: order.scheduled_slot_label,
+    }
+
+    const updated = await this.repository.rescheduleDelivery(orderId, {
+      scheduledSlotStart,
+      scheduledSlotEnd,
+      scheduledSlotLabel,
+    })
+
+    logAdminActivity(
+      adminId,
+      `Order delivery rescheduled${reason ? `: ${reason}` : ''}`,
+      'order',
+      orderId,
+      before,
+      { deliveryMode: 'SCHEDULED', scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel },
+      ip
+    )
+
+    await notificationQueue.add('order-rescheduled', {
+      orderId,
+      userId: order.user_id,
+      orderNumber: order.order_number,
+      scheduledSlotLabel,
+    })
+
+    this._emitOrderStatus(order, order.status) // status unchanged — just refresh delivery info
+
+    return updated
+  }
+
   async assignRider(orderId, riderId, adminId, ip) {
     const order = await this.repository.findById(orderId)
     if (!order) throw { statusCode: 404, message: 'Order not found' }

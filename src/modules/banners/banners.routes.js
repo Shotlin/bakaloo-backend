@@ -5,7 +5,7 @@ const svc = new AdminBannersService()
 
 export default async function bannerRoutes(fastify) {
   fastify.get('/', async (request, reply) => {
-    const banners = await svc.getActive()
+    const banners = await svc.getActiveForStoreStatus()
     return success(banners, 'Active banners fetched')
   })
 }

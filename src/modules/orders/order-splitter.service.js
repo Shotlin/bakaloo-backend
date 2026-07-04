@@ -176,6 +176,13 @@ export class OrderSplitterService {
         ? Number(feeContext.tipAmount || 0)
         : 0
 
+    // Quick Delivery surcharge (opt-in ASAP upgrade) — same single-shop
+    // assignment convention as tip/coupon above.
+    const quickDeliverySelected =
+      feeContext.quickDeliveryShopId && feeContext.quickDeliveryShopId === shopId
+        ? !!feeContext.quickDeliverySelected
+        : false
+
     // A coupon (FREE_DELIVERY discountType) or first-time-offer
     // (FREE_DELIVERY rewardType) can waive delivery for this order,
     // scoped to the same single shop the coupon/offer was resolved
@@ -207,6 +214,8 @@ export class OrderSplitterService {
         savingsTotal: couponDiscount,
         totalAmount: totalAmount < 0 ? 0 : totalAmount,
         feeBreakdown: null,
+        quickDeliverySelected: false,
+        quickDeliverySurchargeAmount: 0,
       }
     }
 
@@ -233,6 +242,7 @@ export class OrderSplitterService {
       tipAmount,
       storeName: coords?.name || null,
       forceFreeDelivery: freeDeliveryOverride,
+      quickDeliverySelected,
     })
 
     return {
@@ -249,6 +259,8 @@ export class OrderSplitterService {
       savingsTotal: breakdown.totalSavings,
       totalAmount: breakdown.totalPayable,
       feeBreakdown: breakdown,
+      quickDeliverySelected,
+      quickDeliverySurchargeAmount: breakdown.quickDeliverySurcharge || 0,
     }
   }
 
@@ -486,6 +498,10 @@ export class OrderSplitterService {
           scheduledSlotStart: checkoutMeta.scheduledSlotStart || null,
           scheduledSlotEnd: checkoutMeta.scheduledSlotEnd || null,
           scheduledSlotLabel: checkoutMeta.scheduledSlotLabel || null,
+          // Quick Delivery surcharge — snapshot of what was actually charged,
+          // survives later config changes (same principle as scheduledSlotLabel).
+          quickDeliverySelected: fees.quickDeliverySelected || false,
+          quickDeliverySurchargeAmount: fees.quickDeliverySurchargeAmount || 0,
         },
         orderItems
       )

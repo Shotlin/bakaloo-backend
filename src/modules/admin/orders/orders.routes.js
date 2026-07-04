@@ -6,6 +6,7 @@ import {
   updateStatusSchema, assignRiderSchema, bulkAssignSchema,
   manualOrderSchema, invoiceSchema, packingSlipSchema, exportSchema,
   refundOrderSchema, cancelOrderSchema, bulkStatusSchema,
+  rescheduleOrderSchema,
 } from './orders.schema.js'
 
 /**
@@ -25,6 +26,7 @@ export default async function adminOrdersRoutes(fastify) {
   fastify.post('/bulk-assign', { schema: bulkAssignSchema, preHandler: adminAuth }, ctrl.bulkAssign.bind(ctrl))
   fastify.get('/:id', { schema: orderDetailSchema, preHandler: adminAuth }, ctrl.findById.bind(ctrl))
   fastify.put('/:id/status', { schema: updateStatusSchema, preHandler: adminAuth }, ctrl.updateStatus.bind(ctrl))
+  fastify.put('/:id/reschedule', { schema: rescheduleOrderSchema, preHandler: adminAuth }, ctrl.rescheduleDelivery.bind(ctrl))
   fastify.put('/:id/assign-rider', { schema: assignRiderSchema, preHandler: adminAuth }, ctrl.assignRider.bind(ctrl))
   fastify.get('/:id/invoice', { schema: invoiceSchema, preHandler: adminAuth }, ctrl.getInvoice.bind(ctrl))
   fastify.get('/:id/packing-slip', { schema: packingSlipSchema, preHandler: adminAuth }, ctrl.getPackingSlip.bind(ctrl))

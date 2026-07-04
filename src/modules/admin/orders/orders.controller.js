@@ -34,6 +34,21 @@ export class AdminOrdersController {
     }
   }
 
+  async rescheduleDelivery(request, reply) {
+    try {
+      const { scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel, reason } = request.body
+      const data = await this.service.rescheduleDelivery(
+        request.params.id,
+        { scheduledSlotStart, scheduledSlotEnd, scheduledSlotLabel, reason },
+        request.user.id,
+        request.ip
+      )
+      return reply.send(success(data, 'Delivery rescheduled'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
   async assignRider(request, reply) {
     try {
       const { riderId } = request.body

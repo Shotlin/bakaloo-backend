@@ -18,7 +18,9 @@ export class CartController {
 
   /** GET /summary */
   async getSummary(request, reply) {
-    const summary = await this.billSummaryService.getBillSummary(request.user.id)
+    const summary = await this.billSummaryService.getBillSummary(request.user.id, null, {
+      quickDeliverySelected: Boolean(request.query?.quickDeliverySelected),
+    })
     return reply.code(200).send(success(summary, 'Bill summary fetched'))
   }
 

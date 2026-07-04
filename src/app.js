@@ -184,9 +184,17 @@ export const buildApp = async () => {
     prefix: '/api/v1/delivery',
   })
 
-  // Delivery Slots — available time windows for scheduled delivery
-  await app.register(import('./modules/orders/delivery-slots.routes.js'), {
+  // Delivery Slots — admin-managed calendar (replaces the old hardcoded
+  // orders/delivery-slots.routes.js generator, same path/response shape).
+  const { publicDeliveryCalendarRoutes } = await import('./modules/delivery-calendar/delivery-calendar.routes.js')
+  await app.register(publicDeliveryCalendarRoutes, {
     prefix: '/api/v1/delivery',
+  })
+
+  // Store Status (public) — is the storefront currently open
+  const { publicStoreStatusRoutes } = await import('./modules/store-status/store-status.routes.js')
+  await app.register(publicStoreStatusRoutes, {
+    prefix: '/api/v1/store',
   })
 
   // Shops — multi-vendor system
@@ -356,6 +364,18 @@ export const buildApp = async () => {
   // Fee Settings (admin) — canonical dynamic fee + distance-based delivery engine
   await app.register(import('./modules/fee-settings/fee-settings.routes.js'), {
     prefix: '/api/v1/admin/fee-settings',
+  })
+
+  // Store Status (admin) — manual open/closed override + weekly hours
+  const { adminStoreStatusRoutes } = await import('./modules/store-status/store-status.routes.js')
+  await app.register(adminStoreStatusRoutes, {
+    prefix: '/api/v1/admin/store-status',
+  })
+
+  // Delivery Calendar (admin) — weekly template + per-date overrides
+  const { adminDeliveryCalendarRoutes } = await import('./modules/delivery-calendar/delivery-calendar.routes.js')
+  await app.register(adminDeliveryCalendarRoutes, {
+    prefix: '/api/v1/admin/delivery-calendar',
   })
 
   // Wallet Settings (admin) — max wallet balance + transfer amount limits

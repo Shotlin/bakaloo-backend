@@ -56,6 +56,31 @@ describe('FeeSettingsService.updateGlobal — home-section cache invalidation (p
   })
 })
 
+describe('FeeSettingsService — Quick Delivery surcharge defaults (positive)', () => {
+  it('_safeDefault() disables the surcharge by default so ASAP orders are never silently charged', async () => {
+    const repo = makeRepoMock({ getGlobal: vi.fn().mockResolvedValue(null) })
+    const service = new FeeSettingsService(repo)
+
+    const config = await service.getGlobal()
+
+    expect(config.quick_delivery_surcharge_enabled).toBe(false)
+    expect(config.quick_delivery_surcharge_amount).toBe(0)
+    expect(config.quick_delivery_surcharge_label).toBe('Quick delivery fee')
+  })
+
+  it('resolveForShop() falls back to the same safe surcharge defaults when no row exists', async () => {
+    const repo = makeRepoMock({
+      resolveForShop: vi.fn().mockResolvedValue({ config: null, source: 'GLOBAL' }),
+    })
+    const service = new FeeSettingsService(repo)
+
+    const { config, source } = await service.resolveForShop('shop-1')
+
+    expect(source).toBe('DEFAULT')
+    expect(config.quick_delivery_surcharge_enabled).toBe(false)
+  })
+})
+
 describe('FeeSettingsService.updateShop — scoped to a shop, does not touch the global home caches', () => {
   it('does not invalidate tab_manifest/tab_home (delivery_eta_minutes is a GLOBAL-only field)', async () => {
     const repo = makeRepoMock({ upsertShop: vi.fn().mockResolvedValue({ id: 'shop-config' }) })

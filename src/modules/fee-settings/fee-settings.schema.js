@@ -62,6 +62,12 @@ export const updateFeeSettingsSchema = z
 
     // ETA (display only)
     delivery_eta_minutes: z.number().int().min(0).max(100000),
+
+    // Quick Delivery surcharge — flat, only charged when the customer
+    // explicitly opts into "Quick Delivery" at checkout.
+    quick_delivery_surcharge_enabled: z.boolean(),
+    quick_delivery_surcharge_amount: nonNegative.max(10000),
+    quick_delivery_surcharge_label: label,
   })
   .partial()
   .superRefine((data, ctx) => {

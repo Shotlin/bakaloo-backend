@@ -39,6 +39,22 @@ export const updateStatusSchema = {
   },
 }
 
+export const rescheduleOrderSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Change an order\'s scheduled delivery slot',
+  params: uuidParam,
+  body: {
+    type: 'object',
+    required: ['scheduledSlotStart', 'scheduledSlotEnd', 'scheduledSlotLabel'],
+    properties: {
+      scheduledSlotStart: { type: 'string', format: 'date-time' },
+      scheduledSlotEnd: { type: 'string', format: 'date-time' },
+      scheduledSlotLabel: { type: 'string', maxLength: 120 },
+      reason: { type: 'string', maxLength: 500 },
+    },
+  },
+}
+
 export const assignRiderSchema = {
   tags: ['Admin Orders'],
   summary: 'Assign rider to order',

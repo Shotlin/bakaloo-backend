@@ -122,6 +122,8 @@ const orderResponseSchema = {
     scheduledSlotStart: { type: ['string', 'null'] },
     scheduledSlotEnd: { type: ['string', 'null'] },
     scheduledSlotLabel: { type: ['string', 'null'] },
+    quickDeliverySelected: { type: 'boolean' },
+    quickDeliverySurchargeAmount: { type: 'number' },
     timeline: { type: 'array', items: timelineItemSchema },
     tracking: trackingSchema,
   },
@@ -154,6 +156,8 @@ export const placeOrderSchema = {
       scheduledSlotStart: { type: ['string', 'null'] },
       scheduledSlotEnd: { type: ['string', 'null'] },
       scheduledSlotLabel: { type: ['string', 'null'], maxLength: 100 },
+      // Quick Delivery — explicit opt-in only; only meaningful for ASAP orders.
+      quickDeliverySelected: { type: 'boolean', default: false },
     },
   },
   response: {
