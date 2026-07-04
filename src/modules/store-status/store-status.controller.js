@@ -1,6 +1,10 @@
 import { success, error } from '../../utils/apiResponse.js'
 import { logAdminActivity } from '../../utils/activityLogger.js'
-import { setOverrideSchema, updateWeeklyHoursSchema } from './store-status.schema.js'
+import {
+  setOverrideSchema,
+  updateWeeklyHoursSchema,
+  updateClosedBannerImageSchema,
+} from './store-status.schema.js'
 
 /**
  * Store Status controller — thin HTTP layer over StoreStatusService.
@@ -17,11 +21,14 @@ export class StoreStatusController {
 
   // GET /api/v1/store/status — public, no auth
   async publicStatus(request, reply) {
-    const [status, next7Days] = await Promise.all([
+    const [status, next7Days, closedBannerImageUrl] = await Promise.all([
       this.service.isOpen(),
       this.service.getNext7DaysAvailability(),
+      this.service.getClosedBannerImageUrl(),
     ])
-    return reply.code(200).send(success({ ...status, next7Days }, 'Store status fetched'))
+    return reply
+      .code(200)
+      .send(success({ ...status, next7Days, closedBannerImageUrl }, 'Store status fetched'))
   }
 
   // GET /api/v1/admin/store-status — full detail incl. weekly hours
@@ -75,5 +82,28 @@ export class StoreStatusController {
     )
 
     return reply.code(200).send(success(updated, 'Weekly hours updated'))
+  }
+
+  // PUT /api/v1/admin/store-status/closed-banner
+  async updateClosedBannerImage(request, reply) {
+    const parsed = updateClosedBannerImageSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send(error(this._formatZodErrors(parsed.error), 'VALIDATION_ERROR'))
+    }
+
+    const adminId = request.user?.id
+    const updated = await this.service.updateClosedBannerImage(parsed.data.imageUrl)
+
+    logAdminActivity(
+      adminId,
+      'Store closed-banner image updated',
+      'store_status',
+      updated?.id || null,
+      null,
+      { closed_banner_image_url: parsed.data.imageUrl },
+      request.ip
+    )
+
+    return reply.code(200).send(success(updated, 'Closed banner image updated'))
   }
 }

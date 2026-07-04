@@ -66,6 +66,7 @@ describe('FeeSettingsService — Quick Delivery surcharge defaults (positive)', 
     expect(config.quick_delivery_surcharge_enabled).toBe(false)
     expect(config.quick_delivery_surcharge_amount).toBe(0)
     expect(config.quick_delivery_surcharge_label).toBe('Quick delivery fee')
+    expect(config.quick_delivery_eta_minutes).toBe(15)
   })
 
   it('resolveForShop() falls back to the same safe surcharge defaults when no row exists', async () => {

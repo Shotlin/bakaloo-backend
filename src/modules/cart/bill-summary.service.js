@@ -174,7 +174,8 @@ export class BillSummaryService {
       amountToUnlock,
     })
 
-    const deliveryEstimateMinutes = this._toNumber(config.delivery_eta_minutes) || 30
+    const { normalEtaMinutes, quickEtaMinutes, deliveryEstimateMinutes } =
+      this._resolveDeliveryEstimateMinutes(config, quickDeliverySelected)
     const freeThreshold = aggregate.freeDelivery.threshold
 
     // Cart milestone progress (Phase 3) — powers the mobile Smart Bottom
@@ -267,6 +268,7 @@ export class BillSummaryService {
         enabled: !!config.quick_delivery_surcharge_enabled,
         amount: this._toNumber(config.quick_delivery_surcharge_amount) || 0,
         label: config.quick_delivery_surcharge_label || 'Quick delivery fee',
+        etaMinutes: quickEtaMinutes,
       },
     }
   }
@@ -299,6 +301,24 @@ export class BillSummaryService {
       },
       razorpay: { enabled: razorpayEnabled },
       wallet: { enabled: walletEnabled },
+    }
+  }
+
+  /**
+   * Resolve which delivery estimate to show: the normal always-shown
+   * `delivery_eta_minutes`, or — once the customer has actually opted into
+   * (and is paying for) Quick Delivery — the faster `quick_delivery_eta_minutes`.
+   * Never switches just because the surcharge is enabled in config; only
+   * when the customer explicitly selected it for this request.
+   */
+  _resolveDeliveryEstimateMinutes(config, quickDeliverySelected) {
+    const normalEtaMinutes = this._toNumber(config.delivery_eta_minutes) || 30
+    const quickEtaMinutes = this._toNumber(config.quick_delivery_eta_minutes) || normalEtaMinutes
+    const quickDeliveryApplied = quickDeliverySelected && !!config.quick_delivery_surcharge_enabled
+    return {
+      normalEtaMinutes,
+      quickEtaMinutes,
+      deliveryEstimateMinutes: quickDeliveryApplied ? quickEtaMinutes : normalEtaMinutes,
     }
   }
 
@@ -516,7 +536,7 @@ export class BillSummaryService {
       totalPayable: 0,
       paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
       cartMilestone: { unlocked: null, next: null, ladder: [] },
-      quickDelivery: { enabled: false, amount: 0, label: 'Quick delivery fee' },
+      quickDelivery: { enabled: false, amount: 0, label: 'Quick delivery fee', etaMinutes: 0 },
     }
   }
 

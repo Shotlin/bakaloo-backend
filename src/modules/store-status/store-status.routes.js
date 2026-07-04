@@ -33,6 +33,7 @@ export async function publicStoreStatusRoutes(fastify) {
  *   GET /            — full detail incl. weekly hours
  *   PUT /override     — set/clear the manual OPEN/CLOSED override
  *   PUT /weekly-hours  — bulk-replace the weekly schedule
+ *   PUT /closed-banner — set/clear the "we are closed" banner image
  */
 export async function adminStoreStatusRoutes(fastify) {
   const adminAuth = [fastify.authenticate, fastify.requireAdmin]
@@ -51,4 +52,9 @@ export async function adminStoreStatusRoutes(fastify) {
     schema: { tags: ['Store Status'], summary: 'Update the weekly hours schedule' },
     preHandler: adminAuth,
   }, controller.updateWeeklyHours.bind(controller))
+
+  fastify.put('/closed-banner', {
+    schema: { tags: ['Store Status'], summary: 'Set or clear the "we are closed" banner image' },
+    preHandler: adminAuth,
+  }, controller.updateClosedBannerImage.bind(controller))
 }

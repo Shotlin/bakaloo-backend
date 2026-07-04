@@ -112,10 +112,24 @@ export class StoreStatusService {
     return this.repo.updateWeeklyHours(weeklyHours)
   }
 
+  async updateClosedBannerImage(imageUrl) {
+    return this.repo.updateClosedBannerImage(imageUrl)
+  }
+
+  /** The admin-uploaded "we are closed" banner image, or null if never set. */
+  async getClosedBannerImageUrl() {
+    const row = await this.repo.getStatus()
+    return row?.closed_banner_image_url || null
+  }
+
   async getFullStatus() {
     const row = await this.repo.getStatus()
     const status = await this.isOpen()
-    return { ...status, weeklyHours: row?.weekly_hours || {} }
+    return {
+      ...status,
+      weeklyHours: row?.weekly_hours || {},
+      closedBannerImageUrl: row?.closed_banner_image_url || null,
+    }
   }
 
   /**

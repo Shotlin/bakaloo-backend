@@ -68,6 +68,9 @@ export const updateFeeSettingsSchema = z
     quick_delivery_surcharge_enabled: z.boolean(),
     quick_delivery_surcharge_amount: nonNegative.max(10000),
     quick_delivery_surcharge_label: label,
+    // How fast delivery is promised when the customer opts in — distinct
+    // from delivery_eta_minutes, the normal always-shown estimate.
+    quick_delivery_eta_minutes: z.number().int().min(0).max(100000),
   })
   .partial()
   .superRefine((data, ctx) => {

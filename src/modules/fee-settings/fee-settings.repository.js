@@ -23,7 +23,7 @@ const COLUMNS = `
   packaging_fee_description,
   delivery_eta_minutes,
   quick_delivery_surcharge_enabled, quick_delivery_surcharge_amount,
-  quick_delivery_surcharge_label,
+  quick_delivery_surcharge_label, quick_delivery_eta_minutes,
   created_at, updated_at, updated_by
 `
 
@@ -64,6 +64,7 @@ const UPDATABLE_COLUMNS = [
   'quick_delivery_surcharge_enabled',
   'quick_delivery_surcharge_amount',
   'quick_delivery_surcharge_label',
+  'quick_delivery_eta_minutes',
 ]
 
 const NUMERIC_COLUMNS = new Set([
@@ -175,6 +176,7 @@ export class FeeSettingsRepository {
       out[col] = Number.isFinite(parsed) ? parsed : 0
     }
     out.delivery_eta_minutes = Number(out.delivery_eta_minutes) || 0
+    out.quick_delivery_eta_minutes = Number(out.quick_delivery_eta_minutes) || 0
     return out
   }
 }

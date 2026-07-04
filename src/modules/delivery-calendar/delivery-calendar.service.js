@@ -176,8 +176,58 @@ export class DeliveryCalendarService {
     return this.repo.getWeeklyTemplate()
   }
 
-  async replaceWeeklyTemplate(rows) {
-    return this.repo.replaceWeeklyTemplate(rows)
+  /**
+   * Replace the weekly template, then immediately resync already-materialized
+   * future days to match — otherwise an edit here would silently do nothing
+   * for the next `DEFAULT_FORWARD_DAYS` days, since `generateForwardDays()`
+   * never overwrites a day that already exists (by design, so it doesn't
+   * clobber per-date admin overrides). Days with a deliberate one-off
+   * override (`upsertDayOverride`, which stamps `updated_by`) are left
+   * untouched — only pure template-generated days are resynced.
+   */
+  async replaceWeeklyTemplate(rows, atUtc = new Date()) {
+    const updated = await this.repo.replaceWeeklyTemplate(rows)
+    await this._resyncMaterializedDaysFromTemplate(updated, atUtc)
+    return updated
+  }
+
+  /** @private */
+  async _resyncMaterializedDaysFromTemplate(template, atUtc) {
+    const templateByWeekday = new Map()
+    for (const row of template) {
+      const list = templateByWeekday.get(row.weekday) || []
+      list.push(row)
+      templateByWeekday.set(row.weekday, list)
+    }
+
+    const todayStr = toDateString(istMidnightUtcMs(atUtc.getTime(), 0))
+    const days = await this.repo.getRegeneratableDaysFromDate(todayStr)
+
+    for (const day of days) {
+      const dateStr = this._dateKey(day.calendar_date)
+      // dateStr is already the IST calendar date — treat it as UTC midnight
+      // directly (no further offset) to read off its correct weekday.
+      const istWeekday = new Date(`${dateStr}T00:00:00Z`).getUTCDay()
+      const windowsForDay = templateByWeekday.get(istWeekday) || []
+      const isAvailable = windowsForDay.some((w) => w.is_available)
+
+      await this.repo.replaceSlotsForDay(
+        day.id,
+        isAvailable,
+        isAvailable
+          ? windowsForDay
+              .filter((w) => w.is_available)
+              .map((w) => ({
+                start_time: w.start_time,
+                end_time: w.end_time,
+                label: w.label,
+                display_order: w.display_order,
+              }))
+          : []
+      )
+    }
+
+    logger.info({ resynced: days.length }, 'Delivery calendar resynced future days from updated weekly template')
   }
 
   async getDaysInRange(fromDate, toDate) {

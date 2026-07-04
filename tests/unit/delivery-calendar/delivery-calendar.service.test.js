@@ -31,8 +31,10 @@ function makeRepo(overrides = {}) {
     insertSlotsForDay: vi.fn().mockResolvedValue(undefined),
     getDaysInRange: vi.fn().mockResolvedValue([]),
     getMaxGeneratedDate: vi.fn().mockResolvedValue(null),
-    replaceWeeklyTemplate: vi.fn(),
+    replaceWeeklyTemplate: vi.fn().mockResolvedValue([]),
     upsertDayOverride: vi.fn(),
+    getRegeneratableDaysFromDate: vi.fn().mockResolvedValue([]),
+    replaceSlotsForDay: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   }
 }
@@ -195,5 +197,61 @@ describe('DeliveryCalendarService.getAvailableDays — closed-store + unavailabl
 
     expect(result.days).toHaveLength(2)
     expect(result.days.every((d) => Array.isArray(d.slots))).toBe(true)
+  })
+})
+
+describe('DeliveryCalendarService.replaceWeeklyTemplate — resyncing already-materialized future days', () => {
+  it('resyncs a purely template-generated day to the new template for its weekday', async () => {
+    const newTemplate = [
+      { weekday: 1, is_available: true, start_time: '09:00', end_time: '11:00', label: '9-11 AM', display_order: 0 }, // Monday
+    ]
+    const repo = makeRepo({
+      replaceWeeklyTemplate: vi.fn().mockResolvedValue(newTemplate),
+      getRegeneratableDaysFromDate: vi.fn().mockResolvedValue([
+        { id: 'day-mon', calendar_date: '2026-07-06', is_available: true, updated_by: null }, // Monday
+      ]),
+    })
+    const svc = new DeliveryCalendarService(repo, makeStoreStatus())
+
+    await svc.replaceWeeklyTemplate([], NOW)
+
+    expect(repo.getRegeneratableDaysFromDate).toHaveBeenCalledWith('2026-07-06')
+    expect(repo.replaceSlotsForDay).toHaveBeenCalledWith(
+      'day-mon',
+      true,
+      [{ start_time: '09:00', end_time: '11:00', label: '9-11 AM', display_order: 0 }]
+    )
+  })
+
+  it('marks a day unavailable (empty slots) when the new template has no available window for its weekday', async () => {
+    const repo = makeRepo({
+      replaceWeeklyTemplate: vi.fn().mockResolvedValue([
+        { weekday: 1, is_available: false, start_time: '09:00', end_time: '11:00', label: 'closed', display_order: 0 },
+      ]),
+      getRegeneratableDaysFromDate: vi.fn().mockResolvedValue([
+        { id: 'day-mon', calendar_date: '2026-07-06', is_available: true, updated_by: null },
+      ]),
+    })
+    const svc = new DeliveryCalendarService(repo, makeStoreStatus())
+
+    await svc.replaceWeeklyTemplate([], NOW)
+
+    expect(repo.replaceSlotsForDay).toHaveBeenCalledWith('day-mon', false, [])
+  })
+
+  it('never touches a day the admin individually overrode (repo already excludes updated_by rows, service must not re-fetch/bypass it)', async () => {
+    const repo = makeRepo({
+      replaceWeeklyTemplate: vi.fn().mockResolvedValue([
+        { weekday: 1, is_available: true, start_time: '09:00', end_time: '11:00', label: '9-11 AM', display_order: 0 },
+      ]),
+      // Simulates the repo's own WHERE updated_by IS NULL filter already
+      // having excluded an admin-overridden Monday from the result set.
+      getRegeneratableDaysFromDate: vi.fn().mockResolvedValue([]),
+    })
+    const svc = new DeliveryCalendarService(repo, makeStoreStatus())
+
+    await svc.replaceWeeklyTemplate([], NOW)
+
+    expect(repo.replaceSlotsForDay).not.toHaveBeenCalled()
   })
 })

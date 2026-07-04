@@ -12,8 +12,17 @@ import { query, getClient } from '../../config/database.js'
  *     (holiday closures, one-off extra slots) without touching the template.
  */
 
+// node-postgres serializes TIME columns as 'HH:MM:SS' by default, but the
+// admin write-side schema (delivery-calendar.schema.js) only accepts
+// 'HH:MM' — formatting here with to_char() keeps every read the exact
+// shape a subsequent write will accept, so round-tripping an unedited row
+// through the dashboard's "Save changes" (which resubmits the whole week)
+// never fails validation on rows the admin didn't touch.
 const TEMPLATE_COLUMNS = `
-  id, weekday, is_available, start_time, end_time, label, display_order
+  id, weekday, is_available,
+  to_char(start_time, 'HH24:MI') AS start_time,
+  to_char(end_time, 'HH24:MI') AS end_time,
+  label, display_order
 `
 
 const DAY_COLUMNS = `
@@ -21,7 +30,10 @@ const DAY_COLUMNS = `
 `
 
 const SLOT_COLUMNS = `
-  id, calendar_day_id, start_time, end_time, label, is_active, display_order
+  id, calendar_day_id,
+  to_char(start_time, 'HH24:MI') AS start_time,
+  to_char(end_time, 'HH24:MI') AS end_time,
+  label, is_active, display_order
 `
 
 export class DeliveryCalendarRepository {
@@ -133,6 +145,50 @@ export class DeliveryCalendarRepository {
          VALUES ($1,$2,$3,$4,$5,$6)`,
         [dayId, slot.start_time, slot.end_time, slot.label, true, slot.display_order || 0]
       )
+    }
+  }
+
+  /**
+   * Materialized days from `fromDate` forward that were purely
+   * template-generated (never individually overridden via
+   * `upsertDayOverride`, which always stamps `updated_by`) — the set it's
+   * safe to resync when the admin edits the weekly template, without
+   * clobbering a deliberate one-off holiday-closure/extra-slot override.
+   */
+  async getRegeneratableDaysFromDate(fromDate) {
+    const { rows } = await query(
+      `SELECT ${DAY_COLUMNS} FROM delivery_calendar_days
+       WHERE calendar_date >= $1 AND updated_by IS NULL
+       ORDER BY calendar_date ASC`,
+      [fromDate]
+    )
+    return rows
+  }
+
+  /** Replace a day's is_available + slots atomically (template resync). */
+  async replaceSlotsForDay(dayId, isAvailable, slots) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE delivery_calendar_days SET is_available = $1, updated_at = NOW() WHERE id = $2`,
+        [isAvailable, dayId]
+      )
+      await client.query('DELETE FROM delivery_calendar_slots WHERE calendar_day_id = $1', [dayId])
+      for (const slot of slots) {
+        await client.query(
+          `INSERT INTO delivery_calendar_slots
+             (calendar_day_id, start_time, end_time, label, is_active, display_order)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [dayId, slot.start_time, slot.end_time, slot.label, true, slot.display_order || 0]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
     }
   }
 

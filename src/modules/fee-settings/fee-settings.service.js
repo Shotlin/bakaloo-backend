@@ -101,6 +101,7 @@ export class FeeSettingsService {
       quick_delivery_surcharge_enabled: false,
       quick_delivery_surcharge_amount: 0,
       quick_delivery_surcharge_label: 'Quick delivery fee',
+      quick_delivery_eta_minutes: 15,
     }
   }
 }

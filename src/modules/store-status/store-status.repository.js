@@ -11,7 +11,7 @@ import { query } from '../../config/database.js'
 const COLUMNS = `
   id, manual_override_status, manual_override_note,
   manual_override_set_at, manual_override_set_by,
-  weekly_hours, updated_at
+  weekly_hours, closed_banner_image_url, updated_at
 `
 
 export class StoreStatusRepository {
@@ -41,6 +41,15 @@ export class StoreStatusRepository {
     const { rows } = await query(
       `UPDATE store_status SET weekly_hours = $1, updated_at = NOW() RETURNING ${COLUMNS}`,
       [JSON.stringify(weeklyHours || {})]
+    )
+    return rows[0] || null
+  }
+
+  /** Set (or clear, with imageUrl=null) the "we are closed" banner image. */
+  async updateClosedBannerImage(imageUrl) {
+    const { rows } = await query(
+      `UPDATE store_status SET closed_banner_image_url = $1, updated_at = NOW() RETURNING ${COLUMNS}`,
+      [imageUrl || null]
     )
     return rows[0] || null
   }

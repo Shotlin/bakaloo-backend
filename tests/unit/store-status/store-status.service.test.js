@@ -218,3 +218,46 @@ describe('StoreStatusService.getNext7DaysAvailability (Phase 3, mobile store-hou
     expect(days[1]).toMatchObject({ weekday: 'tuesday', isOpen: true, open: null, close: null })
   })
 })
+
+describe('StoreStatusService — closed banner image (Phase 4, dashboard-uploadable "we are closed" banner)', () => {
+  it('getClosedBannerImageUrl() returns the stored URL', async () => {
+    const svc = service({ manual_override_status: null, weekly_hours: {}, closed_banner_image_url: 'https://cdn.example/closed.png' })
+
+    const url = await svc.getClosedBannerImageUrl()
+
+    expect(url).toBe('https://cdn.example/closed.png')
+  })
+
+  it('getClosedBannerImageUrl() returns null when never set', async () => {
+    const svc = service({ manual_override_status: null, weekly_hours: {}, closed_banner_image_url: null })
+
+    const url = await svc.getClosedBannerImageUrl()
+
+    expect(url).toBeNull()
+  })
+
+  it('updateClosedBannerImage() delegates to the repository', async () => {
+    const repo = {
+      getStatus: vi.fn(),
+      updateClosedBannerImage: vi.fn().mockResolvedValue({ id: 'row-1', closed_banner_image_url: 'https://cdn.example/new.png' }),
+    }
+    const svc = new StoreStatusService(repo)
+
+    const result = await svc.updateClosedBannerImage('https://cdn.example/new.png')
+
+    expect(repo.updateClosedBannerImage).toHaveBeenCalledWith('https://cdn.example/new.png')
+    expect(result.closed_banner_image_url).toBe('https://cdn.example/new.png')
+  })
+
+  it('getFullStatus() includes closedBannerImageUrl alongside weeklyHours', async () => {
+    const svc = service({
+      manual_override_status: null,
+      weekly_hours: {},
+      closed_banner_image_url: 'https://cdn.example/closed.png',
+    })
+
+    const result = await svc.getFullStatus()
+
+    expect(result.closedBannerImageUrl).toBe('https://cdn.example/closed.png')
+  })
+})

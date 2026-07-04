@@ -18,3 +18,7 @@ export const updateWeeklyHoursSchema = z.object({
     .object(Object.fromEntries(WEEKDAYS.map((day) => [day, dayHours])))
     .partial(),
 })
+
+export const updateClosedBannerImageSchema = z.object({
+  imageUrl: z.string().trim().url().nullable(),
+})
