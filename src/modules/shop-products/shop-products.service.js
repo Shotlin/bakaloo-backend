@@ -362,6 +362,13 @@ export class ShopProductsService {
   }) {
     if (!shopProduct || !shopId) return
 
+    // Every other stock-mutating path in this file invalidates the shop's
+    // cached product list right after its write commits — this order-driven
+    // path was the one exception (it only emitted socket/notification
+    // events below), which let the Store → Inventory page keep serving a
+    // stale cached stock number for up to CACHE_TTL_SECONDS after an order.
+    await this.invalidateShopCache(shopId)
+
     // Resolve product name (best-effort, single PK lookup).
     let resolvedName = productMeta?.product_name ?? shopProduct.product_name
     if (resolvedName === undefined || resolvedName === null) {
@@ -830,9 +837,8 @@ export class ShopProductsService {
 
       await client.query('COMMIT')
 
-      // Cache invalidation runs after commit so readers don't repopulate stale
-      // entries from the in-flight transaction snapshot.
-      await this.invalidateShopCache(shopId)
+      // Cache invalidation happens inside handleStockTransitionSideEffects()
+      // below, which runs unconditionally after commit.
 
       logger.info(
         {
@@ -1034,10 +1040,9 @@ export class ShopProductsService {
 
       await client.query('COMMIT')
 
-      // R23.13: SCAN-based cache invalidation runs AFTER COMMIT so
-      // readers don't repopulate stale entries from the in-flight
-      // snapshot. cacheDeletePattern uses Redis SCAN (not KEYS *).
-      await this.invalidateShopCache(shopId)
+      // R23.13: cache invalidation happens inside
+      // handleStockTransitionSideEffects() below, which runs
+      // unconditionally after commit.
 
       logger.info(
         {

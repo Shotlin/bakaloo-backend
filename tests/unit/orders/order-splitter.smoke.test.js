@@ -35,7 +35,7 @@ function makeOrdersRepoMock() {
 function makeShopProductsRepoMock() {
   return {
     findByIdForUpdate: vi.fn(),
-    applyStockUpdate: vi.fn(),
+    applyStockChange: vi.fn(),
   }
 }
 
@@ -155,9 +155,13 @@ describe('OrderSplitterService.createOrders — happy path', () => {
         is_available: true,
       })
 
-    shopProductsRepo.applyStockUpdate
-      .mockResolvedValueOnce({ id: SP_1, stock_quantity: 8 })
-      .mockResolvedValueOnce({ id: SP_2, stock_quantity: 4 })
+    shopProductsRepo.applyStockChange
+      .mockResolvedValueOnce({
+        stockProduct: { id: SP_1, stock_quantity: 8, low_stock_threshold: 5 },
+      })
+      .mockResolvedValueOnce({
+        stockProduct: { id: SP_2, stock_quantity: 4, low_stock_threshold: 5 },
+      })
 
     ordersRepo.generateOrderNumber
       .mockResolvedValueOnce('GRO-20251112-001')
@@ -231,18 +235,18 @@ describe('OrderSplitterService.createOrders — happy path', () => {
 
     // Stock locked first, then applied
     expect(shopProductsRepo.findByIdForUpdate).toHaveBeenCalledTimes(2)
-    expect(shopProductsRepo.applyStockUpdate).toHaveBeenCalledTimes(2)
+    expect(shopProductsRepo.applyStockChange).toHaveBeenCalledTimes(2)
 
-    // Stock decremented by exact item quantity
-    const callsA = shopProductsRepo.applyStockUpdate.mock.calls.find(
-      ([, , shopId]) => shopId === SHOP_A
+    // Stock decremented by exact item quantity (delta is negative)
+    const callsA = shopProductsRepo.applyStockChange.mock.calls.find(
+      ([, opts]) => opts.shopProductId === SP_1
     )
-    expect(callsA[3]).toBe(8) // 10 - 2
+    expect(callsA[1].delta).toBe(-2) // qty 2
 
-    const callsB = shopProductsRepo.applyStockUpdate.mock.calls.find(
-      ([, , shopId]) => shopId === SHOP_B
+    const callsB = shopProductsRepo.applyStockChange.mock.calls.find(
+      ([, opts]) => opts.shopProductId === SP_2
     )
-    expect(callsB[3]).toBe(4) // 5 - 1
+    expect(callsB[1].delta).toBe(-1) // qty 1
   })
 })
 
@@ -284,7 +288,7 @@ describe('OrderSplitterService.createOrders — rejection paths (Req 5.9, 12.7)'
 
     // Must NOT have called create on rejection (Req 5.9)
     expect(ordersRepo.create).not.toHaveBeenCalled()
-    expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+    expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
   })
 
   it('throws when stock is insufficient (Req 5.5)', async () => {

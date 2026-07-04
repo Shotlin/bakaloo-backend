@@ -846,17 +846,34 @@ export class OrdersService {
       }
     }
 
-    // Restore stock in a transaction
+    // Restore stock in a transaction — goes through the centralized
+    // applyStockChange() so this gets a CANCELLATION_RESTORE stock_movements
+    // ledger row (previously this used a raw UPDATE with no ledger entry
+    // and no cache invalidation, unlike every other stock-mutating path).
     const client = await getClient()
     try {
       await client.query('BEGIN')
-      await this.repo.restoreStock(client, order.items)
+      await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
+        orderId,
+        items: order.items,
+        source: 'API',
+        actor: { userId, shopRole: null },
+      })
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
       logger.error({ err, orderId }, 'Stock restore failed during cancellation')
     } finally {
       client.release()
+    }
+
+    // Cache invalidation happens after COMMIT per applyStockChange()'s
+    // contract — every other stock-mutating path does the same.
+    try {
+      const shopId = order.shopId || order.shop_id
+      if (shopId) await this.shopProductsService.invalidateShopCache(shopId)
+    } catch (err) {
+      logger.warn({ err: err.message, orderId }, 'Cache invalidation failed after cancel (non-blocking)')
     }
 
     const updated = await this.repo.updateStatus(orderId, ORDER_STATUS.CANCELLED, {
@@ -944,17 +961,30 @@ export class OrdersService {
     }
     if (status === ORDER_STATUS.CANCELLED) {
       extra.cancelledReason = 'Cancelled by admin'
-      // Restore stock
+      // Restore stock — goes through the centralized applyStockChange() so
+      // this gets a CANCELLATION_RESTORE stock_movements ledger row (was a
+      // raw UPDATE with no ledger entry and no cache invalidation).
       const client = await getClient()
       try {
         await client.query('BEGIN')
-        await this.repo.restoreStock(client, order.items)
+        await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
+          orderId,
+          items: order.items,
+          source: 'DASHBOARD',
+          actor: null,
+        })
         await client.query('COMMIT')
       } catch (err) {
         await client.query('ROLLBACK')
         logger.error({ err, orderId }, 'Stock restore failed during admin cancellation')
       } finally {
         client.release()
+      }
+      try {
+        const shopId = order.shopId || order.shop_id
+        if (shopId) await this.shopProductsService.invalidateShopCache(shopId)
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Cache invalidation failed after cancel (non-blocking)')
       }
     }
 
@@ -1010,7 +1040,11 @@ export class OrdersService {
       return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
     }
 
-    const buffer = await generateInvoicePDF(order)
+    // Timeline enriches the CANCELLED/REFUNDED banner with a date + reason;
+    // harmless no-op for any other status (generateInvoicePDF only reads it
+    // when order.status is terminal-cancelled/refunded).
+    const timeline = await this.repo.getStatusHistory(orderId)
+    const buffer = await generateInvoicePDF({ ...order, timeline })
     return {
       success: true,
       buffer,

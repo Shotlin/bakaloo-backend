@@ -1,10 +1,13 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { generateInvoicePDF } from '../../../utils/invoiceGenerator.js'
-import { query as dbQuery } from '../../../config/database.js'
+import { query as dbQuery, getClient } from '../../../config/database.js'
+import { logger } from '../../../config/logger.js'
 import { NotificationsRepository } from '../../notifications/notifications.repository.js'
 import { NotificationsService } from '../../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../../notifications/customer-order-event.helper.js'
+import { ShopProductsRepository } from '../../shop-products/shop-products.repository.js'
+import { ShopProductsService } from '../../shop-products/shop-products.service.js'
 import ExcelJS from 'exceljs'
 
 const ASSIGNABLE_ORDER_STATUSES = new Set(['CONFIRMED', 'PREPARING', 'PACKED'])
@@ -30,6 +33,45 @@ export class AdminOrdersService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    this.shopProductsRepo = new ShopProductsRepository()
+  }
+
+  /**
+   * Restore stock for every line item of an order being cancelled
+   * pre-delivery (Requirements 23 — CANCELLATION_RESTORE). Best-effort: a
+   * restore failure must never block the cancellation response, since the
+   * order's CANCELLED status has already committed by the time this runs.
+   */
+  async _restoreStockForCancellation(orderId, shopId, adminId) {
+    try {
+      const items = await this.repository.getOrderItems(orderId)
+      const client = await getClient()
+      try {
+        await client.query('BEGIN')
+        await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
+          orderId,
+          items,
+          source: 'DASHBOARD',
+          actor: { userId: adminId, shopRole: null },
+        })
+        await client.query('COMMIT')
+      } catch (err) {
+        await client.query('ROLLBACK')
+        throw err
+      } finally {
+        client.release()
+      }
+      // Cache invalidation happens after COMMIT per applyStockChange()'s
+      // contract — every other stock-mutating path does the same.
+      if (shopId) {
+        await new ShopProductsService(this.shopProductsRepo).invalidateShopCache(shopId)
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err.message, orderId },
+        'Stock restore failed during admin cancellation (non-blocking)'
+      )
+    }
   }
 
   /**
@@ -335,6 +377,12 @@ export class AdminOrdersService {
       },
     })
 
+    // Previously missing — unlike updateStatus()/rescheduleDelivery(), this
+    // never emitted a Socket.IO order:status event, so the DB/notification
+    // were correct but the customer's app kept showing the pre-refund
+    // status until the order list/detail was manually refreshed.
+    this._emitOrderStatus(order, 'REFUNDED')
+
     return { orderId, refundAmount, refundTo, status: 'REFUNDED' }
   }
 
@@ -352,6 +400,13 @@ export class AdminOrdersService {
 
     // Cancel the order
     const oldStatus = await this.repository.updateStatus(orderId, 'CANCELLED', adminId, reason || 'Cancelled by admin')
+
+    // Previously missing entirely — an admin cancelling an order never gave
+    // the deducted stock back, so every admin-cancelled order permanently
+    // understated real available stock. CANCELLED is only reachable
+    // pre-delivery (never from DELIVERED), so the product never physically
+    // left the store and restoring is always correct here.
+    await this._restoreStockForCancellation(orderId, order.shop_id, adminId)
 
     // Refund only makes sense once money has actually changed hands — most
     // cancellations happen on PENDING/CONFIRMED orders that were never
@@ -415,6 +470,13 @@ export class AdminOrdersService {
         },
       })
     }
+
+    // Previously missing — unlike updateStatus()/rescheduleDelivery(), this
+    // never emitted a Socket.IO order:status event, so an admin cancelling
+    // an order was correct in the DB (a repeat-cancel correctly gets
+    // rejected) but the customer's app kept showing the pre-cancel status
+    // until they manually refreshed.
+    this._emitOrderStatus(order, 'CANCELLED')
 
     return { orderId, status: 'CANCELLED', refundAmount, refundTo: appliedRefundTo }
   }
@@ -558,6 +620,7 @@ export class AdminOrdersService {
       CANCELLED: 'Order cancelled by support',
       OUT_FOR_DELIVERY: 'Order is now out for delivery',
       DELIVERED: 'Order delivered successfully',
+      REFUNDED: 'Order refund processed',
     }
 
     return messages[status] || `Order updated to ${status}`

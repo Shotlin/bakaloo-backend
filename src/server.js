@@ -10,6 +10,10 @@ import {
   startDeliveryCalendarGenerationWorker,
   stopDeliveryCalendarGenerationWorker,
 } from './workers/delivery-calendar-generation.worker.js'
+import {
+  startStoreStatusSchedulerWorker,
+  stopStoreStatusSchedulerWorker,
+} from './workers/store-status-scheduler.worker.js'
 
 const start = async () => {
   try {
@@ -63,6 +67,10 @@ const start = async () => {
     // Start delivery calendar generation worker (keeps the slot picker topped up)
     startDeliveryCalendarGenerationWorker()
 
+    // Start store status scheduler worker (auto-detects weekly-schedule
+    // open/close transitions and pushes them live, no admin action needed)
+    startStoreStatusSchedulerWorker()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -80,6 +88,9 @@ const start = async () => {
 
       // Stop delivery calendar generation worker
       stopDeliveryCalendarGenerationWorker()
+
+      // Stop store status scheduler worker
+      stopStoreStatusSchedulerWorker()
 
       // Close Socket.IO
       if (app.io) {

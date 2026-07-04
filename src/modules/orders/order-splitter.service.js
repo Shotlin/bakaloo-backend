@@ -1,6 +1,10 @@
 import { logger } from '../../config/logger.js'
 import { ORDER_STATUS } from '../../constants/orderStatus.js'
 import { haversineKm } from '../../utils/distance.js'
+import {
+  STOCK_MOVEMENT_TYPES,
+  STOCK_MOVEMENT_SOURCES,
+} from '../shop-products/shop-products.repository.js'
 
 /**
  * Order Splitter — groups a multi-shop cart into one order per shop and
@@ -393,45 +397,14 @@ export class OrderSplitterService {
         throw err
       }
 
-      // ─── 2. Apply stock decrement (still inside the locked rows) ──────
-      for (const { item, locked } of verified) {
-        const prevQty = Number(locked.stock_quantity)
-        const newQty = prevQty - item.quantity
-        const updated = await this.shopProductsRepo.applyStockUpdate(
-          client,
-          item.shopProductId,
-          shopId,
-          newQty
-        )
-        if (!updated) {
-          // Should not happen — we just locked the row. Defensive guard.
-          const err = new Error('Failed to apply stock update')
-          err.code = 'LEDGER_WRITE_FAILED'
-          err.failures = [
-            {
-              productId: item.productId,
-              shopId,
-              reason: 'Stock update failed',
-              code: 'LEDGER_WRITE_FAILED',
-            },
-          ]
-          throw err
-        }
-
-        // Record the prev→new transition for post-commit fan-out. The
-        // shopProduct object includes everything the side-effect helpers
-        // need (id, product_id, stock_quantity, sold_out_at, threshold).
-        stockTransitions.push({
-          shopId,
-          shopProduct: updated,
-          prevQty,
-          newQty,
-          lowStockThreshold: Number(updated.low_stock_threshold),
-          productMeta: { product_name: item.name || null },
-        })
-      }
-
-      // ─── 3. Compute fees per shop and insert order ────────────────────
+      // ─── 2. Compute fees per shop and insert order ────────────────────
+      // Order creation happens BEFORE the stock decrement (moved ahead of
+      // its historical position) because the centralized
+      // applyStockChange() ledger write requires a real order_id to stamp
+      // on the stock_movements row (Requirements 23.1, 23.4) — the order's
+      // id only exists once INSERT ... RETURNING id has run. Fee
+      // computation and order-item shaping below never depend on the
+      // post-decrement stock values, so reordering is safe.
       const fees = await this.computeShopFees({ shopId, items, feeContext })
 
       const orderItems = items.map((item) => ({
@@ -505,6 +478,39 @@ export class OrderSplitterService {
         },
         orderItems
       )
+
+      // ─── 3. Apply stock decrement now that order.id exists ────────────
+      // Goes through the centralized applyStockChange() so every order
+      // deduction gets exactly one stock_movements ledger row (previously
+      // this called the lower-level applyStockUpdate() directly, which
+      // silently skipped the ledger and the post-commit cache
+      // invalidation every other stock-mutating path relies on).
+      for (const { item, locked } of verified) {
+        const prevQty = Number(locked.stock_quantity)
+        const { stockProduct: updated } = await this.shopProductsRepo.applyStockChange(
+          client,
+          {
+            shopProductId: item.shopProductId,
+            delta: -item.quantity,
+            type: STOCK_MOVEMENT_TYPES.ORDER_DEDUCTION,
+            source: STOCK_MOVEMENT_SOURCES.ORDER,
+            orderId: order.id,
+            actor: null, // system write — no human actor for a customer checkout
+          }
+        )
+
+        // Record the prev→new transition for post-commit fan-out. The
+        // shopProduct object includes everything the side-effect helpers
+        // need (id, product_id, stock_quantity, sold_out_at, threshold).
+        stockTransitions.push({
+          shopId,
+          shopProduct: updated,
+          prevQty,
+          newQty: prevQty - item.quantity,
+          lowStockThreshold: Number(updated.low_stock_threshold),
+          productMeta: { product_name: item.name || null },
+        })
+      }
 
       createdOrders.push(order)
     }

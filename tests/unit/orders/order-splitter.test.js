@@ -53,7 +53,7 @@ function makeOrdersRepoMock() {
 function makeShopProductsRepoMock() {
   return {
     findByIdForUpdate: vi.fn(),
-    applyStockUpdate: vi.fn(),
+    applyStockChange: vi.fn(),
   }
 }
 
@@ -303,7 +303,7 @@ describe('OrderSplitterService.createOrders — guards', () => {
 // ═══════════════════════════════════════════════════════════════════════
 
 describe('OrderSplitterService.createOrders — happy path', () => {
-  it('calls findByIdForUpdate then applyStockUpdate for each item, in lock-then-apply order', async () => {
+  it('calls findByIdForUpdate then applyStockChange for each item, in lock-then-apply order, stamping the newly-created order id onto the ledger', async () => {
     const ordersRepo = makeOrdersRepoMock()
     const shopProductsRepo = makeShopProductsRepoMock()
 
@@ -333,10 +333,10 @@ describe('OrderSplitterService.createOrders — happy path', () => {
         is_available: true,
       })
 
-    shopProductsRepo.applyStockUpdate
-      .mockResolvedValueOnce({ id: SP_A1, stock_quantity: 8 })
-      .mockResolvedValueOnce({ id: SP_B1, stock_quantity: 7 })
-      .mockResolvedValueOnce({ id: SP_B2, stock_quantity: 1 })
+    shopProductsRepo.applyStockChange
+      .mockResolvedValueOnce({ stockProduct: { id: SP_A1, stock_quantity: 8, low_stock_threshold: 5 } })
+      .mockResolvedValueOnce({ stockProduct: { id: SP_B1, stock_quantity: 7, low_stock_threshold: 5 } })
+      .mockResolvedValueOnce({ stockProduct: { id: SP_B2, stock_quantity: 1, low_stock_threshold: 5 } })
 
     ordersRepo.generateOrderNumber
       .mockResolvedValueOnce('GRO-20251112-001')
@@ -395,15 +395,28 @@ describe('OrderSplitterService.createOrders — happy path', () => {
 
     // findByIdForUpdate called once per item
     expect(shopProductsRepo.findByIdForUpdate).toHaveBeenCalledTimes(3)
-    // applyStockUpdate called once per item
-    expect(shopProductsRepo.applyStockUpdate).toHaveBeenCalledTimes(3)
+    // applyStockChange called once per item
+    expect(shopProductsRepo.applyStockChange).toHaveBeenCalledTimes(3)
 
     // Lock occurs strictly BEFORE apply for the same shop_product_id.
-    // Within a shop the splitter verifies all items first, then applies all
-    // updates, so the last lock precedes the first apply globally as well.
+    // Within a shop the splitter verifies all items first, then creates the
+    // order (so its id exists), then applies all stock changes — so the
+    // last lock precedes the first apply globally as well.
     const lockOrders = shopProductsRepo.findByIdForUpdate.mock.invocationCallOrder
-    const applyOrders = shopProductsRepo.applyStockUpdate.mock.invocationCallOrder
+    const applyOrders = shopProductsRepo.applyStockChange.mock.invocationCallOrder
     expect(applyOrders[0]).toBeGreaterThan(lockOrders[0])
+
+    // The stock decrement is a signed negative delta through the
+    // centralized ORDER_DEDUCTION ledger path, stamped with the real
+    // order id created for that shop (order-a for SHOP_A's line).
+    expect(shopProductsRepo.applyStockChange).toHaveBeenNthCalledWith(1, client, {
+      shopProductId: SP_A1,
+      delta: -2,
+      type: 'ORDER_DEDUCTION',
+      source: 'ORDER',
+      orderId: 'order-a',
+      actor: null,
+    })
   })
 
   it('returns array length = N shops', async () => {
@@ -419,7 +432,7 @@ describe('OrderSplitterService.createOrders — happy path', () => {
       max_order_qty: 50,
       is_available: true,
     }))
-    shopProductsRepo.applyStockUpdate.mockResolvedValue({ id: 'x' })
+    shopProductsRepo.applyStockChange.mockResolvedValue({ stockProduct: { id: 'x', low_stock_threshold: 5 } })
     ordersRepo.generateOrderNumber.mockImplementation(async () => `GRO-${Math.random()}`)
     ordersRepo.create.mockImplementation(async (_c, data) => ({
       id: `order-${data.shopId}`,
@@ -459,7 +472,7 @@ describe('OrderSplitterService.createOrders — happy path', () => {
       max_order_qty: 50,
       is_available: true,
     }))
-    shopProductsRepo.applyStockUpdate.mockResolvedValue({ id: 'x' })
+    shopProductsRepo.applyStockChange.mockResolvedValue({ stockProduct: { id: 'x', low_stock_threshold: 5 } })
 
     let counter = 0
     ordersRepo.generateOrderNumber.mockImplementation(async () => {
@@ -509,7 +522,7 @@ describe('OrderSplitterService.createOrders — happy path', () => {
       max_order_qty: 50,
       is_available: true,
     }))
-    shopProductsRepo.applyStockUpdate.mockResolvedValue({ id: 'x' })
+    shopProductsRepo.applyStockChange.mockResolvedValue({ stockProduct: { id: 'x', low_stock_threshold: 5 } })
     ordersRepo.generateOrderNumber.mockImplementation(async () => 'GRO-X')
     ordersRepo.create.mockImplementation(async (_c, data) => ({
       id: `order-${data.shopId}`,
@@ -564,7 +577,7 @@ describe('OrderSplitterService.createOrders — happy path', () => {
       max_order_qty: 50,
       is_available: true,
     })
-    shopProductsRepo.applyStockUpdate.mockResolvedValue({ id: SP_A1 })
+    shopProductsRepo.applyStockChange.mockResolvedValue({ stockProduct: { id: SP_A1, low_stock_threshold: 5 } })
     ordersRepo.generateOrderNumber.mockResolvedValue('GRO-X')
     ordersRepo.create.mockImplementation(async (_c, data) => data)
 
@@ -615,7 +628,7 @@ describe('OrderSplitterService.createOrders — failure aggregation (Req 5.9)', 
 
     // Three items in the FIRST iterated shop, all violating different rules
     // → splitter must collect all three failures before throwing, and must
-    //   NOT have called applyStockUpdate or ordersRepo.create.
+    //   NOT have called applyStockChange or ordersRepo.create.
     shopProductsRepo.findByIdForUpdate
       .mockResolvedValueOnce(null) // SHOP_PRODUCT_UNAVAILABLE
       .mockResolvedValueOnce({
@@ -676,7 +689,7 @@ describe('OrderSplitterService.createOrders — failure aggregation (Req 5.9)', 
     }
 
     // Critical: no writes happened (Req 5.9 atomicity-before-writes)
-    expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+    expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
     expect(ordersRepo.create).not.toHaveBeenCalled()
     expect(ordersRepo.generateOrderNumber).not.toHaveBeenCalled()
   })
@@ -725,11 +738,11 @@ describe('OrderSplitterService.createOrders — failure aggregation (Req 5.9)', 
       SP_A1,
       SHOP_A
     )
-    expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+    expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
     expect(ordersRepo.create).not.toHaveBeenCalled()
   })
 
-  it('throws LEDGER_WRITE_FAILED when applyStockUpdate returns null after a successful lock', async () => {
+  it('propagates the error when applyStockChange throws (e.g. STOCK_NEGATIVE_FORBIDDEN from a concurrent sale) — the caller rolls back the whole transaction, order insert included', async () => {
     const ordersRepo = makeOrdersRepoMock()
     const shopProductsRepo = makeShopProductsRepoMock()
 
@@ -741,7 +754,12 @@ describe('OrderSplitterService.createOrders — failure aggregation (Req 5.9)', 
       max_order_qty: 50,
       is_available: true,
     })
-    shopProductsRepo.applyStockUpdate.mockResolvedValueOnce(null)
+    ordersRepo.generateOrderNumber.mockResolvedValueOnce('GRO-X')
+    ordersRepo.create.mockResolvedValueOnce({ id: 'order-a', shopId: SHOP_A })
+
+    const stockErr = new Error('Resulting stock_quantity cannot be negative')
+    stockErr.code = 'STOCK_NEGATIVE_FORBIDDEN'
+    shopProductsRepo.applyStockChange.mockRejectedValueOnce(stockErr)
 
     const svc = makeSvc({ ordersRepo, shopProductsRepo })
     const groups = svc.splitCart([
@@ -756,15 +774,12 @@ describe('OrderSplitterService.createOrders — failure aggregation (Req 5.9)', 
         deliveryAddress: {},
         payment: { method: 'COD' },
       })
-    ).rejects.toMatchObject({
-      code: 'LEDGER_WRITE_FAILED',
-      failures: expect.arrayContaining([
-        expect.objectContaining({ shopId: SHOP_A, code: 'LEDGER_WRITE_FAILED' }),
-      ]),
-    })
+    ).rejects.toMatchObject({ code: 'STOCK_NEGATIVE_FORBIDDEN' })
 
-    // ordersRepo.create must not have been called: defensive guard kicks
-    // in before the order insert.
-    expect(ordersRepo.create).not.toHaveBeenCalled()
+    // The order row WAS inserted before the stock-change call that then
+    // threw — safe because createOrders() never owns BEGIN/COMMIT itself;
+    // the caller's transaction (mocked here) rolls back the order insert
+    // along with everything else on any thrown error.
+    expect(ordersRepo.create).toHaveBeenCalledTimes(1)
   })
 })

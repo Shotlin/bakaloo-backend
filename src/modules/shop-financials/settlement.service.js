@@ -213,7 +213,29 @@ export class SettlementService {
   async runDailySettlement({ date, batchSize = 50 } = {}) {
     const ref = date instanceof Date ? date : new Date()
     const { startUtc, endUtc, dateStr } = SettlementService.previousUtcDay(ref)
+    return this._runDailySettlementForRange({ startUtc, endUtc, dateStr, batchSize })
+  }
 
+  /**
+   * Run daily settlement for an explicit UTC calendar day (as opposed to
+   * `runDailySettlement`, which always resolves "the day before `date`").
+   * Used by the admin "Run Settlement Now" manual trigger so operators can
+   * settle today's delivered orders on demand instead of waiting for the
+   * 02:00 UTC cron — most useful right after testing an order through its
+   * full delivery lifecycle.
+   *
+   * @param {object} options
+   * @param {string} options.dateStr - UTC day to settle, 'YYYY-MM-DD'
+   * @param {number} [options.batchSize=50]
+   */
+  async runDailySettlementForDate({ dateStr, batchSize = 50 }) {
+    const startUtc = new Date(`${dateStr}T00:00:00.000Z`)
+    const endUtc = new Date(startUtc.getTime() + 24 * 60 * 60 * 1000)
+    return this._runDailySettlementForRange({ startUtc, endUtc, dateStr, batchSize })
+  }
+
+  /** @private */
+  async _runDailySettlementForRange({ startUtc, endUtc, dateStr, batchSize }) {
     const summary = { settled: 0, skipped: 0, failed: 0, periodStart: dateStr }
     let cursor = null
     const MAX_PAGES = 5000 // 5000 * 50 = 250k shops cap

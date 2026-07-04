@@ -17,7 +17,7 @@
 //        transaction client, the caller's ROLLBACK undoes any writes that
 //        earlier shop groups may have committed during the same call.
 //     3. The happy path issues exactly one ordersRepository.create per
-//        distinct shop and exactly one shopProductsRepository.applyStockUpdate
+//        distinct shop and exactly one shopProductsRepository.applyStockChange
 //        per cart line — no extras, no duplicates.
 //
 //   The strict "no writes at all" sub-property of Property 7 holds for
@@ -83,7 +83,7 @@ function makeOrdersRepo() {
 /**
  * Build a shop-products repo whose findByIdForUpdate returns the row map
  * that we hand it (keyed by shopProductId). Returning `undefined` from the
- * map simulates a vanished row (returns null). applyStockUpdate succeeds
+ * map simulates a vanished row (returns null). applyStockChange succeeds
  * with the updated qty echoed back.
  */
 function makeShopProductsRepo(rowsByShopProductId) {
@@ -95,12 +95,22 @@ function makeShopProductsRepo(rowsByShopProductId) {
       if (row.shop_id !== shopId) return null
       return row
     }),
-    applyStockUpdate: vi.fn(
-      async (_client, shopProductId, _shopId, newQty) => ({
-        id: shopProductId,
-        stock_quantity: newQty,
-      })
-    ),
+    applyStockChange: vi.fn(async (_client, { shopProductId, delta }) => {
+      const row = rowsByShopProductId.get(shopProductId)
+      const prevQty = row ? Number(row.stock_quantity) : 0
+      const newQty = prevQty + delta
+      return {
+        stockProduct: {
+          id: shopProductId,
+          stock_quantity: newQty,
+          low_stock_threshold: row?.low_stock_threshold ?? 5,
+        },
+        movement: {
+          quantity_before: prevQty,
+          quantity_after: newQty,
+        },
+      }
+    }),
   }
 }
 
@@ -239,7 +249,7 @@ const multiShopValidCartArb = fc
 // Property 7.A — Insufficient stock anywhere → no writes (single shop)
 // ═══════════════════════════════════════════════════════════════
 describe('Property 7: Transaction Atomicity — INSUFFICIENT_STOCK aborts before any write', () => {
-  it('any item with quantity > stock causes zero ordersRepo.create and zero applyStockUpdate calls', async () => {
+  it('any item with quantity > stock causes zero ordersRepo.create and zero applyStockChange calls', async () => {
     await fc.assert(
       fc.asyncProperty(
         singleShopCartArb,
@@ -302,7 +312,7 @@ describe('Property 7: Transaction Atomicity — INSUFFICIENT_STOCK aborts before
           expect(ordersRepo.create).not.toHaveBeenCalled()
           expect(ordersRepo.generateOrderNumber).not.toHaveBeenCalled()
           // (c) No stock UPDATE
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
           // (d) No DML executed via the raw client either
           for (const sql of client.calls) {
             expect(/INSERT|UPDATE|DELETE/i.test(sql)).toBe(false)
@@ -373,7 +383,7 @@ describe('Property 7: Transaction Atomicity — MAX_QTY_EXCEEDED aborts before a
           ).toBe(true)
 
           expect(ordersRepo.create).not.toHaveBeenCalled()
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
         }
       ),
       { numRuns: 100 }
@@ -432,7 +442,7 @@ describe('Property 7: Transaction Atomicity — SHOP_PRODUCT_UNAVAILABLE aborts 
           ).toBe(true)
 
           expect(ordersRepo.create).not.toHaveBeenCalled()
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
         }
       ),
       { numRuns: 100 }
@@ -476,7 +486,7 @@ describe('Property 7: Transaction Atomicity — SHOP_PRODUCT_UNAVAILABLE aborts 
           expect(thrown).not.toBeNull()
           expect(thrown.code).toBe('CHECKOUT_PARTIAL_FAIL')
           expect(ordersRepo.create).not.toHaveBeenCalled()
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
         }
       ),
       { numRuns: 50 }
@@ -519,20 +529,20 @@ describe('Property 7: Transaction Atomicity — happy path commits exactly the e
             distinctShopIds.size
           )
 
-          // Exactly one applyStockUpdate per cart line
-          expect(shopProductsRepo.applyStockUpdate).toHaveBeenCalledTimes(
+          // Exactly one applyStockChange per cart line
+          expect(shopProductsRepo.applyStockChange).toHaveBeenCalledTimes(
             cartItems.length
           )
 
           // Each stock update decremented by exactly the requested quantity
-          for (const call of shopProductsRepo.applyStockUpdate.mock.calls) {
-            const [, shopProductId, , newQty] = call
+          for (const call of shopProductsRepo.applyStockChange.mock.calls) {
+            const [, { shopProductId, delta }] = call
             const row = rowsByShopProductId.get(shopProductId)
             const cartLine = cartItems.find(
               (i) => i.shopProductId === shopProductId
             )
-            expect(newQty).toBe(row.stock_quantity - cartLine.quantity)
-            expect(newQty).toBeGreaterThanOrEqual(0)
+            expect(delta).toBe(-cartLine.quantity)
+            expect(row.stock_quantity + delta).toBeGreaterThanOrEqual(0)
           }
         }
       ),
@@ -635,7 +645,7 @@ describe('Property 7: Transaction Atomicity — multiple failures in one shop gr
           // No writes occurred (single-shop cart so the splitter's contract
           // holds strictly: Req 5.9, 15.9, 15.10).
           expect(ordersRepo.create).not.toHaveBeenCalled()
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
         }
       ),
       { numRuns: 100 }
@@ -647,7 +657,7 @@ describe('Property 7: Transaction Atomicity — multiple failures in one shop gr
 // Property 7.F — Failing shop never has writes when it sorts first
 // ═══════════════════════════════════════════════════════════════
 describe('Property 7: Transaction Atomicity — failing shop is never written when it is processed first', () => {
-  it('the failing shop has zero applyStockUpdate calls and zero ordersRepo.create calls', async () => {
+  it('the failing shop has zero applyStockChange calls and zero ordersRepo.create calls', async () => {
     await fc.assert(
       fc.asyncProperty(
         // 2..4 distinct shops
@@ -744,7 +754,7 @@ describe('Property 7: Transaction Atomicity — failing shop is never written wh
           // No order INSERTs at all (failing shop sorts first)
           expect(ordersRepo.create).not.toHaveBeenCalled()
           // No stock UPDATEs at all
-          expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+          expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
           // The failing shop's stock_quantity is unchanged in the source map
           expect(rowsByShopProductId.get(failedSpId).stock_quantity).toBe(1)
         }
@@ -784,7 +794,7 @@ describe('Property 7: Transaction Atomicity — empty groups also leave state un
     expect(thrown.code).toBe('EMPTY_CART')
     expect(Array.isArray(thrown.failures)).toBe(true)
     expect(ordersRepo.create).not.toHaveBeenCalled()
-    expect(shopProductsRepo.applyStockUpdate).not.toHaveBeenCalled()
+    expect(shopProductsRepo.applyStockChange).not.toHaveBeenCalled()
     expect(shopProductsRepo.findByIdForUpdate).not.toHaveBeenCalled()
   })
 })

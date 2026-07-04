@@ -1,6 +1,7 @@
 import { StoreStatusRepository } from './store-status.repository.js'
 import { logger } from '../../config/logger.js'
 import { getSocketIo } from '../../plugins/socketio.plugin.js'
+import { emit as emitAudit } from '../../utils/audit-log.js'
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000 // UTC+5:30 — same constant used by
 // the delivery-slot generator (src/modules/orders/delivery-slots.routes.js)
@@ -108,12 +109,14 @@ export class StoreStatusService {
   async setOverride({ status, note, adminId }) {
     const updated = await this.repo.setOverride({ status: status || null, note, adminId })
     this._broadcastStoreStatusChanged()
+    await this._syncLastKnownState()
     return updated
   }
 
   async updateWeeklyHours(weeklyHours) {
     const updated = await this.repo.updateWeeklyHours(weeklyHours)
     this._broadcastStoreStatusChanged()
+    await this._syncLastKnownState()
     return updated
   }
 
@@ -121,6 +124,67 @@ export class StoreStatusService {
     const updated = await this.repo.updateClosedBannerImage(imageUrl)
     this._broadcastStoreStatusChanged()
     return updated
+  }
+
+  /**
+   * Called every minute by the store-status scheduler worker
+   * (src/workers/store-status-scheduler.worker.js). Detects when the
+   * *effective* open/closed state (manual override still wins, exactly
+   * like isOpen()) has flipped since the last tick — the case that
+   * matters is a WEEKLY_SCHEDULE boundary crossing with no admin action
+   * at all (e.g. closing time passes at 9pm). When that happens:
+   *   - broadcasts the same live "instant reflect" signal an admin's own
+   *     override/weekly-hours edit already triggers, so every connected
+   *     customer app updates immediately instead of waiting for its next
+   *     unrelated fetch or a manual pull-to-refresh/relaunch.
+   *   - writes a system-attributed row to audit_logs (actor_user_id: null)
+   *     so the transition is actually visible somewhere in the admin's
+   *     history — previously nothing recorded this at all.
+   *
+   * An admin-driven change (setOverride/updateWeeklyHours) already syncs
+   * the baseline itself via _syncLastKnownState(), so this never
+   * double-fires for something the admin's own action already
+   * broadcast/logged a moment earlier.
+   *
+   * @returns {Promise<{isOpen: boolean, source: string, reason: string|null}|null>}
+   *   null when nothing changed (or this is the very first tick after
+   *   deploy, which only establishes a baseline).
+   */
+  async checkForAutomaticTransition() {
+    const status = await this.isOpen()
+    const result = await this.repo.claimStateTransition(status.isOpen)
+    if (!result || result.previousValue === null) return null
+
+    logger.info(
+      { isOpen: status.isOpen, source: status.source, reason: status.reason },
+      'Store status auto-transitioned'
+    )
+
+    this._broadcastStoreStatusChanged()
+
+    emitAudit(status.isOpen ? 'store_status_auto_opened' : 'store_status_auto_closed', {
+      target_type: 'store_status',
+      actor_role: 'SYSTEM',
+      after: { isOpen: status.isOpen, source: status.source, reason: status.reason },
+    })
+
+    return status
+  }
+
+  /**
+   * Silently records the current effective state as "already known" right
+   * after an admin-driven change — so the scheduler worker's next tick
+   * doesn't mistake the admin's own action for an automatic transition
+   * and double broadcast/log it.
+   * @private
+   */
+  async _syncLastKnownState() {
+    try {
+      const status = await this.isOpen()
+      await this.repo.claimStateTransition(status.isOpen)
+    } catch (err) {
+      logger.warn({ err: err.message }, 'Store status baseline sync failed (non-blocking)')
+    }
   }
 
   /**

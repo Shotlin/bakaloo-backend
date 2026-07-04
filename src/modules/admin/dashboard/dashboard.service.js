@@ -3,35 +3,39 @@ export class DashboardService {
     this.repository = repository
   }
 
-  async getStats(period = 'week') {
-    return this.repository.getStats(period)
+  async getStats(period = 'week', shopId = null) {
+    return this.repository.getStats(period, shopId)
   }
 
-  async getRevenueChart(days) {
-    return this.repository.getRevenueChart(days)
+  async getKpis(shopId = null) {
+    return this.repository.getKpis(shopId)
   }
 
-  async getOrdersByHour() {
-    return this.repository.getOrdersByHour()
+  async getRevenueChart(days, shopId = null) {
+    return this.repository.getRevenueChart(days, shopId)
   }
 
-  async getTopProducts(limit) {
-    return this.repository.getTopProducts(limit)
+  async getOrdersByHour(shopId = null) {
+    return this.repository.getOrdersByHour(shopId)
   }
 
-  async getLowStockAlerts(threshold) {
-    return this.repository.getLowStockAlerts(threshold)
+  async getTopProducts(limit, shopId = null) {
+    return this.repository.getTopProducts(limit, shopId)
   }
 
-  async getPendingActions() {
-    return this.repository.getPendingActions()
+  async getLowStockAlerts(threshold, shopId = null) {
+    return this.repository.getLowStockAlerts(threshold, shopId)
   }
 
-  async getLiveStats() {
-    return this.repository.getLiveStats()
+  async getPendingActions(shopId = null) {
+    return this.repository.getPendingActions(shopId)
   }
 
-  async getCategoryRevenue() {
-    return this.repository.getCategoryRevenue()
+  async getLiveStats(shopId = null) {
+    return this.repository.getLiveStats(shopId)
+  }
+
+  async getCategoryRevenue(shopId = null) {
+    return this.repository.getCategoryRevenue(shopId)
   }
 }

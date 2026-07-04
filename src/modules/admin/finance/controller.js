@@ -7,6 +7,10 @@ import {
   markPaidParamSchema,
   payoutReportQuerySchema,
   comparisonQuerySchema,
+  runSettlementSchema,
+  listTransactionsFlatQuerySchema,
+  listFinancialsFlatQuerySchema,
+  financialIdParamSchema,
 } from './schema.js'
 
 /**
@@ -79,6 +83,57 @@ export class AdminFinanceController {
     }))
   }
 
+  /** GET /transactions — HQ-wide flat view, optional ?shop_id= filter */
+  async listTransactions(request, reply) {
+    const parsed = listTransactionsFlatQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      const detail = parsed.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ')
+      return reply.code(400).send(error(detail, 'VALIDATION_ERROR'))
+    }
+
+    const result = await this.service.listTransactions(parsed.data)
+    return reply.code(200).send(success({
+      transactions: result.items,
+      total: result.total,
+      page: parsed.data.page,
+      limit: parsed.data.limit,
+    }, 'Transactions retrieved'))
+  }
+
+  /** GET /financials — HQ-wide flat view, optional ?shop_id= filter */
+  async listFinancials(request, reply) {
+    const parsed = listFinancialsFlatQuerySchema.safeParse(request.query)
+    if (!parsed.success) {
+      const detail = parsed.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ')
+      return reply.code(400).send(error(detail, 'VALIDATION_ERROR'))
+    }
+
+    const result = await this.service.listFinancials(parsed.data)
+    return reply.code(200).send(success({
+      financials: result.items,
+      total: result.total,
+      page: parsed.data.page,
+      limit: parsed.data.limit,
+    }, 'Financials retrieved'))
+  }
+
+  /** POST /financials/:id/mark-paid — flat, no shopId required */
+  async markPaidFlat(request, reply) {
+    const paramParsed = financialIdParamSchema.safeParse(request.params)
+    if (!paramParsed.success) {
+      return reply.code(400).send(error('Invalid id', 'VALIDATION_ERROR'))
+    }
+
+    const actorId = request.user?.id || null
+    const result = await this.service.markPaidById(paramParsed.data.id, actorId)
+    if (!result.ok) {
+      const status = result.code === 'NOT_FOUND' ? 404 : 409
+      return reply.code(status).send(error(result.message, result.code))
+    }
+
+    return reply.code(200).send(success(result.row, 'Payout marked as paid'))
+  }
+
   /** POST /shops/:shopId/payouts/:periodId/mark-paid */
   async markPaid(request, reply) {
     const paramParsed = markPaidParamSchema.safeParse(request.params)
@@ -132,6 +187,19 @@ export class AdminFinanceController {
     }
 
     return reply.send(csvBody)
+  }
+
+  /** POST /settlement/run */
+  async runSettlement(request, reply) {
+    const parsed = runSettlementSchema.safeParse(request.body || {})
+    if (!parsed.success) {
+      const detail = parsed.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ')
+      return reply.code(400).send(error(detail, 'VALIDATION_ERROR'))
+    }
+
+    const actorId = request.user?.id || null
+    const result = await this.service.runSettlementNow({ ...parsed.data, actorId })
+    return reply.code(200).send(success(result, 'Settlement run complete'))
   }
 
   /** GET /comparison */

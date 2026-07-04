@@ -773,7 +773,26 @@ export class CouponsService {
       return { success: false, message: 'Coupon not found' }
     }
 
-    await this.repo.delete(id)
+    try {
+      await this.repo.delete(id)
+    } catch (err) {
+      // coupon_usages.coupon_id (and first_time_offers/cart_milestones'
+      // unlock_coupon_id) have no ON DELETE cascade — once a customer has
+      // redeemed the coupon, or another reward references it as an unlock,
+      // a hard delete violates that FK and Postgres throws 23503.
+      // Previously this reached the global error handler as an opaque 500;
+      // surface a clear 409 instead and point the admin at deactivating
+      // (already a supported toggle) so redemption history isn't lost.
+      if (err && err.code === '23503') {
+        const conflict = new Error(
+          'This coupon has already been used by customers (or is linked to another offer) and cannot be deleted. Deactivate it instead to hide it from customers while keeping their redemption history intact.'
+        )
+        conflict.statusCode = 409
+        conflict.code = 'COUPON_IN_USE'
+        throw conflict
+      }
+      throw err
+    }
 
     // Task 9.6: Emit coupon_deleted audit (fire-and-forget)
     emitAudit('coupon_deleted', {

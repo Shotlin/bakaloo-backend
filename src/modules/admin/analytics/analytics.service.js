@@ -12,8 +12,8 @@ export class AdminAnalyticsService {
     return repo.getProductPerformance(params)
   }
 
-  async getCustomerCohorts() {
-    return repo.getCustomerCohorts()
+  async getCustomerCohorts(params) {
+    return repo.getCustomerCohorts(params)
   }
 
   async getDeliveryAnalytics(params) {
@@ -31,14 +31,15 @@ export class AdminAnalyticsService {
   async getComparison(params) {
     return repo.getComparisonStats(
       params.period1Start, params.period1End,
-      params.period2Start, params.period2End
+      params.period2Start, params.period2End,
+      params.shopId
     )
   }
 
-  async exportReportPDF({ startDate, endDate }) {
+  async exportReportPDF({ startDate, endDate, shopId }) {
     const [sales, financial] = await Promise.all([
-      repo.getSalesAnalytics({ startDate, endDate }),
-      repo.getFinancialReport({ startDate, endDate }),
+      repo.getSalesAnalytics({ startDate, endDate, shopId }),
+      repo.getFinancialReport({ startDate, endDate, shopId }),
     ])
 
     return new Promise((resolve, reject) => {

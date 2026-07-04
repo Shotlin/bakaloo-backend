@@ -157,3 +157,45 @@ describe('PaymentOffersService.getPublicOffers — no longer injects hardcoded d
     expect(result).toEqual([])
   })
 })
+
+describe('PaymentOffersService.delete — foreign-key-in-use conflict (negative)', () => {
+  // Reported bug: deleting a payment offer that a customer had already
+  // redeemed threw a raw Postgres FK violation (payment_offer_usages has no
+  // ON DELETE cascade on payment_offer_id), reaching the customer as an
+  // opaque 500. Surface a clear 409 instead and point at deactivating.
+  it('surfaces a 409 with a clear message instead of a raw 500 when the offer has usage history', async () => {
+    const fkErr = new Error('update or delete on table "payment_offers" violates foreign key constraint')
+    fkErr.code = '23503'
+    const repo = makeRepoMock({ delete: vi.fn().mockRejectedValue(fkErr) })
+    const service = new PaymentOffersService(repo)
+
+    await expect(service.delete('offer-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_OFFER_IN_USE',
+    })
+  })
+
+  it('re-throws any other repository error unchanged (not misclassified as in-use)', async () => {
+    const repo = makeRepoMock({ delete: vi.fn().mockRejectedValue(new Error('connection lost')) })
+    const service = new PaymentOffersService(repo)
+
+    await expect(service.delete('offer-1')).rejects.toThrow('connection lost')
+  })
+
+  it('still throws 404 for a genuinely missing offer (unaffected by the new FK handling)', async () => {
+    const repo = makeRepoMock({ delete: vi.fn().mockResolvedValue(null) })
+    const service = new PaymentOffersService(repo)
+
+    await expect(service.delete('missing-offer')).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'NOT_FOUND',
+    })
+  })
+
+  it('deletes successfully when the offer has no usage history (positive)', async () => {
+    const repo = makeRepoMock({ delete: vi.fn().mockResolvedValue({ id: 'offer-1' }) })
+    const service = new PaymentOffersService(repo)
+
+    await expect(service.delete('offer-1')).resolves.toBeUndefined()
+  })
+})

@@ -60,4 +60,36 @@ export class StoreStatusRepository {
     )
     return rows[0] || null
   }
+
+  /**
+   * Atomically records the newly-evaluated effective open/closed state,
+   * but only writes (and returns the previous value) when it actually
+   * differs from what's already stored — this WHERE clause is the race
+   * guard across the two API cluster instances that both run the
+   * store-status scheduler worker: only whichever instance's UPDATE
+   * matches a row (i.e. wins the race) gets a result back and should
+   * broadcast/log the transition; the other instance's UPDATE affects
+   * zero rows and correctly no-ops instead of double-firing.
+   *
+   * The `prev` CTE captures the pre-UPDATE value in the same statement so
+   * the caller can distinguish "first run after deploy" (previousValue
+   * null — just establishing a baseline, not a real transition) from a
+   * genuine flip.
+   *
+   * @param {boolean} isOpen
+   * @returns {Promise<{previousValue: boolean|null}|null>} null when the
+   *   state hasn't changed since the last call (nothing to claim).
+   */
+  async claimStateTransition(isOpen) {
+    const { rows } = await query(
+      `WITH prev AS (SELECT last_known_is_open FROM store_status LIMIT 1)
+       UPDATE store_status
+       SET last_known_is_open = $1
+       WHERE last_known_is_open IS DISTINCT FROM $1
+       RETURNING (SELECT last_known_is_open FROM prev) AS previous_value`,
+      [isOpen]
+    )
+    if (rows.length === 0) return null
+    return { previousValue: rows[0].previous_value }
+  }
 }

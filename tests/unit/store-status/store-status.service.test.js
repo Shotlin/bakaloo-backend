@@ -21,6 +21,11 @@ vi.mock('../../../src/plugins/socketio.plugin.js', () => ({
   getSocketIo: () => getSocketIoMock(),
 }))
 
+const emitAuditMock = vi.fn()
+vi.mock('../../../src/utils/audit-log.js', () => ({
+  emit: (...args) => emitAuditMock(...args),
+}))
+
 const { StoreStatusService } = await import('../../../src/modules/store-status/store-status.service.js')
 
 function service(row) {
@@ -311,5 +316,113 @@ describe('StoreStatusService — realtime broadcast on change (instant-reflect f
 
     await expect(svc.setOverride({ status: 'OPEN', adminId: 'admin-1' })).resolves.toMatchObject({ id: 'row-1' })
     expect(mockIoEmit).not.toHaveBeenCalled()
+  })
+})
+
+describe('StoreStatusService.checkForAutomaticTransition — the architecture fix (2026-07-04)', () => {
+  // Reported bug: the admin sets a weekly schedule (e.g. closes at 9pm),
+  // but the store never actually auto-closed anywhere the customer could
+  // see, and nothing showed up in activity history proving the schedule
+  // was "interconnected" at all — isOpen() was only ever evaluated
+  // reactively, per HTTP request. This is the periodic worker's entry
+  // point: it must detect a genuine WEEKLY_SCHEDULE (or fail-open DEFAULT)
+  // flip and both broadcast it live and log it, while never double-firing
+  // for something an admin's own override/hours edit already handled.
+
+  beforeEach(() => {
+    mockIoEmit.mockClear()
+    mockIoTo.mockClear()
+    getSocketIoMock.mockClear()
+    emitAuditMock.mockClear()
+  })
+
+  function repoWithClaim({ row, claimResult }) {
+    return {
+      getStatus: vi.fn().mockResolvedValue(row),
+      claimStateTransition: vi.fn().mockResolvedValue(claimResult),
+    }
+  }
+
+  it('broadcasts + logs a system audit entry when the effective state actually flips (positive)', async () => {
+    const repo = repoWithClaim({
+      row: { manual_override_status: null, weekly_hours: { monday: { open: '09:00', close: '21:00', closed: false } } },
+      claimResult: { previousValue: true }, // was open, now closed
+    })
+    const svc = new StoreStatusService(repo)
+
+    const result = await svc.checkForAutomaticTransition()
+
+    expect(result).not.toBeNull()
+    expect(mockIoEmit).toHaveBeenCalledWith('store:status:update', expect.any(Object))
+    expect(emitAuditMock).toHaveBeenCalledWith(
+      expect.stringMatching(/store_status_auto_(opened|closed)/),
+      expect.objectContaining({ target_type: 'store_status', actor_role: 'SYSTEM' })
+    )
+  })
+
+  it('does nothing when the state has not changed since the last tick (negative)', async () => {
+    const repo = repoWithClaim({
+      row: { manual_override_status: null, weekly_hours: {} },
+      claimResult: null,
+    })
+    const svc = new StoreStatusService(repo)
+
+    const result = await svc.checkForAutomaticTransition()
+
+    expect(result).toBeNull()
+    expect(mockIoEmit).not.toHaveBeenCalled()
+    expect(emitAuditMock).not.toHaveBeenCalled()
+  })
+
+  it('does nothing on the very first tick after deploy — establishes a baseline instead of reporting a false transition (negative)', async () => {
+    const repo = repoWithClaim({
+      row: { manual_override_status: null, weekly_hours: {} },
+      claimResult: { previousValue: null }, // column was NULL — first run
+    })
+    const svc = new StoreStatusService(repo)
+
+    const result = await svc.checkForAutomaticTransition()
+
+    expect(result).toBeNull()
+    expect(mockIoEmit).not.toHaveBeenCalled()
+    expect(emitAuditMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('StoreStatusService — admin actions sync the baseline so the scheduler never double-fires', () => {
+  beforeEach(() => {
+    mockIoEmit.mockClear()
+    emitAuditMock.mockClear()
+  })
+
+  it('setOverride() syncs last-known state after broadcasting', async () => {
+    const claimStateTransition = vi.fn().mockResolvedValue(null)
+    const repo = {
+      setOverride: vi.fn().mockResolvedValue({ id: 'row-1' }),
+      getStatus: vi.fn().mockResolvedValue({ manual_override_status: 'CLOSED', weekly_hours: {} }),
+      claimStateTransition,
+    }
+    const svc = new StoreStatusService(repo)
+
+    await svc.setOverride({ status: 'CLOSED', adminId: 'admin-1' })
+
+    expect(claimStateTransition).toHaveBeenCalledWith(false)
+    // The admin action's own broadcast already fired — checkForAutomaticTransition
+    // was not involved, so no duplicate audit log for this action.
+    expect(emitAuditMock).not.toHaveBeenCalled()
+  })
+
+  it('updateWeeklyHours() syncs last-known state after broadcasting', async () => {
+    const claimStateTransition = vi.fn().mockResolvedValue(null)
+    const repo = {
+      updateWeeklyHours: vi.fn().mockResolvedValue({ id: 'row-1' }),
+      getStatus: vi.fn().mockResolvedValue({ manual_override_status: null, weekly_hours: {} }),
+      claimStateTransition,
+    }
+    const svc = new StoreStatusService(repo)
+
+    await svc.updateWeeklyHours({ monday: { open: '09:00', close: '21:00', closed: false } })
+
+    expect(claimStateTransition).toHaveBeenCalledWith(true) // fail-open default with empty getStatus mock
   })
 })

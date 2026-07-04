@@ -51,6 +51,39 @@ export default async function adminFinanceRoutes(fastify) {
     preHandler: readPreHandlers,
   }, controller.listShops.bind(controller))
 
+  // GET /transactions — HQ-wide flat view across all shops (optional
+  // ?shop_id= filter). Backs the dashboard's Transactions tab, which shows
+  // every shop in one table rather than requiring a shopId up front.
+  fastify.get('/transactions', {
+    schema: {
+      tags: ['Admin Finance'],
+      summary: 'List transactions across all shops [finance.global_view]',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: readPreHandlers,
+  }, controller.listTransactions.bind(controller))
+
+  // GET /financials — HQ-wide flat view across all shops (optional
+  // ?shop_id= filter). Backs the dashboard's Financials tab.
+  fastify.get('/financials', {
+    schema: {
+      tags: ['Admin Finance'],
+      summary: 'List financials across all shops [finance.global_view]',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: readPreHandlers,
+  }, controller.listFinancials.bind(controller))
+
+  // POST /financials/:id/mark-paid — flat, no shopId required
+  fastify.post('/financials/:id/mark-paid', {
+    schema: {
+      tags: ['Admin Finance'],
+      summary: 'Mark payout as paid by id [shop_financials.mark_paid]',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: markPaidPreHandlers,
+  }, controller.markPaidFlat.bind(controller))
+
   // GET /shops/:shopId/transactions — shop transactions (HQ view)
   fastify.get('/shops/:shopId/transactions', {
     schema: {
@@ -90,6 +123,18 @@ export default async function adminFinanceRoutes(fastify) {
     },
     preHandler: readPreHandlers,
   }, controller.payoutReport.bind(controller))
+
+  // POST /settlement/run — manually trigger DAILY settlement on demand
+  // (skips waiting for the 02:00 UTC cron; used by operators to verify a
+  // just-delivered test order actually produced financials/transactions)
+  fastify.post('/settlement/run', {
+    schema: {
+      tags: ['Admin Finance'],
+      summary: 'Run settlement now [shop_financials.mark_paid]',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: markPaidPreHandlers,
+  }, controller.runSettlement.bind(controller))
 
   // GET /comparison — shop comparison view
   fastify.get('/comparison', {

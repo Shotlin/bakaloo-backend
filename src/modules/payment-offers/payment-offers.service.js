@@ -140,7 +140,26 @@ export class PaymentOffersService {
   }
 
   async delete(id) {
-    const deleted = await this.repo.delete(id)
+    let deleted
+    try {
+      deleted = await this.repo.delete(id)
+    } catch (err) {
+      // payment_offer_usages.payment_offer_id has no ON DELETE cascade —
+      // once a customer has redeemed the offer, a hard delete violates
+      // that FK and Postgres throws 23503. Previously this reached the
+      // global error handler as an opaque 500; surface a clear 409 instead
+      // and point the admin at deactivating (already a supported toggle)
+      // so redemption history isn't lost.
+      if (err && err.code === '23503') {
+        const conflict = new Error(
+          'This payment offer has already been used by customers and cannot be deleted. Deactivate it instead to hide it from customers while keeping their redemption history intact.'
+        )
+        conflict.statusCode = 409
+        conflict.code = 'PAYMENT_OFFER_IN_USE'
+        throw conflict
+      }
+      throw err
+    }
     if (!deleted) {
       const error = new Error('Payment offer not found')
       error.statusCode = 404

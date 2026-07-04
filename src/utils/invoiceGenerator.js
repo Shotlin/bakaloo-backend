@@ -1,8 +1,29 @@
 import PDFDocument from 'pdfkit'
 
+const TERMINAL_BANNER_STATUS = new Set(['CANCELLED', 'REFUNDED'])
+
+/**
+ * Find the timeline entry that moved the order INTO its current terminal
+ * status (CANCELLED/REFUNDED), if a timeline was supplied. Reversed search
+ * because an order can bounce CANCELLED -> REFUNDED — we want the most
+ * recent transition into the current status, not the first.
+ */
+function findStatusTransition(timeline, status) {
+  if (!Array.isArray(timeline)) return null
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    if (timeline[i].to_status === status) return timeline[i]
+  }
+  return null
+}
+
 /**
  * Generate a PDF invoice buffer for an order
  * @param {Object} order - Order object with items, delivery_address, etc.
+ *   Optional `order.timeline` (order_status_history rows) and
+ *   `order.payment` (latest payments row) enrich the CANCELLED/REFUNDED
+ *   banner with a date, reason, and refund amount when available — the
+ *   invoice still renders correctly without them, just with a plainer
+ *   banner (no date/reason line).
  * @returns {Promise<Buffer>} PDF buffer
  */
 export function generateInvoicePDF(order) {
@@ -61,7 +82,51 @@ export function generateInvoicePDF(order) {
       )
     }
 
-    doc.moveDown(4)
+    // ─── Cancellation / Refund Banner ──────────────────
+    if (TERMINAL_BANNER_STATUS.has(order.status)) {
+      const isRefunded = order.status === 'REFUNDED'
+      const bannerColor = isRefunded ? '#B45309' : '#B91C1C' // amber-700 / red-700
+      const transition = findStatusTransition(order.timeline, order.status)
+      const refundAmount = order.payment?.refund_amount
+        ? parseFloat(order.payment.refund_amount)
+        : null
+
+      const bannerTop = doc.y + 6
+      doc
+        .rect(50, bannerTop, 495, transition || refundAmount ? 54 : 30)
+        .fillAndStroke('#FEF2F2', bannerColor)
+
+      doc
+        .fillColor(bannerColor)
+        .font('Helvetica-Bold')
+        .fontSize(13)
+        .text(
+          isRefunded ? 'ORDER REFUNDED' : 'ORDER CANCELLED',
+          60, bannerTop + 7
+        )
+
+      doc.font('Helvetica').fontSize(9)
+      let bannerLine = bannerTop + 26
+      if (transition?.changed_at) {
+        const label = isRefunded ? 'Refunded on' : 'Cancelled on'
+        doc.text(
+          `${label} ${new Date(transition.changed_at).toLocaleDateString('en-IN')}`,
+          60, bannerLine
+        )
+        bannerLine += 14
+      }
+      if (transition?.note) {
+        doc.text(`Reason: ${transition.note}`, 60, bannerLine, { width: 420 })
+      }
+      if (refundAmount) {
+        doc.text(`Refund amount: ₹${refundAmount.toFixed(2)}`, 350, bannerTop + 26)
+      }
+
+      doc.fillColor('black')
+      doc.y = bannerTop + (transition || refundAmount ? 54 : 30) + 12
+    } else {
+      doc.moveDown(4)
+    }
 
     // ─── Items Table Header ───────────────────────────
     const tableTop = doc.y

@@ -1,5 +1,6 @@
 import { query } from '../../config/database.js'
 import { ERROR_CODES, httpStatusFor } from '../../constants/errors.js'
+import { logger } from '../../config/logger.js'
 
 /**
  * Stock_Movement_Type vocabulary — must stay in sync with the
@@ -756,6 +757,56 @@ export class ShopProductsRepository {
       stockProduct,
       movement: movementResult.rows[0],
     }
+  }
+
+  /**
+   * Restore stock for every line item of an order that's being cancelled
+   * before delivery — the shared entry point for the three cancel paths
+   * (customer self-cancel, shop-staff cancel, HQ admin cancel), each of
+   * which previously either bypassed the ledger or skipped restoration
+   * entirely. Every restored line goes through `applyStockChange()` so it
+   * gets a `CANCELLATION_RESTORE` ledger row and the same cache
+   * invalidation every other stock mutation gets.
+   *
+   * Items without a `shopProductId` (legacy orders predating Phase 3, or a
+   * shop_product that's since been hard-deleted) are skipped — there is no
+   * row left to restore stock onto. Per-item failures are caught and
+   * logged rather than thrown, so one bad line can't block the rest of the
+   * order's stock from being restored or abort the cancellation itself.
+   *
+   * @param {import('pg').PoolClient} client - Transactional client.
+   * @param {object} params
+   * @param {string} params.orderId
+   * @param {Array<{shop_product_id?: string, shopProductId?: string, quantity: number}>} params.items
+   * @param {'DASHBOARD'|'ORDER'|'JOB'|'API'} params.source
+   * @param {{ userId: string|null, shopRole: string|null }|null} [params.actor]
+   * @returns {Promise<number>} count of lines successfully restored
+   */
+  async restoreStockForCancelledOrder(client, { orderId, items, source, actor = null }) {
+    let restoredCount = 0
+    for (const item of items || []) {
+      const shopProductId = item.shopProductId || item.shop_product_id
+      const quantity = Number(item.quantity)
+      if (!shopProductId || !Number.isFinite(quantity) || quantity <= 0) continue
+
+      try {
+        await this.applyStockChange(client, {
+          shopProductId,
+          delta: quantity,
+          type: STOCK_MOVEMENT_TYPES.CANCELLATION_RESTORE,
+          source,
+          orderId,
+          actor,
+        })
+        restoredCount++
+      } catch (err) {
+        logger.error(
+          { err: err.message, orderId, shopProductId, quantity },
+          'Stock restore failed for one order line during cancellation (non-blocking)'
+        )
+      }
+    }
+    return restoredCount
   }
 
   // ────────────────────────────────────────────────────────

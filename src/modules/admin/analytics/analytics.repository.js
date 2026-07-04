@@ -1,12 +1,13 @@
 import { query } from '../../../config/database.js'
 
 export class AdminAnalyticsRepository {
-  async getSalesAnalytics({ startDate, endDate, groupBy = 'day' }) {
+  async getSalesAnalytics({ startDate, endDate, groupBy = 'day', shopId }) {
     const trunc = groupBy === 'month' ? 'month' : groupBy === 'week' ? 'week' : 'day'
     const params = []
     let dateFilter = "WHERE o.status = 'DELIVERED'"
     if (startDate) { params.push(startDate); dateFilter += ` AND o.created_at >= $${params.length}` }
     if (endDate) { params.push(endDate); dateFilter += ` AND o.created_at <= $${params.length}` }
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
 
     const { rows: timeSeries } = await query(
       `SELECT DATE_TRUNC('${trunc}', o.created_at) AS period,
@@ -45,11 +46,12 @@ export class AdminAnalyticsRepository {
     }
   }
 
-  async getProductPerformance({ startDate, endDate, limit = 20 }) {
+  async getProductPerformance({ startDate, endDate, limit = 20, shopId }) {
     const params = [limit]
     let dateFilter = "WHERE o.status = 'DELIVERED'"
     if (startDate) { params.push(startDate); dateFilter += ` AND o.created_at >= $${params.length}` }
     if (endDate) { params.push(endDate); dateFilter += ` AND o.created_at <= $${params.length}` }
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.thumbnail_url, c.name AS category,
@@ -73,7 +75,17 @@ export class AdminAnalyticsRepository {
     return rows.map(r => ({ ...r, revenue: parseFloat(r.revenue), conversion_rate: parseFloat(r.conversion_rate) }))
   }
 
-  async getCustomerCohorts() {
+  /**
+   * Cohort retention is inherently platform-wide (cohort = signup month,
+   * independent of any shop) EXCEPT for the "active in month" measure, which
+   * counts orders and can be scoped to one shop's orders when a shop-scoped
+   * caller is asking (their own repeat-customer retention).
+   */
+  async getCustomerCohorts({ shopId } = {}) {
+    const params = []
+    let orderShopFilter = ''
+    if (shopId) { params.push(shopId); orderShopFilter = ` AND o.shop_id = $${params.length}` }
+
     const { rows } = await query(
       `WITH cohorts AS (
          SELECT DATE_TRUNC('month', u.created_at) AS cohort_month,
@@ -84,7 +96,7 @@ export class AdminAnalyticsRepository {
          SELECT c.cohort_month, DATE_TRUNC('month', o.created_at) AS order_month,
                 COUNT(DISTINCT c.user_id)::int AS active_users
          FROM cohorts c
-         JOIN orders o ON o.user_id = c.user_id AND o.status = 'DELIVERED'
+         JOIN orders o ON o.user_id = c.user_id AND o.status = 'DELIVERED'${orderShopFilter}
          GROUP BY c.cohort_month, DATE_TRUNC('month', o.created_at)
        ),
        cohort_sizes AS (
@@ -95,16 +107,25 @@ export class AdminAnalyticsRepository {
               ROUND(obm.active_users::numeric / cs.size * 100, 2) AS retention_pct
        FROM orders_by_month obm
        JOIN cohort_sizes cs ON cs.cohort_month = obm.cohort_month
-       ORDER BY obm.cohort_month, obm.order_month`
+       ORDER BY obm.cohort_month, obm.order_month`,
+      params
     )
     return rows.map(r => ({ ...r, retention_pct: parseFloat(r.retention_pct) }))
   }
 
-  async getDeliveryAnalytics({ startDate, endDate }) {
+  async getDeliveryAnalytics({ startDate, endDate, shopId }) {
     const params = []
     let dateFilter = "WHERE da.status = 'DELIVERED'"
     if (startDate) { params.push(startDate); dateFilter += ` AND da.delivered_at >= $${params.length}` }
     if (endDate) { params.push(endDate); dateFilter += ` AND da.delivered_at <= $${params.length}` }
+
+    // delivery_assignments has no shop_id column directly — scope via its
+    // parent order instead, joining only when a shop-scoped caller needs it
+    // (keeps the unscoped/HQ query plan identical to before this change).
+    const fromClause = shopId
+      ? 'FROM delivery_assignments da JOIN orders o ON o.id = da.order_id'
+      : 'FROM delivery_assignments da'
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
 
     const { rows: [summary] } = await query(
       `SELECT COUNT(*)::int AS total_deliveries,
@@ -113,7 +134,7 @@ export class AdminAnalyticsRepository {
               AVG(da.rating) AS avg_rating,
               COUNT(CASE WHEN da.delivery_time_minutes <= 30 THEN 1 END)::int AS on_time_count,
               SUM(da.tip_amount) AS total_tips
-       FROM delivery_assignments da ${dateFilter}`,
+       ${fromClause} ${dateFilter}`,
       params
     )
 
@@ -121,7 +142,7 @@ export class AdminAnalyticsRepository {
       `SELECT EXTRACT(HOUR FROM da.delivered_at AT TIME ZONE 'Asia/Kolkata')::int AS hour,
               COUNT(*)::int AS deliveries,
               AVG(da.delivery_time_minutes) AS avg_time
-       FROM delivery_assignments da ${dateFilter}
+       ${fromClause} ${dateFilter}
        GROUP BY hour ORDER BY hour`,
       params
     )
@@ -143,11 +164,12 @@ export class AdminAnalyticsRepository {
     }
   }
 
-  async getFinancialReport({ startDate, endDate }) {
+  async getFinancialReport({ startDate, endDate, shopId }) {
     const params = []
     let dateFilter = "WHERE o.status = 'DELIVERED'"
     if (startDate) { params.push(startDate); dateFilter += ` AND o.created_at >= $${params.length}` }
     if (endDate) { params.push(endDate); dateFilter += ` AND o.created_at <= $${params.length}` }
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
 
     const { rows: [rev] } = await query(
       `SELECT SUM(o.total_amount) AS gross_revenue,
@@ -166,15 +188,27 @@ export class AdminAnalyticsRepository {
       params
     )
 
-    const { rows: gstRows } = await query(
-      `SELECT 0 AS gst_rate,
-              SUM(oi.total) AS taxable_amount,
-              0 AS gst_amount
+    const { rows: [grossRow] } = await query(
+      `SELECT COALESCE(SUM(oi.total), 0) AS gross_taxable
        FROM order_items oi
        JOIN orders o ON o.id = oi.order_id
        ${dateFilter}`,
       params
     )
+
+    // Single admin-configurable flat rate (Settings → Store Info → GST
+    // Rate), not a per-product multi-slab system. order_items.total is
+    // GST-inclusive (standard Indian retail/MRP practice), so the tax
+    // portion is backed out of the gross figure rather than added on top.
+    const { rows: [gstSetting] } = await query(
+      `SELECT value FROM app_settings WHERE key = 'gst_rate'`
+    )
+    const gstRate = parseFloat(gstSetting?.value) || 0
+    const grossTaxable = parseFloat(grossRow.gross_taxable || 0)
+    const gstAmount = gstRate > 0
+      ? Math.round((grossTaxable * gstRate / (100 + gstRate)) * 100) / 100
+      : 0
+    const taxableAmount = Math.round((grossTaxable - gstAmount) * 100) / 100
 
     return {
       revenue: {
@@ -185,19 +219,18 @@ export class AdminAnalyticsRepository {
         order_count: rev.order_count,
       },
       byPaymentMethod: byPayment.map(r => ({ ...r, revenue: parseFloat(r.revenue) })),
-      gstBreakdown: gstRows.map(r => ({
-        gst_rate: parseFloat(r.gst_rate),
-        taxable_amount: parseFloat(r.taxable_amount),
-        gst_amount: parseFloat(r.gst_amount),
-      })),
+      gstBreakdown: grossTaxable > 0
+        ? [{ gst_rate: gstRate, taxable_amount: taxableAmount, gst_amount: gstAmount }]
+        : [],
     }
   }
 
-  async getCartEnhancementAnalytics({ startDate, endDate }) {
+  async getCartEnhancementAnalytics({ startDate, endDate, shopId }) {
     const params = []
     let dateFilter = "WHERE o.status = 'DELIVERED'"
     if (startDate) { params.push(startDate); dateFilter += ` AND o.created_at >= $${params.length}` }
     if (endDate) { params.push(endDate); dateFilter += ` AND o.created_at <= $${params.length}` }
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
 
     const { rows: [summary] } = await query(
       `SELECT COALESCE(SUM(COALESCE(o.tip_amount, 0)), 0) AS total_tips,
@@ -235,13 +268,16 @@ export class AdminAnalyticsRepository {
     }
   }
 
-  async getComparisonStats(period1Start, period1End, period2Start, period2End) {
+  async getComparisonStats(period1Start, period1End, period2Start, period2End, shopId) {
     const getStats = async (start, end) => {
+      const params = [start, end]
+      let shopFilter = ''
+      if (shopId) { params.push(shopId); shopFilter = ` AND shop_id = $${params.length}` }
       const { rows: [s] } = await query(
         `SELECT SUM(total_amount) AS revenue, COUNT(*)::int AS orders,
                 COUNT(DISTINCT user_id)::int AS customers, AVG(total_amount) AS aov
-         FROM orders WHERE status = 'DELIVERED' AND created_at >= $1 AND created_at <= $2`,
-        [start, end]
+         FROM orders WHERE status = 'DELIVERED' AND created_at >= $1 AND created_at <= $2${shopFilter}`,
+        params
       )
       return {
         revenue: parseFloat(s.revenue || 0),

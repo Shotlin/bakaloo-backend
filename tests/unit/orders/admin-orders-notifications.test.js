@@ -174,3 +174,64 @@ describe('AdminOrdersService.refundOrder — customer notification', () => {
     )
   })
 })
+
+describe('AdminOrdersService — Socket.IO live-sync emit on cancel/refund (2026-07-04)', () => {
+  // Reported bug: an admin cancelling/refunding an order was correct in the
+  // DB (re-cancelling correctly got rejected by the API) and the push
+  // notification fired, but the customer's app kept showing the pre-change
+  // status because — unlike updateStatus()/rescheduleDelivery() — neither
+  // cancelOrder() nor refundOrder() ever called `fastify.emitOrderUpdate`,
+  // the Socket.IO event the mobile app's live-sync listens for to
+  // invalidate its cache and refresh the UI immediately.
+  function makeServiceWithSocket(order, payment = null) {
+    const emitOrderUpdate = vi.fn()
+    const repository = {
+      findById: vi.fn(async () => order),
+      getOrderPayment: vi.fn(async () => payment),
+      updateStatus: vi.fn(async () => order.status),
+    }
+    const service = new AdminOrdersService(repository, { emitOrderUpdate })
+    return { service, emitOrderUpdate }
+  }
+
+  it('cancelOrder emits order:status with the CANCELLED status (positive)', async () => {
+    const order = makeOrder({ status: 'CONFIRMED', payment_status: 'PENDING' })
+    const { service, emitOrderUpdate } = makeServiceWithSocket(order)
+
+    await service.cancelOrder(ORDER_ID, { reason: 'Out of stock' }, ADMIN_ID, '127.0.0.1')
+
+    expect(emitOrderUpdate).toHaveBeenCalledWith(
+      ORDER_ID,
+      [USER_ID],
+      expect.objectContaining({ status: 'CANCELLED' })
+    )
+  })
+
+  it('refundOrder emits order:status with the REFUNDED status (positive)', async () => {
+    const order = makeOrder({ status: 'DELIVERED', payment_status: 'PAID', total_amount: '250.00' })
+    const payment = { id: PAYMENT_ID, amount: '250.00', status: 'PAID', razorpay_payment_id: null }
+    const { service, emitOrderUpdate } = makeServiceWithSocket(order, payment)
+
+    await service.refundOrder(ORDER_ID, { refundTo: 'wallet' }, ADMIN_ID, '127.0.0.1')
+
+    expect(emitOrderUpdate).toHaveBeenCalledWith(
+      ORDER_ID,
+      [USER_ID],
+      expect.objectContaining({ status: 'REFUNDED' })
+    )
+  })
+
+  it('does not throw when there is no fastify/socket instance (negative)', async () => {
+    const order = makeOrder({ status: 'CONFIRMED', payment_status: 'PENDING' })
+    const repository = {
+      findById: vi.fn(async () => order),
+      getOrderPayment: vi.fn(async () => null),
+      updateStatus: vi.fn(async () => order.status),
+    }
+    const service = new AdminOrdersService(repository, null)
+
+    await expect(
+      service.cancelOrder(ORDER_ID, { reason: 'Out of stock' }, ADMIN_ID, '127.0.0.1')
+    ).resolves.toMatchObject({ status: 'CANCELLED' })
+  })
+})

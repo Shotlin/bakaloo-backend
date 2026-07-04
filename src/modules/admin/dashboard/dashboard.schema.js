@@ -9,6 +9,11 @@ export const getStatsSchema = {
   },
 }
 
+export const getKpisSchema = {
+  tags: ['Admin Dashboard'],
+  summary: 'Flat KPI summary for the HQ Dashboard page top strip',
+}
+
 export const getRevenueChartSchema = {
   tags: ['Admin Dashboard'],
   summary: 'Revenue chart data (daily breakdown)',

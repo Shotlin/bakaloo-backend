@@ -6,47 +6,47 @@ const svc = new AdminAnalyticsService()
 export class AdminAnalyticsController {
   async getSales(request, reply) {
     const { startDate, endDate, groupBy } = request.query
-    const data = await svc.getSalesAnalytics({ startDate, endDate, groupBy })
+    const data = await svc.getSalesAnalytics({ startDate, endDate, groupBy, shopId: request.shopId })
     return success(data, 'Sales analytics fetched')
   }
 
   async getProductPerformance(request, reply) {
     const { startDate, endDate, limit } = request.query
-    const data = await svc.getProductPerformance({ startDate, endDate, limit })
+    const data = await svc.getProductPerformance({ startDate, endDate, limit, shopId: request.shopId })
     return success(data, 'Product performance fetched')
   }
 
   async getCustomerCohorts(request, reply) {
-    const data = await svc.getCustomerCohorts()
+    const data = await svc.getCustomerCohorts({ shopId: request.shopId })
     return success(data, 'Customer cohorts fetched')
   }
 
   async getDeliveryAnalytics(request, reply) {
     const { startDate, endDate } = request.query
-    const data = await svc.getDeliveryAnalytics({ startDate, endDate })
+    const data = await svc.getDeliveryAnalytics({ startDate, endDate, shopId: request.shopId })
     return success(data, 'Delivery analytics fetched')
   }
 
   async getFinancialReport(request, reply) {
     const { startDate, endDate } = request.query
-    const data = await svc.getFinancialReport({ startDate, endDate })
+    const data = await svc.getFinancialReport({ startDate, endDate, shopId: request.shopId })
     return success(data, 'Financial report fetched')
   }
 
   async getCartEnhancementAnalytics(request, reply) {
     const { startDate, endDate } = request.query
-    const data = await svc.getCartEnhancementAnalytics({ startDate, endDate })
+    const data = await svc.getCartEnhancementAnalytics({ startDate, endDate, shopId: request.shopId })
     return success(data, 'Cart enhancement analytics fetched')
   }
 
   async getComparison(request, reply) {
-    const data = await svc.getComparison(request.query)
+    const data = await svc.getComparison({ ...request.query, shopId: request.shopId })
     return success(data, 'Comparison fetched')
   }
 
   async exportPDF(request, reply) {
     const { startDate, endDate } = request.query
-    const buffer = await svc.exportReportPDF({ startDate, endDate })
+    const buffer = await svc.exportReportPDF({ startDate, endDate, shopId: request.shopId })
     reply.header('Content-Type', 'application/pdf')
     reply.header('Content-Disposition', `attachment; filename="analytics-report-${Date.now()}.pdf"`)
     return reply.send(buffer)

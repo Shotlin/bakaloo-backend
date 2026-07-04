@@ -1,6 +1,8 @@
 import { logger } from '../../config/logger.js'
 import { ERROR_CODES } from '../../constants/errors.js'
 import { emitInTx as emitAuditInTx } from '../../utils/audit-log.js'
+import { ShopProductsRepository } from '../shop-products/shop-products.repository.js'
+import { ShopProductsService } from '../shop-products/shop-products.service.js'
 
 /**
  * Shop Orders service — wraps the existing order workflow with
@@ -77,6 +79,7 @@ export class ShopOrdersService {
   constructor(repository, options = {}) {
     this.repo = repository
     this.fastify = options.fastify || null
+    this.shopProductsRepo = options.shopProductsRepo || new ShopProductsRepository()
   }
 
   // ─── R22 AC#3, AC#4 — Listing ───────────────────────────────────
@@ -327,6 +330,24 @@ export class ShopOrdersService {
         note: reason,
       })
 
+      // Previously missing entirely — a shop-staff cancel never gave the
+      // deducted stock back, so every staff-cancelled order permanently
+      // understated real available stock. CANCELLABLE_FROM excludes
+      // DELIVERED, so the product never physically left the store and
+      // restoring is always correct here. restoreStockForCancelledOrder()
+      // never throws (per-item failures are caught and logged internally),
+      // so this can't roll back the cancellation itself.
+      const { rows: orderItems } = await client.query(
+        `SELECT shop_product_id, quantity FROM order_items WHERE order_id = $1`,
+        [orderId]
+      )
+      await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
+        orderId,
+        items: orderItems,
+        source: 'DASHBOARD',
+        actor: { userId: actor.id || null, shopRole: actor.shopRole || null },
+      })
+
       await emitAuditInTx(client, 'order_status_changed', {
         actor_user_id: actor.id || null,
         actor_role:
@@ -344,6 +365,16 @@ export class ShopOrdersService {
       })
 
       await client.query('COMMIT')
+
+      // Cache invalidation happens after COMMIT per applyStockChange()'s
+      // contract — every other stock-mutating path does the same, so the
+      // shop's Inventory list reflects the restored stock immediately
+      // instead of serving a stale cached number for up to CACHE_TTL_SECONDS.
+      try {
+        await new ShopProductsService(this.shopProductsRepo).invalidateShopCache(shopId)
+      } catch (err) {
+        logger.warn({ err: err.message, shopId, orderId }, 'Cache invalidation failed after cancel (non-blocking)')
+      }
 
       this._emitSocket('shop_orders.cancelled', {
         shopId,
