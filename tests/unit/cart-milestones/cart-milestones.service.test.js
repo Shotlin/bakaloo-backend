@@ -30,6 +30,8 @@ function makeRepoMock(overrides = {}) {
   return {
     findAllActive: vi.fn().mockResolvedValue([]),
     hasPriorOrder: vi.fn().mockResolvedValue(false),
+    getUserUsageCount: vi.fn().mockResolvedValue(0),
+    recordUsage: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   }
 }
@@ -121,6 +123,54 @@ describe('CartMilestonesService.getProgress — eligibility filtering (negative)
 
     expect(progress.unlocked).toBeNull()
     expect(segmentsRepo.isMember).toHaveBeenCalledWith('seg-1', USER_ID)
+  })
+})
+
+describe('CartMilestonesService — per-user usage limit (2026-07-04, "reward every order forever" fix)', () => {
+  it('excludes a milestone once the user has hit its usageLimitPerUser (negative)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ minCartAmount: 100, usageLimitPerUser: 2 })]),
+      getUserUsageCount: vi.fn().mockResolvedValue(2),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked).toBeNull()
+  })
+
+  it('still includes the milestone when usage is below the limit (positive)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ id: 'm-1', minCartAmount: 100, usageLimitPerUser: 2 })]),
+      getUserUsageCount: vi.fn().mockResolvedValue(1),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+  })
+
+  it('never limits usage when usageLimitPerUser is null (default, unlimited — negative test for the check itself)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ id: 'm-1', minCartAmount: 100, usageLimitPerUser: null })]),
+      getUserUsageCount: vi.fn().mockResolvedValue(9999),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+    expect(repo.getUserUsageCount).not.toHaveBeenCalled()
+  })
+
+  it('recordUsage() delegates to the repository', async () => {
+    const repo = makeRepoMock()
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    await service.recordUsage('m-1', USER_ID, 'order-1')
+
+    expect(repo.recordUsage).toHaveBeenCalledWith('m-1', USER_ID, 'order-1')
   })
 })
 

@@ -38,8 +38,10 @@ export class PaymentOffersRepository {
     const { rows } = await query(
       `INSERT INTO payment_offers
        (title, description, provider, icon_url, cashback_amount, cashback_percent,
-        min_order_amount, max_cashback, lock_threshold, is_active, valid_from, valid_until)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, true), COALESCE($11, NOW()), $12)
+        min_order_amount, max_cashback, lock_threshold, is_active, valid_from, valid_until,
+        cashback_credit_trigger, usage_limit_per_user)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, true), COALESCE($11, NOW()), $12,
+               COALESCE($13, 'ORDER_DELIVERED'), $14)
        RETURNING *`,
       [
         data.title,
@@ -54,6 +56,8 @@ export class PaymentOffersRepository {
         data.is_active,
         data.valid_from,
         data.valid_until,
+        data.cashback_credit_trigger,
+        data.usage_limit_per_user,
       ]
     )
     return rows[0] || null
@@ -74,8 +78,10 @@ export class PaymentOffersRepository {
            is_active = $10,
            valid_from = $11,
            valid_until = $12,
+           cashback_credit_trigger = $13,
+           usage_limit_per_user = $14,
            updated_at = NOW()
-       WHERE id = $13
+       WHERE id = $15
        RETURNING *`,
       [
         data.title,
@@ -90,6 +96,8 @@ export class PaymentOffersRepository {
         data.is_active,
         data.valid_from,
         data.valid_until,
+        data.cashback_credit_trigger,
+        data.usage_limit_per_user,
         id,
       ]
     )
@@ -104,5 +112,24 @@ export class PaymentOffersRepository {
       [id]
     )
     return rows[0] || null
+  }
+
+  /** How many times this user has already redeemed this offer. */
+  async getUserUsageCount(offerId, userId) {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count FROM payment_offer_usages
+       WHERE payment_offer_id = $1 AND user_id = $2`,
+      [offerId, userId]
+    )
+    return rows[0].count
+  }
+
+  /** Record a redemption — called once per order right after the cashback row is created. */
+  async recordUsage(offerId, userId, orderId) {
+    await query(
+      `INSERT INTO payment_offer_usages (payment_offer_id, user_id, order_id)
+       VALUES ($1, $2, $3)`,
+      [offerId, userId, orderId]
+    )
   }
 }

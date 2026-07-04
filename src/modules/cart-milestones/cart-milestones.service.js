@@ -22,6 +22,10 @@ export class CartMilestonesService {
 
   /** Is this milestone visible/applicable to this user at all (independent of cart value)? */
   async _isEligible(milestone, userId) {
+    if (milestone.usageLimitPerUser != null) {
+      const usage = await this.repo.getUserUsageCount(milestone.id, userId)
+      if (usage >= milestone.usageLimitPerUser) return false
+    }
     if (milestone.applicableUserType === 'FIRST_TIME') {
       return !(await this.repo.hasPriorOrder(userId))
     }
@@ -159,5 +163,10 @@ export class CartMilestonesService {
       user_agent: actor.userAgent,
     })
     return { success: true }
+  }
+
+  /** Record that a user has redeemed a milestone's reward for a specific order. */
+  async recordUsage(milestoneId, userId, orderId) {
+    return this.repo.recordUsage(milestoneId, userId, orderId)
   }
 }

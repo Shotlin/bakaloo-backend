@@ -1,5 +1,6 @@
 import { StoreStatusRepository } from './store-status.repository.js'
 import { logger } from '../../config/logger.js'
+import { getSocketIo } from '../../plugins/socketio.plugin.js'
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000 // UTC+5:30 — same constant used by
 // the delivery-slot generator (src/modules/orders/delivery-slots.routes.js)
@@ -105,15 +106,42 @@ export class StoreStatusService {
   }
 
   async setOverride({ status, note, adminId }) {
-    return this.repo.setOverride({ status: status || null, note, adminId })
+    const updated = await this.repo.setOverride({ status: status || null, note, adminId })
+    this._broadcastStoreStatusChanged()
+    return updated
   }
 
   async updateWeeklyHours(weeklyHours) {
-    return this.repo.updateWeeklyHours(weeklyHours)
+    const updated = await this.repo.updateWeeklyHours(weeklyHours)
+    this._broadcastStoreStatusChanged()
+    return updated
   }
 
   async updateClosedBannerImage(imageUrl) {
-    return this.repo.updateClosedBannerImage(imageUrl)
+    const updated = await this.repo.updateClosedBannerImage(imageUrl)
+    this._broadcastStoreStatusChanged()
+    return updated
+  }
+
+  /**
+   * Broadcast to every connected customer app instantly (via the same
+   * `themes:live` room every authenticated socket already joins) so an
+   * admin's override/weekly-hours/closed-banner change reflects immediately
+   * — no manual pull-to-refresh or app relaunch needed. Mirrors the exact
+   * pattern `emitThemeUpdate`/`emitSectionUpdate` already use for the same
+   * "push a lightweight signal, let the client refetch" approach.
+   * @private
+   */
+  _broadcastStoreStatusChanged() {
+    try {
+      const io = getSocketIo()
+      if (!io) return
+      io.to('themes:live').emit('store:status:update', {
+        timestamp: new Date().toISOString(),
+      })
+    } catch (err) {
+      logger.warn({ err: err.message }, 'Store status broadcast failed (non-blocking)')
+    }
   }
 
   /** The admin-uploaded "we are closed" banner image, or null if never set. */

@@ -15,6 +15,7 @@ const milestoneProperties = {
   stackableWithCoupon:   { type: 'boolean' },
   priority:              { type: 'integer' },
   cashbackCreditTrigger: { type: 'string' },
+  usageLimitPerUser:     { type: ['integer', 'null'] },
   createdAt:             { type: 'string' },
 }
 
@@ -73,6 +74,7 @@ export const createMilestoneSchema = {
       stackableWithCoupon:   { type: 'boolean', default: true },
       priority:              { type: 'integer', default: 0 },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'], default: 'ORDER_DELIVERED' },
+      usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
     },
   },
   response: { 201: milestoneResponse },
@@ -104,6 +106,7 @@ export const updateMilestoneSchema = {
       stackableWithCoupon:   { type: 'boolean' },
       priority:              { type: 'integer' },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'] },
+      usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
     },
   },
   response: { 200: milestoneResponse },

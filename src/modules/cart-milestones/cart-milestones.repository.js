@@ -4,7 +4,8 @@ const COLUMNS = `
   id, name, min_cart_amount, reward_type, reward_value, max_discount,
   unlock_coupon_id, message_before, message_after, icon_url, is_active,
   applicable_user_type, applicable_segment_id, stackable_with_coupon,
-  priority, cashback_credit_trigger, created_by, created_at, updated_at
+  priority, cashback_credit_trigger, usage_limit_per_user, created_by,
+  created_at, updated_at
 `
 
 export class CartMilestonesRepository {
@@ -44,8 +45,8 @@ export class CartMilestonesRepository {
          name, min_cart_amount, reward_type, reward_value, max_discount,
          unlock_coupon_id, message_before, message_after, icon_url,
          applicable_user_type, applicable_segment_id, stackable_with_coupon,
-         priority, cashback_credit_trigger, created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         priority, cashback_credit_trigger, usage_limit_per_user, created_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING ${COLUMNS}`,
       [
         data.name,
@@ -62,6 +63,7 @@ export class CartMilestonesRepository {
         data.stackableWithCoupon ?? true,
         data.priority ?? 0,
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
+        data.usageLimitPerUser ?? null,
         data.createdBy ?? null,
       ]
     )
@@ -88,6 +90,7 @@ export class CartMilestonesRepository {
       stackableWithCoupon: 'stackable_with_coupon',
       priority: 'priority',
       cashbackCreditTrigger: 'cashback_credit_trigger',
+      usageLimitPerUser: 'usage_limit_per_user',
     }
     for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
       if (data[jsKey] !== undefined) {
@@ -110,6 +113,25 @@ export class CartMilestonesRepository {
     return result.rowCount > 0
   }
 
+  /** How many times this user has already redeemed this milestone's reward. */
+  async getUserUsageCount(milestoneId, userId) {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count FROM cart_milestone_usages
+       WHERE cart_milestone_id = $1 AND user_id = $2`,
+      [milestoneId, userId]
+    )
+    return rows[0].count
+  }
+
+  /** Record a redemption — called once per order right after the reward is applied. */
+  async recordUsage(milestoneId, userId, orderId) {
+    await query(
+      `INSERT INTO cart_milestone_usages (cart_milestone_id, user_id, order_id)
+       VALUES ($1, $2, $3)`,
+      [milestoneId, userId, orderId]
+    )
+  }
+
   _format(row) {
     return {
       id: row.id,
@@ -128,6 +150,7 @@ export class CartMilestonesRepository {
       stackableWithCoupon: row.stackable_with_coupon,
       priority: row.priority,
       cashbackCreditTrigger: row.cashback_credit_trigger,
+      usageLimitPerUser: row.usage_limit_per_user,
       createdBy: row.created_by,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

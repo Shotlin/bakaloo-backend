@@ -1,6 +1,8 @@
 import { AdminCustomersRepository } from './customers.repository.js'
 import { WalletService } from '../../wallet/wallet.service.js'
 import { WalletRepository } from '../../wallet/wallet.repository.js'
+import { NotificationsRepository } from '../../notifications/notifications.repository.js'
+import { NotificationsService } from '../../notifications/notifications.service.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { ADDRESS_RETENTION_DAYS } from '../../addresses/addresses.service.js'
 import ExcelJS from 'exceljs'
@@ -71,6 +73,17 @@ export class AdminCustomersService {
     const result = await walletService.addMoney(userId, { amount, description })
     if (result.success) {
       logAdminActivity(adminId, 'CREDIT_WALLET', 'user', userId, null, { amount, description }, ip)
+      try {
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        await notifService.sendNotification(userId, {
+          title: '💰 Wallet credited',
+          body: `₹${amount} has been added to your wallet${description ? ` — ${description}` : ''}.`,
+          type: 'WALLET',
+          data: { type: 'WALLET', amount, description: description || '' },
+        })
+      } catch (err) {
+        console.error('Wallet-credit notification failed (non-blocking):', err?.message || err)
+      }
     }
     return result
   }

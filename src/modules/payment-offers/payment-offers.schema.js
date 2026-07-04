@@ -14,6 +14,8 @@ const paymentOfferRow = {
     is_active: { type: 'boolean' },
     valid_from: { type: 'string', format: 'date-time' },
     valid_until: { type: ['string', 'null'], format: 'date-time' },
+    cashback_credit_trigger: { type: 'string' },
+    usage_limit_per_user: { type: ['integer', 'null'] },
     created_at: { type: 'string', format: 'date-time' },
     updated_at: { type: 'string', format: 'date-time' },
   },
@@ -35,6 +37,11 @@ const paymentOfferWriteBody = {
     isActive: { type: 'boolean' },
     validFrom: { type: ['string', 'null'], format: 'date-time' },
     validUntil: { type: ['string', 'null'], format: 'date-time' },
+    cashbackCreditTrigger: {
+      type: 'string',
+      enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'],
+    },
+    usageLimitPerUser: { type: ['integer', 'null'], minimum: 1 },
   },
 }
 

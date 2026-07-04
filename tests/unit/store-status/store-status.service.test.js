@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * Coverage for the store-open/closed evaluator (2026-07-03, delivery
@@ -12,6 +12,13 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}))
+
+const mockIoEmit = vi.fn()
+const mockIoTo = vi.fn(() => ({ emit: mockIoEmit }))
+const getSocketIoMock = vi.fn(() => ({ to: mockIoTo }))
+vi.mock('../../../src/plugins/socketio.plugin.js', () => ({
+  getSocketIo: () => getSocketIoMock(),
 }))
 
 const { StoreStatusService } = await import('../../../src/modules/store-status/store-status.service.js')
@@ -259,5 +266,50 @@ describe('StoreStatusService — closed banner image (Phase 4, dashboard-uploada
     const result = await svc.getFullStatus()
 
     expect(result.closedBannerImageUrl).toBe('https://cdn.example/closed.png')
+  })
+})
+
+describe('StoreStatusService — realtime broadcast on change (instant-reflect fix, 2026-07-04)', () => {
+  beforeEach(() => {
+    mockIoEmit.mockClear()
+    mockIoTo.mockClear()
+    getSocketIoMock.mockClear()
+  })
+
+  it('setOverride() broadcasts to the themes:live room so every connected app refetches instantly', async () => {
+    const repo = { setOverride: vi.fn().mockResolvedValue({ id: 'row-1' }) }
+    const svc = new StoreStatusService(repo)
+
+    await svc.setOverride({ status: 'CLOSED', note: 'test', adminId: 'admin-1' })
+
+    expect(mockIoTo).toHaveBeenCalledWith('themes:live')
+    expect(mockIoEmit).toHaveBeenCalledWith('store:status:update', expect.objectContaining({ timestamp: expect.any(String) }))
+  })
+
+  it('updateWeeklyHours() broadcasts too', async () => {
+    const repo = { updateWeeklyHours: vi.fn().mockResolvedValue({ id: 'row-1' }) }
+    const svc = new StoreStatusService(repo)
+
+    await svc.updateWeeklyHours({})
+
+    expect(mockIoEmit).toHaveBeenCalledWith('store:status:update', expect.any(Object))
+  })
+
+  it('updateClosedBannerImage() broadcasts too', async () => {
+    const repo = { updateClosedBannerImage: vi.fn().mockResolvedValue({ id: 'row-1' }) }
+    const svc = new StoreStatusService(repo)
+
+    await svc.updateClosedBannerImage('https://cdn.example/new.png')
+
+    expect(mockIoEmit).toHaveBeenCalledWith('store:status:update', expect.any(Object))
+  })
+
+  it('does not throw when no socket server is active (e.g. worker process)', async () => {
+    getSocketIoMock.mockReturnValueOnce(null)
+    const repo = { setOverride: vi.fn().mockResolvedValue({ id: 'row-1' }) }
+    const svc = new StoreStatusService(repo)
+
+    await expect(svc.setOverride({ status: 'OPEN', adminId: 'admin-1' })).resolves.toMatchObject({ id: 'row-1' })
+    expect(mockIoEmit).not.toHaveBeenCalled()
   })
 })

@@ -253,6 +253,18 @@ export class WalletRepository {
   }
 
   /**
+   * Find user by id (for transfers — looking up the sender's own phone to
+   * stamp on the recipient's CREDIT transaction description).
+   */
+  async findUserById(id) {
+    const { rows } = await query(
+      `SELECT id, name, phone FROM users WHERE id = $1`,
+      [id]
+    )
+    return rows[0] || null
+  }
+
+  /**
    * Search users by phone number prefix (for the recipient picker).
    * Left-anchored LIKE so it's servable by an index (idx_users_phone /
    * idx_users_phone_pattern) instead of scanning the whole users table.

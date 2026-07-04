@@ -28,13 +28,25 @@ export function buildCustomerOrderEventNotification({
       title: '🛍️ Order placed',
       body: `Your order ${orderNumber} was placed successfully. We will keep you updated here.`,
     },
+    CONFIRMED: {
+      title: '🎉 Order confirmed',
+      body: `Your order ${orderNumber} has been confirmed.`,
+    },
+    PREPARING: {
+      title: '🍳 Order being prepared',
+      body: `Your order ${orderNumber} is being prepared.`,
+    },
+    PACKED: {
+      title: '📦 Order packed',
+      body: `Your order ${orderNumber} has been packed and is ready for pickup.`,
+    },
     RIDER_ACCEPTED: {
       title: '🛵 Rider accepted your order',
       body: `A delivery partner accepted order ${orderNumber}. Please wait a few minutes while they get ready.`,
     },
     PICKED_UP: {
-      title: '📦 Your order is on the way',
-      body: `Order ${orderNumber} has been picked up and is now heading to you.${otpSuffix}`,
+      title: '🚴 Out for delivery',
+      body: `Order ${orderNumber} is on its way!${otpSuffix}`,
     },
     OTP_RESENT: {
       title: '🔑 Your delivery OTP',
@@ -46,7 +58,11 @@ export function buildCustomerOrderEventNotification({
     },
     CANCELLED: {
       title: '❌ Order cancelled',
-      body: `Order ${orderNumber} was cancelled because the delivery could not be completed.`,
+      body: `Order ${orderNumber} was cancelled.`,
+    },
+    REFUNDED: {
+      title: '💰 Refund processed',
+      body: `Your refund for order ${orderNumber} has been processed.`,
     },
   }
 

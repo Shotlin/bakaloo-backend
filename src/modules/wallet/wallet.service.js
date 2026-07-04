@@ -492,12 +492,20 @@ export class WalletService {
       // Lock recipient wallet
       const recipientWallet = await this.repo.getForUpdate(client, recipient.id)
 
+      // Sender's own phone is looked up here (not passed in) so the
+      // recipient's CREDIT description always shows a real, unspoofable
+      // number — the display name is user-editable and changes over time,
+      // so phone is the only identifier stable enough to rely on for
+      // transaction history (mobile + admin dashboard both render this
+      // description string verbatim).
+      const sender = await this.repo.findUserById(userId)
+
       // Debit sender
       const senderResult = await this.repo.debit(
         client,
         senderWallet.id,
         amount,
-        description || `Transfer to ${recipient.name || recipient.phone}`,
+        description || `Transfer to ${recipient.phone}`,
         `transfer:${recipient.id}`
       )
 
@@ -506,7 +514,7 @@ export class WalletService {
         client,
         recipientWallet.id,
         amount,
-        `Transfer from user`,
+        `Transfer from ${sender?.phone || 'user'}`,
         `transfer:${userId}`,
         { maxBalance: maxWalletBalance }
       )

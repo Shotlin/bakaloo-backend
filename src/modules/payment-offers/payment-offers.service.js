@@ -1,5 +1,4 @@
 import { PaymentOffersRepository } from './payment-offers.repository.js'
-import { mergeDemoPaymentOffers } from './demo-payment-offers.js'
 
 /**
  * Payment offers service — public formatting + admin CRUD orchestration
@@ -11,7 +10,7 @@ export class PaymentOffersService {
 
   async getPublicOffers(cartTotal) {
     const normalizedCartTotal = Math.max(0, this._toNumber(cartTotal))
-    const offers = mergeDemoPaymentOffers(await this.repo.getActive())
+    const offers = await this.repo.getActive()
 
     return offers
       .map((offer) => {
@@ -81,9 +80,63 @@ export class PaymentOffersService {
       isActive: this._hasOwn(data, 'isActive') ? data.isActive : existing.is_active,
       validFrom: this._hasOwn(data, 'validFrom') ? data.validFrom : existing.valid_from,
       validUntil: this._hasOwn(data, 'validUntil') ? data.validUntil : existing.valid_until,
+      cashbackCreditTrigger: this._hasOwn(data, 'cashbackCreditTrigger') ? data.cashbackCreditTrigger : existing.cashback_credit_trigger,
+      usageLimitPerUser: this._hasOwn(data, 'usageLimitPerUser') ? data.usageLimitPerUser : existing.usage_limit_per_user,
     }
 
     return this.repo.update(id, this._mapWriteData(nextData))
+  }
+
+  /**
+   * Best-fit active payment offer for this cart/user at checkout, or null.
+   * "Best fit" = highest resulting cashback among every offer whose
+   * min_order_amount is met and whose per-user usage cap (if any) hasn't
+   * been hit yet. This is the piece that was entirely missing before —
+   * getPublicOffers() only ever computed a display lock/unlock flag, never
+   * an amount to actually credit.
+   */
+  async resolveForCheckout(userId, cartTotal) {
+    const normalizedCartTotal = Math.max(0, this._toNumber(cartTotal))
+    const offers = await this.repo.getActive()
+
+    let best = null
+    for (const offer of offers) {
+      if (normalizedCartTotal < this._toNumber(offer.min_order_amount)) continue
+
+      if (offer.usage_limit_per_user != null) {
+        const usage = await this.repo.getUserUsageCount(offer.id, userId)
+        if (usage >= offer.usage_limit_per_user) continue
+      }
+
+      const amount = this._computeCashback(offer, normalizedCartTotal)
+      if (amount > 0 && (!best || amount > best.amount)) {
+        best = { offer, amount }
+      }
+    }
+
+    if (!best) return null
+    return {
+      offerId: best.offer.id,
+      cashbackAmount: best.amount,
+      creditTrigger: best.offer.cashback_credit_trigger || 'ORDER_DELIVERED',
+    }
+  }
+
+  /** Record that a user has redeemed an offer for a specific order. */
+  async recordUsage(offerId, userId, orderId) {
+    return this.repo.recordUsage(offerId, userId, orderId)
+  }
+
+  /** @private */
+  _computeCashback(offer, cartTotal) {
+    let amount = this._toNumber(offer.cashback_amount)
+    if (offer.cashback_percent) {
+      amount = cartTotal * (this._toNumber(offer.cashback_percent) / 100)
+    }
+    if (offer.max_cashback) {
+      amount = Math.min(amount, this._toNumber(offer.max_cashback))
+    }
+    return Math.round(amount * 100) / 100
   }
 
   async delete(id) {
@@ -110,6 +163,8 @@ export class PaymentOffersService {
       is_active: data.isActive ?? true,
       valid_from: data.validFrom ?? null,
       valid_until: data.validUntil ?? null,
+      cashback_credit_trigger: data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
+      usage_limit_per_user: data.usageLimitPerUser ?? null,
     }
   }
 

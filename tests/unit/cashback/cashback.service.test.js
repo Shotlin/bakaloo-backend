@@ -28,6 +28,13 @@ function makeWalletServiceMock(overrides = {}) {
   }
 }
 
+function makeNotificationsServiceMock(overrides = {}) {
+  return {
+    sendNotification: vi.fn().mockResolvedValue({}),
+    ...overrides,
+  }
+}
+
 describe('CashbackService.createPending (positive/negative)', () => {
   it('creates a PENDING row with the amount rounded to 2dp', async () => {
     const repo = makeRepoMock()
@@ -114,6 +121,68 @@ describe('CashbackService.evaluateAndCredit (positive/negative)', () => {
     repo.findPendingByOrderAndTrigger = vi.fn().mockRejectedValue(new Error('db down'))
 
     await expect(service.evaluateAndCredit(ORDER_ID, 'ORDER_DELIVERED')).resolves.toBe(0)
+  })
+})
+
+describe('CashbackService.evaluateAndCredit — cashback-credited push/in-app notification', () => {
+  // Previously nothing notified the customer when cashback actually landed
+  // in their wallet, regardless of source (coupon / milestone / payment
+  // offer / first-time offer) — this is the "wallet, cashback any activity"
+  // gap reported by the user.
+  it('sends a WALLET-type notification to the customer after a successful credit (positive)', async () => {
+    const repo = makeRepoMock({
+      findPendingByOrderAndTrigger: vi.fn().mockResolvedValue([
+        { id: 'tx-1', userId: USER_ID, orderId: ORDER_ID, amount: 50, sourceType: 'PAYMENT_OFFER' },
+      ]),
+    })
+    const walletService = makeWalletServiceMock()
+    const notificationsService = makeNotificationsServiceMock()
+    const service = new CashbackService(repo, walletService, notificationsService)
+
+    await service.evaluateAndCredit(ORDER_ID, 'ORDER_DELIVERED')
+    await new Promise((resolve) => setImmediate(resolve)) // let the fire-and-forget notify settle
+
+    expect(notificationsService.sendNotification).toHaveBeenCalledWith(
+      USER_ID,
+      expect.objectContaining({
+        type: 'WALLET',
+        data: expect.objectContaining({ type: 'WALLET', orderId: ORDER_ID, amount: 50 }),
+      })
+    )
+  })
+
+  it('does not notify when the wallet credit fails (negative)', async () => {
+    const repo = makeRepoMock({
+      findPendingByOrderAndTrigger: vi.fn().mockResolvedValue([
+        { id: 'tx-1', userId: USER_ID, orderId: ORDER_ID, amount: 50, sourceType: 'COUPON' },
+      ]),
+    })
+    const walletService = makeWalletServiceMock({ addMoney: vi.fn().mockResolvedValue({ success: false }) })
+    const notificationsService = makeNotificationsServiceMock()
+    const service = new CashbackService(repo, walletService, notificationsService)
+
+    await service.evaluateAndCredit(ORDER_ID, 'ORDER_DELIVERED')
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(notificationsService.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('does not let a notification failure affect the credit result (best-effort)', async () => {
+    const repo = makeRepoMock({
+      findPendingByOrderAndTrigger: vi.fn().mockResolvedValue([
+        { id: 'tx-1', userId: USER_ID, orderId: ORDER_ID, amount: 50, sourceType: 'CART_MILESTONE' },
+      ]),
+    })
+    const walletService = makeWalletServiceMock()
+    const notificationsService = makeNotificationsServiceMock({
+      sendNotification: vi.fn().mockRejectedValue(new Error('fcm down')),
+    })
+    const service = new CashbackService(repo, walletService, notificationsService)
+
+    const count = await service.evaluateAndCredit(ORDER_ID, 'ORDER_DELIVERED')
+
+    expect(count).toBe(1)
+    expect(repo.markCredited).toHaveBeenCalledWith('tx-1', 'wtx-1')
   })
 })
 

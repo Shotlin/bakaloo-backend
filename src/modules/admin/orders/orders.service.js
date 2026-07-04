@@ -2,6 +2,9 @@ import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { generateInvoicePDF } from '../../../utils/invoiceGenerator.js'
 import { query as dbQuery } from '../../../config/database.js'
+import { NotificationsRepository } from '../../notifications/notifications.repository.js'
+import { NotificationsService } from '../../notifications/notifications.service.js'
+import { buildCustomerOrderEventNotification } from '../../notifications/customer-order-event.helper.js'
 import ExcelJS from 'exceljs'
 
 const ASSIGNABLE_ORDER_STATUSES = new Set(['CONFIRMED', 'PREPARING', 'PACKED'])
@@ -24,6 +27,27 @@ export class AdminOrdersService {
   constructor(repository, fastify) {
     this.repository = repository
     this.fastify = fastify
+    this.notificationsService = fastify
+      ? new NotificationsService(new NotificationsRepository(), fastify)
+      : null
+  }
+
+  /**
+   * Send a customer push/in-app notification, best-effort. Mirrors the
+   * working pattern already used by delivery.service.js — the previous
+   * `notificationQueue.add('order-status-changed', ...)` calls here were a
+   * dead path: the BullMQ notification worker only handles job.data.type
+   * values 'push'/'in-app'/'order-status', but these calls never set a
+   * `type` field, so every admin-driven order-status/cancel/refund
+   * notification silently no-op'd since the feature was first built.
+   */
+  async _queueNotification(userId, notif) {
+    if (!this.notificationsService || !userId || !notif) return
+    try {
+      await this.notificationsService.sendNotification(userId, notif)
+    } catch (err) {
+      console.error('Failed to send customer notification:', err?.message || err)
+    }
   }
 
   async findAll(filters) {
@@ -70,11 +94,10 @@ export class AdminOrdersService {
     logAdminActivity(adminId, `Order status: ${oldStatus} → ${newStatus}`, 'order', orderId,
       { status: oldStatus }, { status: newStatus }, ip)
 
-    // Fire background notification
-    await notificationQueue.add('order-status-changed', {
-      orderId, userId: order.user_id, riderId: order.rider_id,
-      newStatus, orderNumber: order.order_number,
-    })
+    // Push/in-app notification to the customer
+    await this._queueNotification(order.user_id, buildCustomerOrderEventNotification({
+      orderId, orderNumber: order.order_number, timelineType: newStatus, status: newStatus,
+    }))
 
     this._emitOrderStatus(order, newStatus)
 
@@ -299,9 +322,17 @@ export class AdminOrdersService {
       ip
     )
 
-    await notificationQueue.add('order-status-changed', {
-      orderId, userId: order.user_id, riderId: order.rider_id,
-      newStatus: 'REFUNDED', orderNumber: order.order_number,
+    const refundDestination = refundTo === 'original' ? 'original payment method' : 'wallet'
+    await this._queueNotification(order.user_id, {
+      title: '💰 Refund processed',
+      body: refundAmount > 0
+        ? `₹${refundAmount} has been refunded to your ${refundDestination} for order ${order.order_number}.`
+        : `Your refund for order ${order.order_number} has been processed.`,
+      type: 'ORDER_STATUS',
+      data: {
+        type: 'ORDER_STATUS', orderId, orderNumber: order.order_number,
+        timelineType: 'REFUNDED', status: 'REFUNDED', refundAmount, refundTo,
+      },
     })
 
     return { orderId, refundAmount, refundTo, status: 'REFUNDED' }
@@ -368,10 +399,22 @@ export class AdminOrdersService {
       ip
     )
 
-    await notificationQueue.add('order-status-changed', {
-      orderId, userId: order.user_id, riderId: order.rider_id,
-      newStatus: 'CANCELLED', orderNumber: order.order_number,
-    })
+    await this._queueNotification(order.user_id, buildCustomerOrderEventNotification({
+      orderId, orderNumber: order.order_number, timelineType: 'CANCELLED', status: 'CANCELLED',
+    }))
+
+    if (refundAmount > 0) {
+      const refundDestination = appliedRefundTo === 'original' ? 'original payment method' : 'wallet'
+      await this._queueNotification(order.user_id, {
+        title: '💰 Refund processed',
+        body: `₹${refundAmount} has been refunded to your ${refundDestination} for order ${order.order_number}.`,
+        type: 'ORDER_STATUS',
+        data: {
+          type: 'ORDER_STATUS', orderId, orderNumber: order.order_number,
+          timelineType: 'REFUNDED', status: 'REFUNDED', refundAmount, refundTo: appliedRefundTo,
+        },
+      })
+    }
 
     return { orderId, status: 'CANCELLED', refundAmount, refundTo: appliedRefundTo }
   }

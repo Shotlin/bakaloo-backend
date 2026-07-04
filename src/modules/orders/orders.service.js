@@ -26,6 +26,7 @@ import { PaymentSettingsService } from '../payment-settings/payment-settings.ser
 import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
+import { PaymentOffersService } from '../payment-offers/payment-offers.service.js'
 import { getStoreStatusService } from '../store-status/store-status.routes.js'
 import { getDeliveryCalendarService } from '../delivery-calendar/delivery-calendar.routes.js'
 
@@ -106,6 +107,8 @@ export class OrdersService {
     this.cashbackService = options.cashbackService || new CashbackService()
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService()
+    this.paymentOffersService =
+      options.paymentOffersService || new PaymentOffersService()
     // Resolved lazily via the shared singleton getters (not `new`d here) so
     // every module reads/writes the same store-status/calendar state —
     // mirrors how getStoreStatusService()/getDeliveryCalendarService() are
@@ -384,6 +387,17 @@ export class OrdersService {
       }
     }
 
+    // 3d. Payment offer — the best-fit admin-configured cashback offer this
+    // cart qualifies for (e.g. "min order ₹50 → ₹50 cashback"). Payment
+    // offers only ever produce cashback (never a discount), so unlike the
+    // coupon/first-time-offer/milestone block above there's no discount-slot
+    // contention to resolve here — this always stacks additively, exactly
+    // like the CASHBACK-type coupon/milestone rewards already do.
+    let paymentOfferMatch = null
+    if (groupedByShop.size === 1) {
+      paymentOfferMatch = await this.paymentOffersService.resolveForCheckout(userId, subtotal)
+    }
+
     // 4. Resolve checkout extras (tip / instructions) — preserves the
     //    pre-multi-vendor behaviour for single-shop carts.
     const hasTipAmount = Object.prototype.hasOwnProperty.call(body, 'tipAmount')
@@ -566,6 +580,21 @@ export class OrdersService {
         if (cartMilestoneReward.unlockCouponId) {
           await this.couponsRepo.addTargetUser(cartMilestoneReward.unlockCouponId, userId)
         }
+        await this.cartMilestonesService.recordUsage(cartMilestone.id, userId, createdOrders[0].id)
+      }
+      // Payment offer follow-through — was previously entirely missing;
+      // getPublicOffers() only ever computed a lock/unlock display flag,
+      // nothing here ever credited the cashback a customer actually earned.
+      if (paymentOfferMatch && createdOrders.length === 1) {
+        await this.cashbackService.createPending({
+          orderId: createdOrders[0].id,
+          userId,
+          sourceType: 'PAYMENT_OFFER',
+          sourceId: paymentOfferMatch.offerId,
+          amount: paymentOfferMatch.cashbackAmount,
+          creditTrigger: paymentOfferMatch.creditTrigger,
+        })
+        await this.paymentOffersService.recordUsage(paymentOfferMatch.offerId, userId, createdOrders[0].id)
       }
     } catch (err) {
       logger.warn(

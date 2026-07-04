@@ -2,11 +2,14 @@ import { logger } from '../../config/logger.js'
 import { CashbackRepository } from './cashback.repository.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
+import { NotificationsRepository } from '../notifications/notifications.repository.js'
+import { NotificationsService } from '../notifications/notifications.service.js'
 
 const SOURCE_LABELS = {
   COUPON: 'coupon',
   FIRST_TIME_OFFER: 'first order reward',
   CART_MILESTONE: 'cart milestone',
+  PAYMENT_OFFER: 'payment offer',
 }
 
 /**
@@ -24,10 +27,12 @@ const SOURCE_LABELS = {
 export class CashbackService {
   constructor(
     repository = new CashbackRepository(),
-    walletService = new WalletService(new WalletRepository())
+    walletService = new WalletService(new WalletRepository()),
+    notificationsService = new NotificationsService(new NotificationsRepository(), null)
   ) {
     this.repo = repository
     this.walletService = walletService
+    this.notificationsService = notificationsService
   }
 
   /**
@@ -68,6 +73,7 @@ export class CashbackService {
           if (result.success) {
             await this.repo.markCredited(tx.id, result.transaction.id)
             creditedCount++
+            this._notifyCashbackCredited(tx).catch(() => {})
           } else {
             logger.error({ cashbackTxId: tx.id, orderId, message: result.message }, 'Cashback credit failed')
           }
@@ -112,5 +118,23 @@ export class CashbackService {
       logger.error({ err, orderId }, 'Cashback cancelForOrder failed')
     }
     return cancelledCount
+  }
+
+  /**
+   * Push/in-app notification for a just-credited cashback row. Best-effort —
+   * never allowed to affect the credit itself, which has already committed
+   * by the time this runs.
+   */
+  async _notifyCashbackCredited(tx) {
+    try {
+      await this.notificationsService.sendNotification(tx.userId, {
+        title: '🎉 Cashback credited!',
+        body: `₹${tx.amount} cashback from your ${SOURCE_LABELS[tx.sourceType] || 'reward'} has been added to your wallet.`,
+        type: 'WALLET',
+        data: { type: 'WALLET', orderId: tx.orderId, amount: tx.amount, sourceType: tx.sourceType },
+      })
+    } catch (err) {
+      logger.warn({ err: err.message, cashbackTxId: tx.id }, 'Cashback-credited notification failed (non-blocking)')
+    }
   }
 }

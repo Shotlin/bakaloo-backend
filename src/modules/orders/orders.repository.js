@@ -484,11 +484,11 @@ export class OrdersRepository {
   }
 
   /**
-   * Generate order number: GRO-YYYYMMDD-XXX
+   * Generate order number: BKLOO-YYYYMMDD-XXX
    */
   async generateOrderNumber(client = null) {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-    const pattern = `GRO-${today}-%`
+    const pattern = `BKLOO-${today}-%`
 
     // When a transaction client is supplied, run the COUNT on it so orders
     // already inserted earlier in the same transaction (multi-shop checkout
@@ -500,7 +500,7 @@ export class OrdersRepository {
       : await query(`SELECT COUNT(*) FROM orders WHERE order_number LIKE $1`, [pattern])
 
     const seq = parseInt(rows[0].count, 10) + 1
-    return `GRO-${today}-${String(seq).padStart(3, '0')}`
+    return `BKLOO-${today}-${String(seq).padStart(3, '0')}`
   }
 
   /**
