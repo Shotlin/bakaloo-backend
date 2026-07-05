@@ -13,7 +13,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const databaseMock = vi.hoisted(() => ({
   getClient: vi.fn(),
-  query: vi.fn().mockResolvedValue({ rows: [] }), // wallet-settings lookups fall back to defaults
+  // wallet-settings lookups fall back to defaults, except transfers must be
+  // explicitly enabled here — the real default is false (see
+  // wallet-settings.service.js) so these transfer-path tests would otherwise
+  // all short-circuit on the "transfers disabled" guard before ever reaching
+  // the logic under test.
+  query: vi.fn().mockResolvedValue({ rows: [{ key: 'wallet_transfers_enabled', value: true }] }),
 }))
 vi.mock('../../../src/config/database.js', () => databaseMock)
 
@@ -57,7 +62,7 @@ function makeRepoMock(overrides = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  databaseMock.query.mockResolvedValue({ rows: [] })
+  databaseMock.query.mockResolvedValue({ rows: [{ key: 'wallet_transfers_enabled', value: true }] })
 })
 
 describe('WalletService.transfer — counterparty identification by phone number (positive)', () => {
@@ -151,5 +156,41 @@ describe('WalletService.transfer — negative paths unaffected by the descriptio
     expect(result.success).toBe(false)
     expect(result.message).toMatch(/insufficient/i)
     expect(repo.debit).not.toHaveBeenCalled()
+  })
+})
+
+describe('WalletService.transfer — transfersEnabled gate', () => {
+  it('rejects every transfer when wallet_transfers_enabled is false, before looking up the recipient', async () => {
+    databaseMock.query.mockResolvedValue({ rows: [{ key: 'wallet_transfers_enabled', value: false }] })
+    const repo = makeRepoMock()
+    const service = new WalletService(repo)
+
+    const result = await service.transfer(SENDER_ID, { phone: RECIPIENT_PHONE, amount: 100 })
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('WALLET_TRANSFERS_DISABLED')
+    expect(repo.findUserByPhone).not.toHaveBeenCalled()
+  })
+
+  it('defaults to disabled when no wallet_transfers_enabled row exists (safe default)', async () => {
+    databaseMock.query.mockResolvedValue({ rows: [] })
+    const repo = makeRepoMock()
+    const service = new WalletService(repo)
+
+    const result = await service.transfer(SENDER_ID, { phone: RECIPIENT_PHONE, amount: 100 })
+
+    expect(result.success).toBe(false)
+    expect(result.code).toBe('WALLET_TRANSFERS_DISABLED')
+  })
+
+  it('searchRecipient returns an empty list (not an error) when transfers are disabled', async () => {
+    databaseMock.query.mockResolvedValue({ rows: [] })
+    const repo = makeRepoMock({ searchUsersByPhonePrefix: vi.fn().mockResolvedValue([{ id: 'x' }]) })
+    const service = new WalletService(repo)
+
+    const result = await service.searchRecipient(SENDER_ID, '987')
+
+    expect(result).toEqual([])
+    expect(repo.searchUsersByPhonePrefix).not.toHaveBeenCalled()
   })
 })

@@ -447,6 +447,13 @@ export class WalletService {
    * Transfer money to another user by phone number
    */
   async transfer(userId, { phone, amount, description }) {
+    const { minTransferAmount, maxTransferAmount, maxWalletBalance, transfersEnabled } =
+      await this.walletSettingsService.getConfig()
+
+    if (!transfersEnabled) {
+      return { success: false, message: 'Wallet transfers are temporarily unavailable', code: 'WALLET_TRANSFERS_DISABLED' }
+    }
+
     const recipient = await this.repo.findUserByPhone(phone)
     if (!recipient) {
       return { success: false, message: 'Recipient not found' }
@@ -455,9 +462,6 @@ export class WalletService {
     if (recipient.id === userId) {
       return { success: false, message: 'Cannot transfer to yourself' }
     }
-
-    const { minTransferAmount, maxTransferAmount, maxWalletBalance } =
-      await this.walletSettingsService.getConfig()
 
     if (amount < minTransferAmount) {
       return { success: false, message: `Minimum transfer amount is ₹${minTransferAmount}` }
@@ -540,6 +544,10 @@ export class WalletService {
    * Search users by phone number prefix, for the transfer recipient picker.
    */
   async searchRecipient(userId, q) {
+    const { transfersEnabled } = await this.walletSettingsService.getConfig()
+    if (!transfersEnabled) {
+      return []
+    }
     return this.repo.searchUsersByPhonePrefix(q, userId)
   }
 

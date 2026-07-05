@@ -4,12 +4,18 @@ const KEYS = [
   'wallet_max_balance',
   'wallet_max_transfer_amount',
   'wallet_min_transfer_amount',
+  'wallet_transfers_enabled',
 ]
 
 const DEFAULTS = {
   maxWalletBalance: 2000,
   maxTransferAmount: 2000,
   minTransferAmount: 1,
+  // Off by default: user-to-user wallet transfer is gated to RBI-authorized
+  // Full-KYC PPI issuers regardless of transfer/balance limits, which this
+  // platform is not. Wallet top-up + spend-on-order is unaffected by this
+  // flag. Flip on in the dashboard only after that's been cleared.
+  transfersEnabled: false,
 }
 
 /**
@@ -31,18 +37,21 @@ export class WalletSettingsService {
       maxWalletBalance: this._toNumber(raw.wallet_max_balance, DEFAULTS.maxWalletBalance),
       maxTransferAmount: this._toNumber(raw.wallet_max_transfer_amount, DEFAULTS.maxTransferAmount),
       minTransferAmount: this._toNumber(raw.wallet_min_transfer_amount, DEFAULTS.minTransferAmount),
+      transfersEnabled: this._toBoolean(raw.wallet_transfers_enabled, DEFAULTS.transfersEnabled),
     }
   }
 
-  async updateConfig({ maxWalletBalance, maxTransferAmount, minTransferAmount }) {
+  async updateConfig({ maxWalletBalance, maxTransferAmount, minTransferAmount, transfersEnabled }) {
     const current = await this.getConfig()
     const next = {
       maxWalletBalance: maxWalletBalance ?? current.maxWalletBalance,
       maxTransferAmount: maxTransferAmount ?? current.maxTransferAmount,
       minTransferAmount: minTransferAmount ?? current.minTransferAmount,
+      transfersEnabled: transfersEnabled ?? current.transfersEnabled,
     }
 
     for (const [label, value] of Object.entries(next)) {
+      if (label === 'transfersEnabled') continue
       if (!Number.isFinite(value) || value <= 0) {
         return { success: false, message: `${label} must be a positive number` }
       }
@@ -58,6 +67,7 @@ export class WalletSettingsService {
     await this.repo.upsert('wallet_max_balance', next.maxWalletBalance)
     await this.repo.upsert('wallet_max_transfer_amount', next.maxTransferAmount)
     await this.repo.upsert('wallet_min_transfer_amount', next.minTransferAmount)
+    await this.repo.upsert('wallet_transfers_enabled', next.transfersEnabled)
 
     return { success: true, data: next }
   }
@@ -66,5 +76,11 @@ export class WalletSettingsService {
     if (value === undefined || value === null) return fallback
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  _toBoolean(value, fallback) {
+    if (value === undefined || value === null) return fallback
+    if (typeof value === 'boolean') return value
+    return value === 'true' || value === true
   }
 }

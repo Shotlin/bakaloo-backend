@@ -30,6 +30,7 @@ export default async function walletSettingsRoutes(fastify) {
           maxWalletBalance: { type: 'number', minimum: 1 },
           maxTransferAmount: { type: 'number', minimum: 1 },
           minTransferAmount: { type: 'number', minimum: 1 },
+          transfersEnabled: { type: 'boolean' },
         },
       },
     },
