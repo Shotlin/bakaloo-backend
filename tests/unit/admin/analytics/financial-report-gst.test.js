@@ -7,17 +7,17 @@ vi.mock('../../../../src/config/database.js', () => ({
 import { AdminAnalyticsRepository } from '../../../../src/modules/admin/analytics/analytics.repository.js'
 import { query } from '../../../../src/config/database.js'
 
-function mockFinancialReportQueries({ grossTaxable, gstRateValue }) {
+function mockFinancialReportQueries({ orderCount, gstAmount, taxableAmount, gstRateValue }) {
   query
     .mockResolvedValueOnce({
-      rows: [{ gross_revenue: 1000, total_discounts: 0, delivery_fees: 50, net_revenue: 1000, order_count: 10 }],
+      rows: [{ gross_revenue: 1000, total_discounts: 0, delivery_fees: 50, net_revenue: 1000, order_count: orderCount }],
     }) // rev summary
     .mockResolvedValueOnce({ rows: [] }) // byPayment
-    .mockResolvedValueOnce({ rows: [{ gross_taxable: grossTaxable }] }) // grossRow
-    .mockResolvedValueOnce({ rows: [gstRateValue === undefined ? undefined : { value: gstRateValue }] }) // gstSetting
+    .mockResolvedValueOnce({ rows: [{ gst_amount: gstAmount, taxable_amount: taxableAmount }] }) // taxRow
+    .mockResolvedValueOnce({ rows: [gstRateValue === undefined ? undefined : { gst_rate: gstRateValue }] }) // gstConfig
 }
 
-describe('AdminAnalyticsRepository.getFinancialReport — GST breakdown', () => {
+describe('AdminAnalyticsRepository.getFinancialReport — GST breakdown (real charged tax)', () => {
   let repo
 
   beforeEach(() => {
@@ -25,38 +25,36 @@ describe('AdminAnalyticsRepository.getFinancialReport — GST breakdown', () => 
     repo = new AdminAnalyticsRepository()
   })
 
-  it('backs out GST from GST-inclusive order totals using the configured rate', async () => {
-    // 5% rate on a gross (inclusive) taxable amount of 1050 -> tax = 50, net = 1000
-    mockFinancialReportQueries({ grossTaxable: 1050, gstRateValue: '5' })
+  it('sums the real orders.tax_amount charged in the period, alongside the configured rate for display', async () => {
+    mockFinancialReportQueries({ orderCount: 10, gstAmount: 50, taxableAmount: 1000, gstRateValue: '18' })
 
     const result = await repo.getFinancialReport({})
 
     expect(result.gstBreakdown).toEqual([
-      { gst_rate: 5, taxable_amount: 1000, gst_amount: 50 },
+      { gst_rate: 18, taxable_amount: 1000, gst_amount: 50 },
     ])
   })
 
-  it('reports an explicit 0% row when no gst_rate setting exists — honest about being unconfigured rather than silently hiding the card', async () => {
-    mockFinancialReportQueries({ grossTaxable: 1050, gstRateValue: undefined })
+  it('reports gst_rate 0 when fee_settings has no GLOBAL row (defensive default)', async () => {
+    mockFinancialReportQueries({ orderCount: 10, gstAmount: 0, taxableAmount: 1000, gstRateValue: undefined })
 
     const result = await repo.getFinancialReport({})
 
     expect(result.gstBreakdown).toEqual([
-      { gst_rate: 0, taxable_amount: 1050, gst_amount: 0 },
+      { gst_rate: 0, taxable_amount: 1000, gst_amount: 0 },
     ])
   })
 
-  it('returns an empty breakdown when there is no taxable revenue in the period', async () => {
-    mockFinancialReportQueries({ grossTaxable: 0, gstRateValue: '5' })
+  it('returns an empty breakdown when there are no orders in the period', async () => {
+    mockFinancialReportQueries({ orderCount: 0, gstAmount: 0, taxableAmount: 0, gstRateValue: '18' })
 
     const result = await repo.getFinancialReport({})
 
     expect(result.gstBreakdown).toEqual([])
   })
 
-  it('rounds gst_amount/taxable_amount to 2 decimal places for a non-round rate', async () => {
-    // 18% on 100 (inclusive) -> gst = 100*18/118 = 15.254237... -> rounds to 15.25
-    mockFinancialReportQueries({ grossTaxable: 100, gstRateValue: '18' })
+  it('rounds gst_amount/taxable_amount to 2 decimal places', async () => {
+    mockFinancialReportQueries({ orderCount: 3, gstAmount: 15.2549, taxableAmount: 84.7451, gstRateValue: '18' })
 
     const result = await repo.getFinancialReport({})
 

@@ -149,9 +149,23 @@ export class BillSummaryService {
     const feesTotal = this._round(
       deliveryFee + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge
     )
-    const toPayFinal = this._round(itemTotalDiscounted + feesTotal + tipAmount)
+
+    // GST — exclusive, computed on (subtotal + all other fees), matching
+    // TotalsEngine.computeBreakdown's formula. Recomputed here (rather than
+    // trusting the single-shop `aggregate.tax` from the earlier
+    // computeBreakdown call above) because this method overwrites every
+    // other fee with the properly-summed multi-shop total — using the
+    // stale single-shop tax figure would under/over-charge on any
+    // multi-shop cart.
+    const preTaxTotal = this._round(Math.max(0, itemTotalDiscounted + feesTotal))
+    const gstAmount = config.gst_enabled
+      ? this._round((preTaxTotal * this._toNumber(config.gst_rate)) / 100)
+      : 0
+    aggregate.tax = gstAmount
+
+    const toPayFinal = this._round(itemTotalDiscounted + feesTotal + gstAmount + tipAmount)
     const toPayOriginal = this._round(
-      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + tipAmount
+      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + gstAmount + tipAmount
     )
     aggregate.totalPayable = toPayFinal
     aggregate.itemsSubtotal = itemTotalDiscounted
@@ -169,6 +183,7 @@ export class BillSummaryService {
       surgeFee,
       packagingFee,
       quickDeliverySurcharge,
+      gstAmount,
       distanceKm: primaryDistanceKm,
       storeName: primaryStoreName,
       amountToUnlock,
@@ -334,6 +349,7 @@ export class BillSummaryService {
     surgeFee,
     packagingFee,
     quickDeliverySurcharge = 0,
+    gstAmount = 0,
     distanceKm,
     storeName,
     amountToUnlock,
@@ -419,6 +435,17 @@ export class BillSummaryService {
         waived: false,
         description: 'Charged for immediate/priority delivery.',
         metadata: {},
+      })
+    }
+    if (gstAmount > 0) {
+      fees.push({
+        code: 'GST',
+        label: config.gst_label || 'GST',
+        amount: gstAmount,
+        originalAmount: gstAmount,
+        waived: false,
+        description: `${config.gst_rate}% tax on the order total.`,
+        metadata: { rate: this._toNumber(config.gst_rate) },
       })
     }
     return fees

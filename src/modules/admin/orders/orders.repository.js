@@ -105,10 +105,25 @@ export class AdminOrdersRepository {
       )
       if (!order) throw { statusCode: 404, message: 'Order not found' }
 
-      await client.query(
-        'UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2',
-        [newStatus, orderId]
-      )
+      // Only the rider-app delivery-completion flow (delivery.repository.js)
+      // was setting delivered_at — this admin-dashboard path never did, so
+      // any order an admin marked DELIVERED directly (support/testing) had
+      // a permanently NULL delivered_at. The nightly settlement worker
+      // filters strictly on delivered_at falling within its date window,
+      // so those orders were silently excluded from shop_financials and
+      // shop_transactions forever, even though status correctly read
+      // DELIVERED everywhere else in the dashboard.
+      if (newStatus === 'DELIVERED') {
+        await client.query(
+          `UPDATE orders SET status = $1, delivered_at = COALESCE(delivered_at, NOW()), updated_at = NOW() WHERE id = $2`,
+          [newStatus, orderId]
+        )
+      } else {
+        await client.query(
+          'UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2',
+          [newStatus, orderId]
+        )
+      }
 
       await client.query(
         `INSERT INTO order_status_history (order_id, from_status, to_status, changed_by, note)

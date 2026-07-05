@@ -71,6 +71,12 @@ export const updateFeeSettingsSchema = z
     // How fast delivery is promised when the customer opts in — distinct
     // from delivery_eta_minutes, the normal always-shown estimate.
     quick_delivery_eta_minutes: z.number().int().min(0).max(100000),
+
+    // GST — exclusive, charged on top of (subtotal - coupon + other fees).
+    // Off by default; enabling it is the admin's explicit action.
+    gst_enabled: z.boolean(),
+    gst_rate: z.number().min(0).max(100),
+    gst_label: label,
   })
   .partial()
   .superRefine((data, ctx) => {

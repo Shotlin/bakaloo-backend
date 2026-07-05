@@ -24,6 +24,7 @@ const COLUMNS = `
   delivery_eta_minutes,
   quick_delivery_surcharge_enabled, quick_delivery_surcharge_amount,
   quick_delivery_surcharge_label, quick_delivery_eta_minutes,
+  gst_enabled, gst_rate, gst_label,
   created_at, updated_at, updated_by
 `
 
@@ -65,6 +66,9 @@ const UPDATABLE_COLUMNS = [
   'quick_delivery_surcharge_amount',
   'quick_delivery_surcharge_label',
   'quick_delivery_eta_minutes',
+  'gst_enabled',
+  'gst_rate',
+  'gst_label',
 ]
 
 const NUMERIC_COLUMNS = new Set([
@@ -80,6 +84,7 @@ const NUMERIC_COLUMNS = new Set([
   'surge_fee_value',
   'packaging_fee_value',
   'quick_delivery_surcharge_amount',
+  'gst_rate',
 ])
 
 export class FeeSettingsRepository {

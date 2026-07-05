@@ -188,27 +188,25 @@ export class AdminAnalyticsRepository {
       params
     )
 
-    const { rows: [grossRow] } = await query(
-      `SELECT COALESCE(SUM(oi.total), 0) AS gross_taxable
-       FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id
+    // GST is now a real, exclusive charge computed per order by
+    // TotalsEngine and persisted to orders.tax_amount (fee_settings.gst_rate
+    // / gst_enabled, Settings → Fees). The breakdown sums the actual
+    // charged tax rather than back-calculating from item totals — accurate
+    // as long as the rate hasn't changed mid-period (a real rate change is
+    // a rare, deliberate admin action, not a per-order concern).
+    const { rows: [taxRow] } = await query(
+      `SELECT COALESCE(SUM(o.tax_amount), 0) AS gst_amount,
+              COALESCE(SUM(o.total_amount - COALESCE(o.tax_amount, 0)), 0) AS taxable_amount
+       FROM orders o
        ${dateFilter}`,
       params
     )
-
-    // Single admin-configurable flat rate (Settings → Store Info → GST
-    // Rate), not a per-product multi-slab system. order_items.total is
-    // GST-inclusive (standard Indian retail/MRP practice), so the tax
-    // portion is backed out of the gross figure rather than added on top.
-    const { rows: [gstSetting] } = await query(
-      `SELECT value FROM app_settings WHERE key = 'gst_rate'`
+    const { rows: [gstConfig] } = await query(
+      `SELECT gst_rate FROM fee_settings WHERE scope = 'GLOBAL' LIMIT 1`
     )
-    const gstRate = parseFloat(gstSetting?.value) || 0
-    const grossTaxable = parseFloat(grossRow.gross_taxable || 0)
-    const gstAmount = gstRate > 0
-      ? Math.round((grossTaxable * gstRate / (100 + gstRate)) * 100) / 100
-      : 0
-    const taxableAmount = Math.round((grossTaxable - gstAmount) * 100) / 100
+    const gstRate = parseFloat(gstConfig?.gst_rate) || 0
+    const gstAmount = Math.round(parseFloat(taxRow.gst_amount || 0) * 100) / 100
+    const taxableAmount = Math.round(parseFloat(taxRow.taxable_amount || 0) * 100) / 100
 
     return {
       revenue: {
@@ -219,7 +217,7 @@ export class AdminAnalyticsRepository {
         order_count: rev.order_count,
       },
       byPaymentMethod: byPayment.map(r => ({ ...r, revenue: parseFloat(r.revenue) })),
-      gstBreakdown: grossTaxable > 0
+      gstBreakdown: rev.order_count > 0
         ? [{ gst_rate: gstRate, taxable_amount: taxableAmount, gst_amount: gstAmount }]
         : [],
     }

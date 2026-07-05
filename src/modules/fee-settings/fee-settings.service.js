@@ -102,6 +102,9 @@ export class FeeSettingsService {
       quick_delivery_surcharge_amount: 0,
       quick_delivery_surcharge_label: 'Quick delivery fee',
       quick_delivery_eta_minutes: 15,
+      gst_enabled: false,
+      gst_rate: 18,
+      gst_label: 'GST',
     }
   }
 }
