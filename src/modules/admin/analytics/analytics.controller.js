@@ -44,11 +44,31 @@ export class AdminAnalyticsController {
     return success(data, 'Comparison fetched')
   }
 
+  async getGeographicAnalytics(request, reply) {
+    const { startDate, endDate } = request.query
+    const data = await svc.getGeographicAnalytics({ startDate, endDate, shopId: request.shopId })
+    return success(data, 'Geographic analytics fetched')
+  }
+
+  async getDeadStock(request, reply) {
+    const { limit } = request.query
+    const data = await svc.getDeadStock({ limit, shopId: request.shopId })
+    return success(data, 'Dead stock fetched')
+  }
+
   async exportPDF(request, reply) {
     const { startDate, endDate } = request.query
     const buffer = await svc.exportReportPDF({ startDate, endDate, shopId: request.shopId })
     reply.header('Content-Type', 'application/pdf')
     reply.header('Content-Disposition', `attachment; filename="analytics-report-${Date.now()}.pdf"`)
+    return reply.send(buffer)
+  }
+
+  async exportExcel(request, reply) {
+    const { startDate, endDate } = request.query
+    const buffer = await svc.exportReportExcel({ startDate, endDate, shopId: request.shopId })
+    reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    reply.header('Content-Disposition', `attachment; filename="analytics-report-${Date.now()}.xlsx"`)
     return reply.send(buffer)
   }
 }

@@ -303,4 +303,74 @@ export class AdminAnalyticsRepository {
       },
     }
   }
+
+  async getGeographicAnalytics({ startDate, endDate, shopId }) {
+    const params = []
+    let dateFilter = "WHERE o.status = 'DELIVERED'"
+    if (startDate) { params.push(startDate); dateFilter += ` AND o.created_at >= $${params.length}` }
+    if (endDate) { params.push(endDate); dateFilter += ` AND o.created_at <= $${params.length}` }
+    if (shopId) { params.push(shopId); dateFilter += ` AND o.shop_id = $${params.length}` }
+
+    const { rows } = await query(
+      `SELECT COALESCE(NULLIF(TRIM(o.delivery_address->>'city'), ''), 'Unknown') AS area,
+              COUNT(*)::int AS orders,
+              SUM(o.total_amount) AS revenue,
+              COUNT(DISTINCT o.user_id)::int AS customers,
+              AVG(o.total_amount) AS avg_order_value
+       FROM orders o ${dateFilter}
+       GROUP BY area
+       ORDER BY revenue DESC`,
+      params
+    )
+
+    return rows.map(r => ({
+      area: r.area,
+      orders: r.orders,
+      revenue: parseFloat(r.revenue || 0),
+      customers: r.customers,
+      avg_order_value: parseFloat(r.avg_order_value || 0),
+    }))
+  }
+
+  async getDeadStockProducts({ limit = 20, shopId }) {
+    const params = []
+    let shopFilter = ''
+    if (shopId) { params.push(shopId); shopFilter = ` AND sp.shop_id = $${params.length}` }
+    params.push(limit)
+
+    const { rows } = await query(
+      `SELECT p.id, p.name, p.sku, sp.stock_quantity,
+              c.name AS category,
+              MAX(o.created_at) AS last_sold_at,
+              MIN(sp.created_at) AS stocked_at
+       FROM shop_products sp
+       JOIN products p ON p.id = sp.product_id
+       LEFT JOIN categories c ON c.id = p.category_id
+       LEFT JOIN order_items oi ON oi.product_id = p.id
+       LEFT JOIN orders o ON o.id = oi.order_id AND o.status = 'DELIVERED'
+       WHERE sp.stock_quantity > 0${shopFilter}
+       GROUP BY p.id, p.name, p.sku, sp.stock_quantity, c.name
+       HAVING MAX(o.created_at) IS NULL OR MAX(o.created_at) < NOW() - INTERVAL '60 days'
+       ORDER BY last_sold_at ASC NULLS FIRST
+       LIMIT $${params.length}`,
+      params
+    )
+
+    const now = Date.now()
+    return rows.map(r => {
+      const reference = r.last_sold_at || r.stocked_at
+      const daysSince = reference
+        ? Math.floor((now - new Date(reference).getTime()) / 86400000)
+        : 0
+      return {
+        id: r.id,
+        name: r.name,
+        sku: r.sku,
+        stock_quantity: r.stock_quantity,
+        last_sold_at: r.last_sold_at,
+        days_since_sold: daysSince,
+        category: r.category || null,
+      }
+    })
+  }
 }

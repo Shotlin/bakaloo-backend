@@ -74,4 +74,36 @@ describe('AdminAnalyticsRepository — shop scoping (R17)', () => {
       expect(params[2]).toBe(SHOP_ID)
     }
   })
+
+  it('getGeographicAnalytics adds no shop filter for an HQ-wide call', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await repo.getGeographicAnalytics({})
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).not.toContain('o.shop_id')
+    expect(params).toEqual([])
+  })
+
+  it('getGeographicAnalytics filters by shop_id when scoped', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await repo.getGeographicAnalytics({ shopId: SHOP_ID })
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).toContain('AND o.shop_id = $1')
+    expect(params).toEqual([SHOP_ID])
+  })
+
+  it('getDeadStockProducts filters by shop_id when scoped', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await repo.getDeadStockProducts({ limit: 20, shopId: SHOP_ID })
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).toContain('AND sp.shop_id = $1')
+    expect(params).toEqual([SHOP_ID, 20])
+  })
+
+  it('getDeadStockProducts adds no shop filter for an HQ-wide call', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await repo.getDeadStockProducts({ limit: 20 })
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).not.toContain('sp.shop_id')
+    expect(params).toEqual([20])
+  })
 })

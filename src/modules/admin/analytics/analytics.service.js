@@ -1,5 +1,6 @@
 import { AdminAnalyticsRepository } from './analytics.repository.js'
 import PDFDocument from 'pdfkit'
+import ExcelJS from 'exceljs'
 
 const repo = new AdminAnalyticsRepository()
 
@@ -34,6 +35,69 @@ export class AdminAnalyticsService {
       params.period2Start, params.period2End,
       params.shopId
     )
+  }
+
+  async getGeographicAnalytics(params) {
+    return repo.getGeographicAnalytics(params)
+  }
+
+  async getDeadStock(params) {
+    return repo.getDeadStockProducts(params)
+  }
+
+  async exportReportExcel({ startDate, endDate, shopId }) {
+    const [sales, financial] = await Promise.all([
+      repo.getSalesAnalytics({ startDate, endDate, shopId }),
+      repo.getFinancialReport({ startDate, endDate, shopId }),
+    ])
+
+    const workbook = new ExcelJS.Workbook()
+
+    const summarySheet = workbook.addWorksheet('Summary')
+    summarySheet.columns = [
+      { header: 'Metric', key: 'metric', width: 28 },
+      { header: 'Value', key: 'value', width: 20 },
+    ]
+    summarySheet.addRows([
+      { metric: 'Total Revenue', value: sales.summary.total_revenue },
+      { metric: 'Total Orders', value: sales.summary.total_orders },
+      { metric: 'Average Order Value', value: sales.summary.avg_order_value },
+      { metric: 'Unique Customers', value: sales.summary.unique_customers },
+      { metric: 'Total Discounts', value: sales.summary.total_discounts },
+      { metric: 'Gross Revenue', value: financial.revenue.gross },
+      { metric: 'Net Revenue', value: financial.revenue.net },
+      { metric: 'Delivery Fees', value: financial.revenue.delivery_fees },
+    ])
+
+    const dailySheet = workbook.addWorksheet('Daily Sales')
+    dailySheet.columns = [
+      { header: 'Date', key: 'period', width: 14 },
+      { header: 'Revenue (₹)', key: 'revenue', width: 16 },
+      { header: 'Orders', key: 'orders', width: 12 },
+      { header: 'Avg Order Value (₹)', key: 'avg_order_value', width: 18 },
+      { header: 'Discount (₹)', key: 'total_discount', width: 14 },
+    ]
+    dailySheet.addRows(sales.timeSeries)
+
+    const paymentSheet = workbook.addWorksheet('Payment Methods')
+    paymentSheet.columns = [
+      { header: 'Method', key: 'payment_method', width: 20 },
+      { header: 'Revenue (₹)', key: 'revenue', width: 16 },
+      { header: 'Orders', key: 'count', width: 12 },
+    ]
+    paymentSheet.addRows(financial.byPaymentMethod)
+
+    if (financial.gstBreakdown.length > 0) {
+      const gstSheet = workbook.addWorksheet('GST Breakdown')
+      gstSheet.columns = [
+        { header: 'GST Rate (%)', key: 'gst_rate', width: 14 },
+        { header: 'Taxable Amount (₹)', key: 'taxable_amount', width: 18 },
+        { header: 'GST Amount (₹)', key: 'gst_amount', width: 16 },
+      ]
+      gstSheet.addRows(financial.gstBreakdown)
+    }
+
+    return workbook.xlsx.writeBuffer()
   }
 
   async exportReportPDF({ startDate, endDate, shopId }) {

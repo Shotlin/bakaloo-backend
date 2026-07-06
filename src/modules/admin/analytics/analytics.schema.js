@@ -44,3 +44,14 @@ export const comparisonSchema = {
     },
   },
 }
+
+export const geographicSchema = dateRangeSchema
+
+export const deadStockSchema = {
+  querystring: {
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 200, default: 20 },
+    },
+  },
+}

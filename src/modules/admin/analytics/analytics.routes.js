@@ -2,6 +2,7 @@ import { AdminAnalyticsController } from './analytics.controller.js'
 import { requireShopScope } from '../../../middlewares/shop-scope.js'
 import {
   salesSchema, productPerformanceSchema, dateRangeSchema, comparisonSchema, cartEnhancementAnalyticsSchema,
+  geographicSchema, deadStockSchema,
 } from './analytics.schema.js'
 
 const ctrl = new AdminAnalyticsController()
@@ -30,5 +31,8 @@ export default async function adminAnalyticsRoutes(fastify) {
   fastify.get('/financial', { schema: dateRangeSchema }, ctrl.getFinancialReport)
   fastify.get('/cart-enhancements', { schema: cartEnhancementAnalyticsSchema }, ctrl.getCartEnhancementAnalytics)
   fastify.get('/comparison', { schema: comparisonSchema }, ctrl.getComparison)
+  fastify.get('/geographic', { schema: geographicSchema }, ctrl.getGeographicAnalytics)
+  fastify.get('/dead-stock', { schema: deadStockSchema }, ctrl.getDeadStock)
   fastify.get('/export-pdf', { schema: dateRangeSchema }, ctrl.exportPDF)
+  fastify.get('/export-excel', { schema: dateRangeSchema }, ctrl.exportExcel)
 }
