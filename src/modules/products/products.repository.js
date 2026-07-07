@@ -288,9 +288,17 @@ export class ProductsRepository {
   }
 
   /**
-   * Hybrid search: prefix full-text (simple dictionary) + ILIKE fallback
+   * Hybrid search: prefix full-text (simple dictionary) + ILIKE fallback.
    * Uses 'simple' dictionary so prefix queries like 'amu:*' match 'amul'
    * without English stemming issues. Returns fuzzy suggestions when 0 results.
+   *
+   * `search_vector` (migration 081) indexes name + brand (weight A), tags +
+   * category name (weight B), meta title/description (weight C), and the
+   * long description (weight D) — so a query matching only the category or
+   * a tag still returns results, and ts_rank_cd naturally scores a
+   * name/brand match higher than a category/tag match, higher again than a
+   * plain description match. The ILIKE fallback mirrors the same field set
+   * for the (rarer) case where the ranked FTS branch finds nothing.
    *
    * @param {string} q
    * @param {object} filters
@@ -340,7 +348,7 @@ export class ProductsRepository {
           p.custom_badges, p.display_delivery_minutes,
           p.avg_rating, p.rating_count, p.net_quantity,
           pf.name AS family_name,
-          ts_rank(p.search_vector, to_tsquery('simple', $1)) AS rank,
+          ts_rank_cd(p.search_vector, to_tsquery('simple', $1)) AS rank,
           1 AS source
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
@@ -378,6 +386,9 @@ export class ProductsRepository {
             p.name ILIKE $2
             OR p.sku ILIKE $2
             OR p.barcode ILIKE $2
+            OR p.brand ILIKE $2
+            OR c.name ILIKE $2
+            OR EXISTS (SELECT 1 FROM unnest(p.tags) tag WHERE tag ILIKE $2)
           )
           ${visClause}
       ),
@@ -420,11 +431,15 @@ export class ProductsRepository {
         UNION
         SELECT p.id
         FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
         WHERE p.is_active = true
           AND (
             p.name ILIKE $2
             OR p.sku ILIKE $2
             OR p.barcode ILIKE $2
+            OR p.brand ILIKE $2
+            OR c.name ILIKE $2
+            OR EXISTS (SELECT 1 FROM unnest(p.tags) tag WHERE tag ILIKE $2)
           )
           ${visClause}
       ) AS matches
@@ -482,11 +497,19 @@ export class ProductsRepository {
                 p.stock_quantity, p.unit, p.thumbnail_url,
                 c.name AS category_name,
                 p.is_featured, p.total_sold,
-                similarity(p.name, $1) AS sim
+                GREATEST(
+                  similarity(p.name, $1),
+                  similarity(COALESCE(p.brand, ''), $1),
+                  similarity(COALESCE(c.name, ''), $1)
+                ) AS sim
          FROM products p
          LEFT JOIN categories c ON c.id = p.category_id
          WHERE p.is_active = true
-           AND similarity(p.name, $1) > 0.08
+           AND (
+             similarity(p.name, $1) > 0.08
+             OR similarity(COALESCE(p.brand, ''), $1) > 0.08
+             OR similarity(COALESCE(c.name, ''), $1) > 0.08
+           )
            ${visibility.sql}
          ORDER BY sim DESC, p.total_sold DESC
          LIMIT $${limitIdx}`,

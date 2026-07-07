@@ -575,3 +575,48 @@ describe('ProductsRepository — findRelated / findPairWith stock filter + categ
     expect(result).toEqual(['cat-bakery', 'cat-dairy'])
   })
 })
+
+describe('ProductsRepository — fullTextSearch / fuzzySuggest field coverage (migration 081)', () => {
+  it('fullTextSearch ranks the FTS branch with ts_rank_cd (weighted search_vector)', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValue({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.fullTextSearch('milk', { page: 1, limit: 20 })
+
+    const [sql] = query.mock.calls[0]
+    expect(sql).toMatch(/ts_rank_cd\(p\.search_vector/)
+  })
+
+  it('fullTextSearch\'s ILIKE fallback also matches brand, category name, and tags', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValue({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.fullTextSearch('amul', { page: 1, limit: 20 })
+
+    const [mainSql] = query.mock.calls[0]
+    expect(mainSql).toMatch(/p\.brand ILIKE \$2/)
+    expect(mainSql).toMatch(/c\.name ILIKE \$2/)
+    expect(mainSql).toMatch(/unnest\(p\.tags\)/)
+
+    const [countSql] = query.mock.calls[1]
+    expect(countSql).toMatch(/p\.brand ILIKE \$2/)
+    expect(countSql).toMatch(/c\.name ILIKE \$2/)
+    expect(countSql).toMatch(/unnest\(p\.tags\)/)
+  })
+
+  it('fuzzySuggest matches on brand and category name similarity, not just product name', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValue({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.fuzzySuggest('amul')
+
+    const [sql] = query.mock.calls[0]
+    expect(sql).toMatch(/similarity\(p\.name, \$1\)/)
+    expect(sql).toMatch(/similarity\(COALESCE\(p\.brand, ''\), \$1\)/)
+    expect(sql).toMatch(/similarity\(COALESCE\(c\.name, ''\), \$1\)/)
+    expect(sql).toMatch(/GREATEST\(/)
+  })
+})
