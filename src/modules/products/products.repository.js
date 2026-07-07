@@ -728,6 +728,7 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.is_active = true
+         AND p.stock_quantity > 0
          AND p.category_id = $1
          AND p.id != $2
          ${visibility.sql}
@@ -738,8 +739,52 @@ export class ProductsRepository {
     return rows
   }
 
-  async findPairWith(productId, categoryId, limit = 10, allocatedShopIds = null) {
+  /**
+   * Active target_category_ids configured for `categoryId` via the admin's
+   * Product Suggestions rules (migration 080, category_suggestion_rules).
+   * Returns [] when the category has no configured rule — callers must
+   * treat that as "no rule", not "suggest nothing", and fall back to their
+   * own default behavior (see findPairWith below).
+   */
+  async getSuggestionTargetCategoryIds(categoryId) {
+    const { rows } = await query(
+      `SELECT target_category_id FROM category_suggestion_rules
+       WHERE source_category_id = $1 AND is_active = true
+       ORDER BY display_order ASC`,
+      [categoryId]
+    )
+    return rows.map((r) => r.target_category_id)
+  }
+
+  /**
+   * "Pair With" cross-sell candidates for a product.
+   *
+   * When the viewed product's category has admin-configured target
+   * categories (`targetCategoryIds` non-empty — see getSuggestionTargetCategoryIds
+   * / migration 080), candidates are restricted to those categories,
+   * ranked by total_sold. A source category can legitimately target
+   * itself (e.g. Dairy -> [Dairy, Bakery]), so same-category items are
+   * allowed through in that case — only the current product is excluded.
+   *
+   * When no rule is configured (`targetCategoryIds` null/empty), falls
+   * back to the original behavior: any other category, ranked by
+   * total_sold — unchanged for every category the admin hasn't set up.
+   *
+   * @param {string} productId
+   * @param {string} categoryId
+   * @param {number} [limit=10]
+   * @param {string[]|null} [allocatedShopIds]
+   * @param {string[]|null} [targetCategoryIds]
+   */
+  async findPairWith(productId, categoryId, limit = 10, allocatedShopIds = null, targetCategoryIds = null) {
     const params = [categoryId, productId]
+
+    let categoryPredicate = 'p.category_id != $1'
+    if (Array.isArray(targetCategoryIds) && targetCategoryIds.length > 0) {
+      params.push(targetCategoryIds)
+      categoryPredicate = `p.category_id = ANY($${params.length}::uuid[])`
+    }
+
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
       params,
@@ -762,7 +807,8 @@ export class ProductsRepository {
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        WHERE p.is_active = true
-         AND p.category_id != $1
+         AND p.stock_quantity > 0
+         AND ${categoryPredicate}
          AND p.id != $2
          ${visibility.sql}
        ORDER BY p.total_sold DESC

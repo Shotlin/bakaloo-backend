@@ -383,6 +383,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/admin/wallet-settings',
   })
 
+  // Product Suggestions (admin) — category-to-category "Pair With" mapping
+  await app.register(import('./modules/product-suggestions/product-suggestions.routes.js'), {
+    prefix: '/api/v1/admin/product-suggestions',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

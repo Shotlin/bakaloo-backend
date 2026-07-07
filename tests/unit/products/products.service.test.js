@@ -55,6 +55,7 @@ function makeRepoMock() {
     findBySlug: vi.fn(),
     findRelated: vi.fn(),
     findPairWith: vi.fn(),
+    getSuggestionTargetCategoryIds: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
     updateStock: vi.fn(),
@@ -375,13 +376,42 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
 
   it('forwards allocated_shop_ids to findPairWith', async () => {
     const repo = makeRepoMock()
+    cacheGet.mockResolvedValueOnce([]) // no configured suggestion rule for 'cat-1'
     repo.findPairWith.mockResolvedValueOnce([])
     const allocation = makeAllocationServiceMock([SHOP_A])
 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getPairWith(PRODUCT_ID, 'cat-1', 5, { userId: CUSTOMER_ID })
 
-    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A])
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [])
+  })
+
+  it('getPairWith falls back to the DB and caches the result on a cache miss (no rule configured yet)', async () => {
+    const repo = makeRepoMock()
+    cacheGet.mockResolvedValueOnce(null)
+    repo.getSuggestionTargetCategoryIds.mockResolvedValueOnce([])
+    repo.findPairWith.mockResolvedValueOnce([])
+    const allocation = makeAllocationServiceMock([SHOP_A])
+
+    const svc = new ProductsService(repo, { allocationService: allocation })
+    await svc.getPairWith(PRODUCT_ID, 'cat-1', 5, { userId: CUSTOMER_ID })
+
+    expect(repo.getSuggestionTargetCategoryIds).toHaveBeenCalledWith('cat-1')
+    expect(cacheSet).toHaveBeenCalledWith('products:pairwith-categories:v1:cat-1', [], 3600)
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [])
+  })
+
+  it('getPairWith passes an admin-configured target-category list through to findPairWith', async () => {
+    const repo = makeRepoMock()
+    cacheGet.mockResolvedValueOnce(['cat-dairy', 'cat-bakery'])
+    repo.findPairWith.mockResolvedValueOnce([])
+    const allocation = makeAllocationServiceMock([SHOP_A])
+
+    const svc = new ProductsService(repo, { allocationService: allocation })
+    await svc.getPairWith(PRODUCT_ID, 'cat-1', 5, { userId: CUSTOMER_ID })
+
+    expect(repo.getSuggestionTargetCategoryIds).not.toHaveBeenCalled()
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], ['cat-dairy', 'cat-bakery'])
   })
 
   it('returns [] across all collections when the customer has zero allocations', async () => {
@@ -478,5 +508,70 @@ describe('ProductsRepository — customer scoping SQL', () => {
     // SQL must not contain the literal UUIDs
     expect(dataCall[0]).not.toContain(SHOP_A)
     expect(dataCall[0]).not.toContain(SHOP_B)
+  })
+})
+
+describe('ProductsRepository — findRelated / findPairWith stock filter + category rules', () => {
+  it('findRelated excludes zero-stock products', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValueOnce({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.findRelated(PRODUCT_ID, 'cat-1', 10, null)
+
+    const [sql] = query.mock.calls[0]
+    expect(sql).toMatch(/p\.stock_quantity\s*>\s*0/)
+  })
+
+  it('findPairWith excludes zero-stock products', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValueOnce({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.findPairWith(PRODUCT_ID, 'cat-1', 10, null)
+
+    const [sql] = query.mock.calls[0]
+    expect(sql).toMatch(/p\.stock_quantity\s*>\s*0/)
+  })
+
+  it('findPairWith falls back to any-other-category when no target categories are configured', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValueOnce({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.findPairWith(PRODUCT_ID, 'cat-1', 10, null, [])
+
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).toMatch(/p\.category_id\s*!=\s*\$1/)
+    expect(sql).not.toMatch(/ANY/)
+    expect(params).toEqual(['cat-1', PRODUCT_ID, 10])
+  })
+
+  it('findPairWith restricts to the admin-configured target categories when present', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValueOnce({ rows: [] })
+
+    const repo = new ProductsRepository()
+    await repo.findPairWith(PRODUCT_ID, 'cat-dairy', 10, null, ['cat-dairy', 'cat-bakery'])
+
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).toMatch(/p\.category_id\s*=\s*ANY\(\$3::uuid\[\]\)/)
+    expect(sql).not.toMatch(/category_id\s*!=/)
+    expect(params).toEqual(['cat-dairy', PRODUCT_ID, ['cat-dairy', 'cat-bakery'], 10])
+  })
+
+  it('getSuggestionTargetCategoryIds queries active rules for the source category, ordered', async () => {
+    const { query } = await import('../../../src/config/database.js')
+    query.mockResolvedValueOnce({ rows: [{ target_category_id: 'cat-bakery' }, { target_category_id: 'cat-dairy' }] })
+
+    const repo = new ProductsRepository()
+    const result = await repo.getSuggestionTargetCategoryIds('cat-1')
+
+    const [sql, params] = query.mock.calls[0]
+    expect(sql).toMatch(/FROM category_suggestion_rules/)
+    expect(sql).toMatch(/source_category_id\s*=\s*\$1/)
+    expect(sql).toMatch(/is_active\s*=\s*true/)
+    expect(params).toEqual(['cat-1'])
+    expect(result).toEqual(['cat-bakery', 'cat-dairy'])
   })
 })

@@ -9,6 +9,7 @@ import { AllocationRepository } from '../allocation/allocation.repository.js'
 const CACHE_TTL_LIST = 600     // 10 min for lists
 const CACHE_TTL_FEATURED = 1800 // 30 min for featured
 const CACHE_TTL_DETAIL = 900   // 15 min for single product
+const CACHE_TTL_SUGGESTION_CATEGORIES = 3600 // 1 hr — admin-configured pair-with category rules change rarely
 const CACHE_VERSION = 'v3'
 
 /**
@@ -443,8 +444,23 @@ export class ProductsService {
       return []
     }
 
+    // Admin-configured "which categories pair with this one" (migration 080
+    // category_suggestion_rules). Cached per-category — this list changes
+    // rarely and is shared by every product in the category, unlike the
+    // final ranked result below which stays live (stock/price must not go
+    // stale). Empty array means "no rule configured" and findPairWith()
+    // falls back to its original any-other-category behavior for it.
+    // Key format is shared with product-suggestions.service.js, which
+    // deletes this exact key when an admin saves a rule change.
+    const suggestionCacheKey = `products:pairwith-categories:v1:${categoryId}`
+    let targetCategoryIds = await cacheGet(suggestionCacheKey)
+    if (targetCategoryIds == null) {
+      targetCategoryIds = await this.repo.getSuggestionTargetCategoryIds(categoryId)
+      await cacheSet(suggestionCacheKey, targetCategoryIds, CACHE_TTL_SUGGESTION_CATEGORIES)
+    }
+
     return this._normalizeProducts(
-      await this.repo.findPairWith(productId, categoryId, limit, allocatedShopIds)
+      await this.repo.findPairWith(productId, categoryId, limit, allocatedShopIds, targetCategoryIds)
     )
   }
 
