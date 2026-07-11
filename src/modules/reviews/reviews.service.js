@@ -1,3 +1,5 @@
+import { cacheDeletePattern } from '../../utils/cache.js'
+
 /**
  * Reviews service — business logic for reviews
  */
@@ -13,6 +15,17 @@ export class ReviewsService {
 
   async checkReviewEligibility(userId, productId) {
     return await this.repository.checkReviewEligibility(userId, productId)
+  }
+
+  // Product listing/detail responses are cached — recomputing the DB
+  // columns alone would leave a customer looking at a stale cached rating
+  // until the TTL expired. Mirrors the cache keys products.service.js
+  // busts on any other product-affecting mutation.
+  async _syncProductRating(productId) {
+    await this.repository.recomputeProductRating(productId)
+    await cacheDeletePattern(`products:detail:*:${productId}`)
+    await cacheDeletePattern('products:list:*')
+    await cacheDeletePattern('products:featured*')
   }
 
   async createReview(userId, { productId, orderId, rating, comment }) {
@@ -33,7 +46,9 @@ export class ReviewsService {
       throw new Error('You have already reviewed this product for this order')
     }
 
-    return await this.repository.createReview(userId, { productId, orderId, rating, comment })
+    const review = await this.repository.createReview(userId, { productId, orderId, rating, comment })
+    await this._syncProductRating(productId)
+    return review
   }
 
   async updateReview(userId, reviewId, { rating, comment }) {
@@ -50,7 +65,11 @@ export class ReviewsService {
       throw new Error('You can only update your own reviews')
     }
 
-    return await this.repository.updateReview(reviewId, { rating, comment })
+    const updated = await this.repository.updateReview(reviewId, { rating, comment })
+    if (rating !== undefined) {
+      await this._syncProductRating(review.product_id)
+    }
+    return updated
   }
 
   async deleteReview(userId, reviewId) {
@@ -63,7 +82,8 @@ export class ReviewsService {
       throw new Error('You can only delete your own reviews')
     }
 
-    return await this.repository.deleteReview(reviewId)
+    await this.repository.deleteReview(reviewId)
+    await this._syncProductRating(review.product_id)
   }
 
   async getUserReviews(userId, { page, limit }) {

@@ -34,10 +34,15 @@ export class ReviewsRepository {
     }
   }
 
+  // Previously had no status filter at all — a customer could review a
+  // product from a PENDING/CONFIRMED/CANCELLED order, before it was ever
+  // delivered. Reviews only make sense once the customer actually received
+  // the product, matching the same DELIVERED gate checkReviewEligibility()
+  // already uses.
   async checkUserOrder(userId, orderId, productId) {
     const { rows } = await query(
       `SELECT 1 FROM orders o
-       WHERE o.id = $1 AND o.user_id = $2
+       WHERE o.id = $1 AND o.user_id = $2 AND o.status = 'DELIVERED'
        AND EXISTS (
          SELECT 1 FROM jsonb_array_elements(o.items) AS item
          WHERE item->>'productId' = $3
@@ -136,6 +141,26 @@ export class ReviewsRepository {
 
   async deleteReview(reviewId) {
     await query('DELETE FROM reviews WHERE id = $1', [reviewId])
+  }
+
+  // products.avg_rating/rating_count are denormalized for fast listing/detail
+  // reads — every customer-facing product query reads these stored columns
+  // directly rather than joining reviews live. Previously nothing ever wrote
+  // to them after the initial (always-zero) row insert, so a product's
+  // rating display never moved no matter how many reviews came in. Call
+  // this after any review create/update/delete so the stored columns stay
+  // in sync with the real reviews table.
+  async recomputeProductRating(productId) {
+    await query(
+      `UPDATE products
+          SET avg_rating = COALESCE(
+                (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE product_id = $1),
+                0
+              ),
+              rating_count = (SELECT COUNT(*) FROM reviews WHERE product_id = $1)
+        WHERE id = $1`,
+      [productId]
+    )
   }
 
   async getUserReviews(userId, { offset, limit }) {
