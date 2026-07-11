@@ -5,6 +5,11 @@ const CART_PREFIX = 'cart:'
 const CART_TTL = 60 * 60 * 24 * 7 // 7 days
 const CART_TIP_PREFIX = 'cart-tip:'
 const CART_INSTRUCTIONS_PREFIX = 'cart-instructions:'
+// Sorted set: member = userId, score = epoch-ms of last cart-related
+// mutation. Powers abandoned-cart detection (src/workers/abandoned-cart.worker.js)
+// without changing the cart JSON blob's shape — a cart has no
+// updated_at/last_activity field of its own, only the Redis TTL.
+const CART_ACTIVITY_ZSET = 'cart-activity'
 
 /**
  * Cart repository
@@ -64,6 +69,7 @@ export class CartRepository {
       'EX',
       CART_TTL
     )
+    await redis.zadd(CART_ACTIVITY_ZSET, Date.now(), userId)
   }
 
   /**
@@ -71,6 +77,44 @@ export class CartRepository {
    */
   async clearCart(userId) {
     await redis.del(`${CART_PREFIX}${userId}`)
+    await redis.zrem(CART_ACTIVITY_ZSET, userId)
+  }
+
+  /**
+   * Used by the abandoned-cart sweep worker. Returns userIds whose cart
+   * hasn't been touched since before `cutoffMs` (epoch-ms), oldest activity
+   * first — so the longest-idle carts are always processed first within a
+   * batch, capped at `limit`. Each entry includes the raw activity score
+   * (epoch-ms of last mutation) so the caller can compute exactly how long
+   * the cart has been idle.
+   *
+   * @returns {Promise<Array<{userId: string, lastActivityMs: number}>>}
+   */
+  async getInactiveUserIds(cutoffMs, limit) {
+    const flat = await redis.zrangebyscore(
+      CART_ACTIVITY_ZSET,
+      0,
+      cutoffMs,
+      'WITHSCORES',
+      'LIMIT',
+      0,
+      limit
+    )
+    const result = []
+    for (let i = 0; i < flat.length; i += 2) {
+      result.push({ userId: flat[i], lastActivityMs: Number(flat[i + 1]) })
+    }
+    return result
+  }
+
+  /**
+   * Removes a user's cart-activity entry — used when the sweep worker finds
+   * a stale ZSET member with no live items left (e.g. every line item's
+   * shop/product went inactive since the last activity), so it isn't
+   * reprocessed forever.
+   */
+  async removeActivity(userId) {
+    await redis.zrem(CART_ACTIVITY_ZSET, userId)
   }
 
   // ────────────────────────────────────────────────────────
@@ -326,6 +370,7 @@ export class CartRepository {
    */
   async setTip(userId, amount) {
     await redis.set(`${CART_TIP_PREFIX}${userId}`, String(amount), 'EX', CART_TTL)
+    await redis.zadd(CART_ACTIVITY_ZSET, Date.now(), userId)
   }
 
   /**
@@ -348,6 +393,7 @@ export class CartRepository {
   async setInstructions(userId, text) {
     if (text && text.trim()) {
       await redis.set(`${CART_INSTRUCTIONS_PREFIX}${userId}`, text.trim(), 'EX', CART_TTL)
+      await redis.zadd(CART_ACTIVITY_ZSET, Date.now(), userId)
     } else {
       await this.clearInstructions(userId)
     }

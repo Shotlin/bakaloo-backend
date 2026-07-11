@@ -22,7 +22,7 @@ import {
  */
 export default async function cartRoutes(fastify) {
   const repository = new CartRepository()
-  const service = new CartService(repository)
+  const service = new CartService(repository, { fastify })
   const paymentSettingsService = new PaymentSettingsService()
   const billSummaryService = new BillSummaryService({
     cartService: service,

@@ -302,6 +302,14 @@ async function socketioPlugin(fastify) {
     io.to('admin:dashboard').emit('dashboard:payment_received', payment)
   })
 
+  // Helper: emit an abandoned-cart status transition (RECOVERED/CONVERTED)
+  // to the admin dashboard so an open Abandoned Carts list updates live
+  // without polling. The live "elapsed since X" timer itself is pure
+  // client-side setInterval math — this event only fires on status changes.
+  fastify.decorate('emitAbandonedCartUpdate', (payload) => {
+    io.to('admin:dashboard').emit('abandoned_cart:update', payload)
+  })
+
   // Helper: broadcast theme update to ALL connected users
   fastify.decorate('emitThemeUpdate', (tabKey, themeId) => {
     io.to('themes:live').emit('theme:update', {

@@ -10,7 +10,8 @@ export class WishlistRepository {
     const { rows } = await query(
       `SELECT w.id, w.product_id, w.created_at,
               p.name, p.slug, p.description, p.price, p.sale_price,
-              p.category_id, p.stock_quantity, p.unit, p.thumbnail_url,
+              p.category_id, p.stock_quantity, p.unit, p.net_quantity,
+              p.option_label, p.thumbnail_url,
               p.images, p.tags, p.is_active, p.is_featured, p.total_sold,
               p.max_order_qty, p.ingredients, p.allergen_info, p.shelf_life,
               p.storage_instructions, p.certifications, p.nutrition_info,
@@ -36,6 +37,8 @@ export class WishlistRepository {
         category_name: row.category_name,
         stock_quantity: row.stock_quantity,
         unit: row.unit,
+        net_quantity: row.net_quantity,
+        option_label: row.option_label,
         thumbnail_url: row.thumbnail_url || row.images?.[0] || null,
         images: row.images || [],
         tags: row.tags || [],

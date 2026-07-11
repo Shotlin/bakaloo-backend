@@ -2,6 +2,7 @@ import { logger } from '../../config/logger.js'
 import { query } from '../../config/database.js'
 import { AllocationService } from '../allocation/allocation.service.js'
 import { AllocationRepository } from '../allocation/allocation.repository.js'
+import { AbandonedCartsRepository } from '../abandoned-carts/abandoned-carts.repository.js'
 
 /**
  * Multi-vendor cart service.
@@ -28,6 +29,36 @@ export class CartService {
     this.allocationService =
       deps.allocationService ||
       new AllocationService(new AllocationRepository())
+    this.abandonedCartsRepo =
+      deps.abandonedCartsRepository || new AbandonedCartsRepository()
+    // Optional — only present when constructed from a route handler
+    // (cart.routes.js passes { fastify }). The worker builds a plain
+    // CartService with no fastify, so recovery-flip socket emits are
+    // skipped there; the DB state still updates correctly either way.
+    this.fastify = deps.fastify || null
+  }
+
+  /**
+   * Flips a user's OPEN abandoned-cart episode (if any) to RECOVERED —
+   * called immediately after a successful addItem/updateItem/removeItem,
+   * not deferred to the next sweep. A harmless no-op when there's no open
+   * episode, which is the common case for most cart activity. Failures
+   * here must never surface to the customer — this is a side effect of
+   * shopping, not part of the cart mutation contract.
+   */
+  async _maybeMarkRecovered(userId) {
+    try {
+      const row = await this.abandonedCartsRepo.markRecoveredByUserId(userId)
+      if (row && this.fastify?.emitAbandonedCartUpdate) {
+        this.fastify.emitAbandonedCartUpdate({
+          userId,
+          abandonedCartId: row.id,
+          status: 'RECOVERED',
+        })
+      }
+    } catch (err) {
+      logger.warn({ userId, err: err.message }, 'Abandoned-cart recovery flip failed')
+    }
   }
 
   // ────────────────────────────────────────────────────────
@@ -322,6 +353,7 @@ export class CartService {
       },
       'Cart item added/updated'
     )
+    await this._maybeMarkRecovered(userId)
 
     return { success: true, cart: await this._enrichCart(userId, cartItems) }
   }
@@ -459,6 +491,7 @@ export class CartService {
 
     cartItems[idx].quantity = qty
     await this.repo.saveCart(userId, cartItems)
+    await this._maybeMarkRecovered(userId)
 
     return { success: true, cart: await this._enrichCart(userId, cartItems) }
   }
@@ -527,6 +560,7 @@ export class CartService {
     })
 
     await this.repo.saveCart(userId, filtered)
+    await this._maybeMarkRecovered(userId)
     return { success: true, cart: await this._enrichCart(userId, filtered) }
   }
 

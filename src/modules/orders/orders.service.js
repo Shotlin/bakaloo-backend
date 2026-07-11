@@ -13,6 +13,7 @@ import { buildCustomerOrderEventNotification } from '../notifications/customer-o
 // Lazy-loaded collaborator instances (avoids circular imports)
 import { CartRepository } from '../cart/cart.repository.js'
 import { CartService } from '../cart/cart.service.js'
+import { AbandonedCartsRepository } from '../abandoned-carts/abandoned-carts.repository.js'
 import { AddressesRepository } from '../addresses/addresses.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { CouponsService } from '../coupons/coupons.service.js'
@@ -48,6 +49,8 @@ export class OrdersService {
     // Collaborators
     this.cartRepo = options.cartRepository || new CartRepository()
     this.cartService = options.cartService || new CartService(this.cartRepo)
+    this.abandonedCartsRepo =
+      options.abandonedCartsRepository || new AbandonedCartsRepository()
     this.addressRepo = options.addressesRepository || new AddressesRepository()
     this.couponsRepo = options.couponsRepository || new CouponsRepository()
     this.couponsService =
@@ -519,6 +522,20 @@ export class OrdersService {
     // 6. Post-commit cleanup + side effects (best-effort; do not fail the
     //    customer if any of these throw).
     try {
+      // Abandoned-cart conversion: fires the moment order rows exist,
+      // regardless of payment method. Cart-clearing itself is deferred for
+      // ONLINE/WALLET (see below) and for those methods happens later in
+      // payments.service.js / wallet.service.js after payment confirms —
+      // "order created" here is the one method-agnostic point common to
+      // every payment path, so it's hooked here rather than at cart-clear.
+      if (createdOrders.length > 0) {
+        await this.abandonedCartsRepo
+          .markConvertedByUserId(userId, createdOrders[0].id)
+          .catch((err) =>
+            logger.warn({ userId, err: err.message }, 'Abandoned-cart conversion flip failed')
+          )
+      }
+
       // For ONLINE and WALLET payments, do NOT clear cart yet — cart is only
       // cleared after successful payment verification / wallet deduction.
       // This prevents the "cart disappeared but payment failed" bug.

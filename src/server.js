@@ -14,6 +14,10 @@ import {
   startStoreStatusSchedulerWorker,
   stopStoreStatusSchedulerWorker,
 } from './workers/store-status-scheduler.worker.js'
+import {
+  startAbandonedCartWorker,
+  stopAbandonedCartWorker,
+} from './workers/abandoned-cart.worker.js'
 
 const start = async () => {
   try {
@@ -71,6 +75,9 @@ const start = async () => {
     // open/close transitions and pushes them live, no admin action needed)
     startStoreStatusSchedulerWorker()
 
+    // Start abandoned cart sweep worker (detects carts inactive 10+ min)
+    startAbandonedCartWorker()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -91,6 +98,9 @@ const start = async () => {
 
       // Stop store status scheduler worker
       stopStoreStatusSchedulerWorker()
+
+      // Stop abandoned cart sweep worker
+      stopAbandonedCartWorker()
 
       // Close Socket.IO
       if (app.io) {
