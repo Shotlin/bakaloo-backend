@@ -161,17 +161,15 @@ describe('AdminOrdersService.refundOrder — customer notification', () => {
     )
   })
 
-  it('still notifies (with a ₹0 message) when refundTo=none (negative amount case)', async () => {
+  it('never notifies when refundTo=none — the call is rejected before any notification is queued', async () => {
     const order = makeOrder({ status: 'DELIVERED', payment_status: 'PAID' })
     const payment = { id: PAYMENT_ID, amount: '250.00', status: 'PAID', razorpay_payment_id: 'pay_abc' }
     const { service } = makeService({ order, payment })
 
-    await service.refundOrder(ORDER_ID, { refundTo: 'none' }, ADMIN_ID, '127.0.0.1')
-
-    expect(sendNotificationMock).toHaveBeenCalledWith(
-      USER_ID,
-      expect.objectContaining({ data: expect.objectContaining({ timelineType: 'REFUNDED', refundAmount: 0 }) })
-    )
+    await expect(
+      service.refundOrder(ORDER_ID, { refundTo: 'none' }, ADMIN_ID, '127.0.0.1')
+    ).rejects.toMatchObject({ statusCode: 400 })
+    expect(sendNotificationMock).not.toHaveBeenCalled()
   })
 })
 

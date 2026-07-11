@@ -319,10 +319,24 @@ export class AdminOrdersService {
       throw { statusCode: 400, message: 'This order was never paid — there is nothing to refund' }
     }
 
+    // This endpoint's entire purpose is moving money back to the customer —
+    // 'none' previously fell through to the bottom of this method anyway,
+    // marking the order REFUNDED and sending a "your refund has been
+    // processed" push even though ₹0 ever moved. Customers correctly read
+    // that as a lie. Cancelling without a refund is a real, valid action —
+    // it belongs to cancelOrder()'s refundTo='none' branch, which already
+    // skips the order status change and the refund notification entirely.
+    if (refundTo === 'none') {
+      throw {
+        statusCode: 400,
+        message: 'Choose a refund destination — this action always refunds money. To cancel the order without a refund, use Cancel Order instead.',
+      }
+    }
+
     const payment = await this.repository.getOrderPayment(orderId)
     const paidAmount = payment ? parseFloat(payment.amount) : parseFloat(order.total_amount)
     const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
-    const refundAmount = refundTo === 'none' ? 0 : paidAmount
+    const refundAmount = paidAmount
 
     if (refundTo === 'original') {
       if (!hasGatewayPayment) {

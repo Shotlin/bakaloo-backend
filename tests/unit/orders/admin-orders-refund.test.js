@@ -123,17 +123,17 @@ describe('AdminOrdersService.refundOrder', () => {
     expect(result.refundAmount).toBe(250)
   })
 
-  it('moves no money when refundTo=none but still marks the order REFUNDED', async () => {
+  it('rejects refundTo=none — this endpoint always moves money, use Cancel Order for a no-refund cancellation', async () => {
     const order = makeOrder({ payment_status: 'PAID' })
     const payment = { id: PAYMENT_ID, amount: '250.00', status: 'PAID', razorpay_payment_id: 'pay_abc123' }
     const { service, repository } = makeService({ order, payment })
 
-    const result = await service.refundOrder(ORDER_ID, { refundTo: 'none' }, ADMIN_ID, '127.0.0.1')
-
+    await expect(
+      service.refundOrder(ORDER_ID, { refundTo: 'none' }, ADMIN_ID, '127.0.0.1')
+    ).rejects.toMatchObject({ statusCode: 400 })
     expect(creditWalletMock).not.toHaveBeenCalled()
     expect(paymentsRefundMock).not.toHaveBeenCalled()
-    expect(result.refundAmount).toBe(0)
-    expect(repository.updateStatus).toHaveBeenCalledWith(ORDER_ID, 'REFUNDED', ADMIN_ID, expect.any(String))
+    expect(repository.updateStatus).not.toHaveBeenCalled()
   })
 })
 
