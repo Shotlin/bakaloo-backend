@@ -29,14 +29,23 @@ import {
 } from '../constants/abandonedCart.js'
 
 let _intervalHandle = null
+let _fastify = null
 const POLL_INTERVAL_MS = 60 * 1000 // 1 minute
 
 const cartRepository = new CartRepository()
 const cartService = new CartService(cartRepository)
 const abandonedCartsRepository = new AbandonedCartsRepository()
 
-export function startAbandonedCartWorker() {
+/**
+ * @param {import('fastify').FastifyInstance} [fastify] Optional — when
+ * passed (server.js does, at startup), a newly-DETECTED episode also emits
+ * `emitAbandonedCartUpdate` so an open admin dashboard tab updates live
+ * instead of only refreshing on next mount/refocus, matching the recovery
+ * and conversion signals already pushed elsewhere.
+ */
+export function startAbandonedCartWorker(fastify) {
   if (_intervalHandle) return
+  _fastify = fastify || null
 
   logger.info('Abandoned cart sweep worker started (polling every 60s)')
 
@@ -123,7 +132,7 @@ async function _processCandidate(userId, lastActivityMs) {
     recoveryRate,
   })
 
-  const { isNew } = await abandonedCartsRepository.recordAbandonment(
+  const { id, isNew } = await abandonedCartsRepository.recordAbandonment(
     userId,
     enrichedCart,
     lastActivityMs,
@@ -135,6 +144,9 @@ async function _processCandidate(userId, lastActivityMs) {
       { userId, cartValue: enrichedCart.subtotal, priorityScore: priorityScoring.score },
       'Abandoned cart detected'
     )
+    if (_fastify?.emitAbandonedCartUpdate) {
+      _fastify.emitAbandonedCartUpdate({ userId, abandonedCartId: id, status: 'DETECTED' })
+    }
   }
 }
 

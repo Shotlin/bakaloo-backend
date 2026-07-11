@@ -76,7 +76,7 @@ const start = async () => {
     startStoreStatusSchedulerWorker()
 
     // Start abandoned cart sweep worker (detects carts inactive 10+ min)
-    startAbandonedCartWorker()
+    startAbandonedCartWorker(app)
 
     // PM2 ready signal
     if (process.send) {
