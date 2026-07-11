@@ -67,7 +67,10 @@ export class AdminCustomersRepository {
               COALESCE(o_stats.order_count, 0)::int AS order_count,
               COALESCE(o_stats.total_spent, 0) AS total_spent,
               COALESCE(o_stats.avg_order, 0) AS avg_order_value,
-              o_stats.last_order_at
+              o_stats.last_order_at,
+              COALESCE(o_status.completed_orders, 0)::int AS completed_orders,
+              COALESCE(o_status.cancelled_orders, 0)::int AS cancelled_orders,
+              COALESCE(o_status.returned_orders, 0)::int AS returned_orders
        FROM users u
        LEFT JOIN wallets w ON w.user_id = u.id
        LEFT JOIN (
@@ -75,6 +78,17 @@ export class AdminCustomersRepository {
                 AVG(total_amount) AS avg_order, MAX(created_at) AS last_order_at
          FROM orders WHERE status != 'CANCELLED' GROUP BY user_id
        ) o_stats ON o_stats.user_id = u.id
+       LEFT JOIN (
+         -- Quick reliability signal for admins reviewing a customer/order:
+         -- how many of their orders actually completed vs. were cancelled
+         -- or refunded (a "return" — there's no distinct RETURNED status,
+         -- an order marked REFUNDED post-delivery is what a return is).
+         SELECT user_id,
+                COUNT(*) FILTER (WHERE status = 'DELIVERED')::int AS completed_orders,
+                COUNT(*) FILTER (WHERE status = 'CANCELLED')::int AS cancelled_orders,
+                COUNT(*) FILTER (WHERE status = 'REFUNDED')::int AS returned_orders
+         FROM orders GROUP BY user_id
+       ) o_status ON o_status.user_id = u.id
        WHERE u.id = $1 AND u.role = 'CUSTOMER'`,
       [id]
     )
