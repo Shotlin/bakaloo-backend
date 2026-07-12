@@ -1081,6 +1081,15 @@ export class ProductsRepository {
       fields.push(`certifications = $${idx++}`)
       params.push(data.certifications)
     }
+    if (data.nutritionInfo !== undefined) {
+      // Was missing from this fieldMap entirely — nutritionInfo saved fine
+      // on product create (see create() above) but every subsequent edit
+      // silently dropped it: the schema accepts the field, validation
+      // passes, and the request 200s, but the UPDATE query never touched
+      // the nutrition_info column.
+      fields.push(`nutrition_info = $${idx++}`)
+      params.push(data.nutritionInfo)
+    }
     if (data.customBadges !== undefined) {
       fields.push(`custom_badges = $${idx++}`)
       params.push(JSON.stringify(data.customBadges))

@@ -1048,12 +1048,16 @@ export class OrdersService {
       return { success: false, statusCode: 404, message: 'Order not found' }
     }
 
-    // Customers can only access their own invoices
-    if (order.user_id !== userId) {
+    // Customers can only access their own invoices.
+    // `findById` returns the camelCase shape from `_format()` (userId,
+    // paymentStatus), not raw snake_case columns — these checks were
+    // comparing against always-undefined fields, so every invoice request
+    // failed with "Access denied" regardless of actual ownership.
+    if (order.userId !== userId) {
       return { success: false, statusCode: 403, message: 'Access denied' }
     }
 
-    if (order.payment_status !== 'PAID') {
+    if (order.paymentStatus !== 'PAID') {
       return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
     }
 
@@ -1065,7 +1069,7 @@ export class OrdersService {
     return {
       success: true,
       buffer,
-      orderNumber: order.order_number,
+      orderNumber: order.orderNumber,
     }
   }
 

@@ -35,9 +35,10 @@ export function generateInvoicePDF(order) {
     doc.on('end', () => resolve(Buffer.concat(chunks)))
     doc.on('error', reject)
 
-    const address = typeof order.delivery_address === 'string'
-      ? JSON.parse(order.delivery_address)
-      : order.delivery_address || {}
+    const rawAddress = order.delivery_address ?? order.deliveryAddress
+    const address = typeof rawAddress === 'string'
+      ? JSON.parse(rawAddress)
+      : rawAddress || {}
 
     const items = typeof order.items === 'string'
       ? JSON.parse(order.items)
@@ -73,10 +74,17 @@ export function generateInvoicePDF(order) {
     doc.font('Helvetica').text(`${order.payment_method || order.paymentMethod} (${order.payment_status || order.paymentStatus})`, 420, top)
 
     // ─── Delivery Address ─────────────────────────────
-    if (address.label || address.address_line) {
+    // The stored snapshot is the camelCase shape from addresses._format()
+    // (addressLine1/addressLine2), not a snake_case `address_line` column —
+    // kept the old key as a fallback in case older orders snapshotted
+    // something else.
+    const addressLine = address.addressLine1 || address.address_line
+    if (address.label || addressLine) {
       doc.font('Helvetica-Bold').text('Deliver to:', 350, top + 18)
       doc.font('Helvetica').text(
-        [address.label, address.address_line, address.city, address.pincode].filter(Boolean).join(', '),
+        [address.label, addressLine, address.addressLine2, address.city, address.pincode]
+          .filter(Boolean)
+          .join(', '),
         350, top + 36,
         { width: 200 }
       )
