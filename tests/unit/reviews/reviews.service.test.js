@@ -27,7 +27,10 @@ describe('ReviewsService.createReview', () => {
 
     await expect(
       service.createReview('user-1', { productId: 'product-1', orderId: 'order-1', rating: 5 })
-    ).rejects.toThrow('You can only review products you have ordered')
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'You can only review products from orders that have been delivered to you',
+    })
     expect(repository.createReview).not.toHaveBeenCalled()
   })
 
@@ -46,7 +49,10 @@ describe('ReviewsService.createReview', () => {
 
     await expect(
       service.createReview('user-1', { productId: 'product-1', orderId: 'order-1', rating: 5 })
-    ).rejects.toThrow('You have already reviewed this product for this order')
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'You have already reviewed this product for this order',
+    })
     expect(repository.recomputeProductRating).not.toHaveBeenCalled()
   })
 })

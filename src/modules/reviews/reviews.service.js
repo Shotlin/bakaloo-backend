@@ -35,19 +35,22 @@ export class ReviewsService {
   async createReview(userId, { productId, orderId, rating, comment }) {
     // Validate rating
     if (rating < 1 || rating > 5) {
-      throw new Error('Rating must be between 1 and 5')
+      throw { statusCode: 400, message: 'Rating must be between 1 and 5' }
     }
 
     // Check if user has purchased this product in the order
     const hasOrder = await this.repository.checkUserOrder(userId, orderId, productId)
     if (!hasOrder) {
-      throw new Error('You can only review products you have ordered')
+      throw {
+        statusCode: 400,
+        message: 'You can only review products from orders that have been delivered to you',
+      }
     }
 
     // Check if already reviewed
     const existingReview = await this.repository.getReviewByOrder(userId, orderId, productId)
     if (existingReview) {
-      throw new Error('You have already reviewed this product for this order')
+      throw { statusCode: 400, message: 'You have already reviewed this product for this order' }
     }
 
     const review = await this.repository.createReview(userId, { productId, orderId, rating, comment })
@@ -57,16 +60,16 @@ export class ReviewsService {
 
   async updateReview(userId, reviewId, { rating, comment }) {
     if (rating && (rating < 1 || rating > 5)) {
-      throw new Error('Rating must be between 1 and 5')
+      throw { statusCode: 400, message: 'Rating must be between 1 and 5' }
     }
 
     const review = await this.repository.getReviewById(reviewId)
     if (!review) {
-      throw new Error('Review not found')
+      throw { statusCode: 404, message: 'Review not found' }
     }
 
     if (review.user_id !== userId) {
-      throw new Error('You can only update your own reviews')
+      throw { statusCode: 403, message: 'You can only update your own reviews' }
     }
 
     const updated = await this.repository.updateReview(reviewId, { rating, comment })
@@ -79,11 +82,11 @@ export class ReviewsService {
   async deleteReview(userId, reviewId) {
     const review = await this.repository.getReviewById(reviewId)
     if (!review) {
-      throw new Error('Review not found')
+      throw { statusCode: 404, message: 'Review not found' }
     }
 
     if (review.user_id !== userId) {
-      throw new Error('You can only delete your own reviews')
+      throw { statusCode: 403, message: 'You can only delete your own reviews' }
     }
 
     await this.repository.deleteReview(reviewId)

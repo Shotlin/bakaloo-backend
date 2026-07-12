@@ -1,4 +1,4 @@
-import { success } from '../../utils/apiResponse.js'
+import { success, error } from '../../utils/apiResponse.js'
 
 /**
  * Reviews controller — handles product reviews
@@ -38,35 +38,53 @@ export class ReviewsController {
 
   /**
    * POST / — Create a review
+   *
+   * Previously had no try/catch at all — every validation failure the
+   * service throws (wrong order status, duplicate review, bad rating)
+   * fell through to Fastify's default handler and came back as a generic
+   * "Internal server error" 500 with the real reason only visible in the
+   * server logs, never in the response the customer's app actually saw.
    */
   async createReview(request, reply) {
-    const { productId, orderId, rating, comment } = request.body
-    const review = await this.service.createReview(request.user.id, {
-      productId,
-      orderId,
-      rating,
-      comment,
-    })
-    return reply.code(201).send(success(review, 'Review created successfully'))
+    try {
+      const { productId, orderId, rating, comment } = request.body
+      const review = await this.service.createReview(request.user.id, {
+        productId,
+        orderId,
+        rating,
+        comment,
+      })
+      return reply.code(201).send(success(review, 'Review created successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Unable to create review'))
+    }
   }
 
   /**
    * PATCH /:id — Update a review
    */
   async updateReview(request, reply) {
-    const { id } = request.params
-    const { rating, comment } = request.body
-    const review = await this.service.updateReview(request.user.id, id, { rating, comment })
-    return reply.code(200).send(success(review, 'Review updated successfully'))
+    try {
+      const { id } = request.params
+      const { rating, comment } = request.body
+      const review = await this.service.updateReview(request.user.id, id, { rating, comment })
+      return reply.code(200).send(success(review, 'Review updated successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Unable to update review'))
+    }
   }
 
   /**
    * DELETE /:id — Delete a review
    */
   async deleteReview(request, reply) {
-    const { id } = request.params
-    await this.service.deleteReview(request.user.id, id)
-    return reply.code(200).send(success(null, 'Review deleted successfully'))
+    try {
+      const { id } = request.params
+      await this.service.deleteReview(request.user.id, id)
+      return reply.code(200).send(success(null, 'Review deleted successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Unable to delete review'))
+    }
   }
 
   /**
