@@ -155,7 +155,19 @@ export const createProductSchema = {
       shelfLife: { type: 'string', maxLength: 200 },
       storageInstructions: { type: 'string', maxLength: 500 },
       certifications: { type: 'array', items: { type: 'string' } },
-      nutritionInfo: { type: 'object', additionalProperties: { type: 'string' } },
+      // `additionalProperties: { type: 'string' }` looked right but is
+      // wrong under this app's global `removeAdditional: 'all'` AJV
+      // setting — that mode strips every key not named in `properties`
+      // regardless of what `additionalProperties` would have allowed, so
+      // every nutrition value (arbitrary keys like "Energy"/"Protein") was
+      // silently wiped to `{}` before the handler ever saw it.
+      // `patternProperties` matches keys directly instead of falling under
+      // "additional", so it survives — mirrors the `highlights` field below.
+      nutritionInfo: {
+        type: 'object',
+        patternProperties: { '.*': { type: 'string' } },
+        additionalProperties: false,
+      },
       metaTitle: { type: 'string', maxLength: 160 },
       metaDescription: { type: 'string', maxLength: 500 },
       brand: { type: 'string', maxLength: 200 },
@@ -250,7 +262,19 @@ export const updateProductSchema = {
       shelfLife: { type: 'string', maxLength: 200 },
       storageInstructions: { type: 'string', maxLength: 500 },
       certifications: { type: 'array', items: { type: 'string' } },
-      nutritionInfo: { type: 'object', additionalProperties: { type: 'string' } },
+      // `additionalProperties: { type: 'string' }` looked right but is
+      // wrong under this app's global `removeAdditional: 'all'` AJV
+      // setting — that mode strips every key not named in `properties`
+      // regardless of what `additionalProperties` would have allowed, so
+      // every nutrition value (arbitrary keys like "Energy"/"Protein") was
+      // silently wiped to `{}` before the handler ever saw it.
+      // `patternProperties` matches keys directly instead of falling under
+      // "additional", so it survives — mirrors the `highlights` field below.
+      nutritionInfo: {
+        type: 'object',
+        patternProperties: { '.*': { type: 'string' } },
+        additionalProperties: false,
+      },
       metaTitle: { type: 'string', maxLength: 160 },
       metaDescription: { type: 'string', maxLength: 500 },
       brand: { type: 'string', maxLength: 200 },
