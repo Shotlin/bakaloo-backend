@@ -1,11 +1,17 @@
 // One-off manual demo-data script (not wired to any npm alias — run
-// directly via `node scripts/seed_review_threshold_demo.mjs`). Seeds real
+// directly via `node scripts/seed_review_threshold_demo.mjs`). Seeds
 // DELIVERED orders + reviews for three staple products so the ">10 reviews
 // shows the count, 10-or-fewer shows only the star" threshold on the
 // product detail page can be visually validated against real data:
 //   - Onion(Kanda)      -> 11 reviews (count SHOULD show)
 //   - Tomato (Tameta)   -> 11 reviews (count SHOULD show)
 //   - Potato (Bateta)   -> 9 reviews  (count should NOT show, star only)
+//
+// Reviewers are a small set of DEDICATED fake demo accounts (created/
+// upserted by this script itself, phone-prefixed 70000000xx) — never real
+// registered customers. Attaching fabricated order/purchase history to an
+// actual customer's account would be wrong regardless of how clearly the
+// order is labeled as a demo internally.
 //
 // Idempotent: re-running tops a product up to its target count instead of
 // piling on duplicates — each run only inserts however many more
@@ -21,6 +27,12 @@ const TARGETS = [
   { name: 'Onion(Kanda)', targetReviewCount: 11 },
   { name: 'Tomato (Tameta)', targetReviewCount: 11 },
   { name: 'Potato (Bateta)', targetReviewCount: 9 },
+]
+
+const DEMO_REVIEWER_NAMES = [
+  'Demo Reviewer 1', 'Demo Reviewer 2', 'Demo Reviewer 3', 'Demo Reviewer 4',
+  'Demo Reviewer 5', 'Demo Reviewer 6', 'Demo Reviewer 7', 'Demo Reviewer 8',
+  'Demo Reviewer 9', 'Demo Reviewer 10', 'Demo Reviewer 11',
 ]
 
 const COMMENTS = [
@@ -134,6 +146,25 @@ async function createDeliveredOrderWithReview(client, { product, customer, admin
   )
 }
 
+// Creates (or reuses, if already run before) a fixed pool of dedicated fake
+// reviewer accounts — phone-prefixed 70000000xx so they're unmistakably
+// demo data, never a real registered customer's number.
+async function ensureDemoReviewers(client) {
+  const reviewers = []
+  for (let i = 0; i < DEMO_REVIEWER_NAMES.length; i++) {
+    const phone = `70000000${String(i + 1).padStart(2, '0')}`
+    const { rows } = await client.query(
+      `INSERT INTO users (phone, name, role, is_active)
+       VALUES ($1, $2, 'CUSTOMER', true)
+       ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id, name, phone`,
+      [phone, DEMO_REVIEWER_NAMES[i]]
+    )
+    reviewers.push(rows[0])
+  }
+  return reviewers
+}
+
 async function recomputeProductRating(client, productId) {
   await client.query(
     `UPDATE products
@@ -154,6 +185,7 @@ async function main() {
       throw new Error('No ADMIN user found — cannot attribute order_status_history rows.')
     }
     const adminId = admins[0].id
+    const demoReviewers = await ensureDemoReviewers(client)
     const touched = []
 
     for (const target of TARGETS) {
@@ -179,22 +211,20 @@ async function main() {
         continue
       }
 
-      // Real, distinct customers (excludes the product's own reviewers so a
-      // re-run topping up an existing product doesn't immediately collide
-      // with the (user_id, order_id, product_id) constraint — a fresh
-      // order_id per insert already guarantees no collision regardless,
-      // but distinct reviewers keep the demo data varied).
-      const { rows: customers } = await client.query(
-        `SELECT id, name, phone FROM users
-          WHERE role = 'CUSTOMER'
-            AND id NOT IN (SELECT user_id FROM reviews WHERE product_id = $1)
-          ORDER BY created_at DESC
-          LIMIT $2`,
-        [product.id, needed]
+      // Dedicated demo reviewer pool only — excludes whichever of them
+      // already reviewed this exact product (relevant on a re-run that
+      // tops a product up further) so each demo account reviews a given
+      // product at most once, same one-review-per-order-per-product spirit
+      // as the real constraint.
+      const { rows: reviewedAlready } = await client.query(
+        'SELECT user_id FROM reviews WHERE product_id = $1',
+        [product.id]
       )
+      const reviewedIds = new Set(reviewedAlready.map((r) => r.user_id))
+      const customers = demoReviewers.filter((r) => !reviewedIds.has(r.id)).slice(0, needed)
       if (customers.length < needed) {
         console.warn(
-          `⚠️  Only found ${customers.length} eligible customers for ${product.name}, needed ${needed} — seeding what's available.`
+          `⚠️  Only found ${customers.length} eligible demo reviewers for ${product.name}, needed ${needed} — seeding what's available.`
         )
       }
 
