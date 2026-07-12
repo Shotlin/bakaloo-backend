@@ -75,6 +75,18 @@ export const deleteReviewSchema = {
   },
 }
 
+export const getOrderReviewsSchema = {
+  tags: ['Reviews'],
+  summary: "Get the current user's existing reviews for one order",
+  params: {
+    type: 'object',
+    required: ['orderId'],
+    properties: {
+      orderId: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
 export const getMyReviewsSchema = {
   tags: ['Reviews'],
   summary: 'Get my reviews',

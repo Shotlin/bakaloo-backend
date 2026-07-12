@@ -4,6 +4,7 @@ import { ReviewsRepository } from './reviews.repository.js'
 import {
   getProductReviewsSchema,
   checkReviewEligibilitySchema,
+  getOrderReviewsSchema,
   createReviewSchema,
   updateReviewSchema,
   deleteReviewSchema,
@@ -29,6 +30,12 @@ export default async function reviewsRoutes(fastify) {
     schema: checkReviewEligibilitySchema,
     preHandler: [fastify.authenticate],
   }, controller.checkReviewEligibility.bind(controller))
+
+  // GET /order/:orderId — Get current user's existing reviews for one order
+  fastify.get('/order/:orderId', {
+    schema: getOrderReviewsSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.getReviewsByOrder.bind(controller))
 
   // POST / — Create review
   fastify.post('/', {

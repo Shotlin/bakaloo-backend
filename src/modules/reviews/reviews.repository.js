@@ -86,6 +86,20 @@ export class ReviewsRepository {
     return { eligible: false, orderId: null, alreadyReviewed: true }
   }
 
+  // Powers the order-review screen's "already reviewed" state — every
+  // product in an order that already has a review for THIS order needs to
+  // render read-only instead of blank stars, since re-submitting the same
+  // (user_id, order_id, product_id) is a no-op the customer shouldn't be
+  // invited to repeat. A different order for the same product is a fresh
+  // review opportunity, hence scoping strictly by order_id here.
+  async getReviewsByOrder(userId, orderId) {
+    const { rows } = await query(
+      'SELECT product_id, rating, comment FROM reviews WHERE user_id = $1 AND order_id = $2',
+      [userId, orderId]
+    )
+    return rows
+  }
+
   async getReviewByOrder(userId, orderId, productId) {
     const { rows } = await query(
       'SELECT id FROM reviews WHERE user_id = $1 AND order_id = $2 AND product_id = $3',

@@ -17,6 +17,10 @@ export class ReviewsService {
     return await this.repository.checkReviewEligibility(userId, productId)
   }
 
+  async getReviewsByOrder(userId, orderId) {
+    return await this.repository.getReviewsByOrder(userId, orderId)
+  }
+
   // Product listing/detail responses are cached — recomputing the DB
   // columns alone would leave a customer looking at a stale cached rating
   // until the TTL expired. Mirrors the cache keys products.service.js

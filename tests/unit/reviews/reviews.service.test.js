@@ -15,6 +15,7 @@ function makeRepository(overrides = {}) {
     updateReview: vi.fn(async () => ({ id: 'review-1' })),
     deleteReview: vi.fn(async () => undefined),
     recomputeProductRating: vi.fn(async () => undefined),
+    getReviewsByOrder: vi.fn(async () => []),
     ...overrides,
   }
 }
@@ -79,5 +80,18 @@ describe('ReviewsService.deleteReview', () => {
 
     expect(repository.deleteReview).toHaveBeenCalledWith('review-1')
     expect(repository.recomputeProductRating).toHaveBeenCalledWith('product-1')
+  })
+})
+
+describe('ReviewsService.getReviewsByOrder', () => {
+  it('passes the userId and orderId straight through to the repository', async () => {
+    const existing = [{ product_id: 'product-1', rating: 5, comment: 'Great!' }]
+    const repository = makeRepository({ getReviewsByOrder: vi.fn(async () => existing) })
+    const service = new ReviewsService(repository)
+
+    const result = await service.getReviewsByOrder('user-1', 'order-1')
+
+    expect(repository.getReviewsByOrder).toHaveBeenCalledWith('user-1', 'order-1')
+    expect(result).toBe(existing)
   })
 })

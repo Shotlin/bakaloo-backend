@@ -28,6 +28,15 @@ export class ReviewsController {
   }
 
   /**
+   * GET /order/:orderId — Get the current user's existing reviews for one order
+   */
+  async getReviewsByOrder(request, reply) {
+    const { orderId } = request.params
+    const reviews = await this.service.getReviewsByOrder(request.user.id, orderId)
+    return reply.code(200).send(success(reviews, 'Order reviews fetched successfully'))
+  }
+
+  /**
    * POST / — Create a review
    */
   async createReview(request, reply) {
