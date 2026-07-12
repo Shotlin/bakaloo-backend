@@ -9,7 +9,7 @@ import { query } from '../../../config/database.js'
  * record a link row against an already-existing episode.
  */
 export class AdminAbandonedCartsRepository {
-  async findAll({ offset, limit, search, status = 'OPEN', minValue, maxValue, sortBy = 'priority_score', sortOrder = 'DESC' }) {
+  async findAll({ offset, limit, search, status = 'OPEN', minValue, maxValue, sortBy = 'abandoned_at', sortOrder = 'DESC' }) {
     const params = []
     const clauses = []
     let idx = 1

@@ -1,7 +1,7 @@
 // Fixed backend constant (not admin-adjustable via dashboard) per product
 // decision — a value like this changes rarely enough that a redeploy is an
 // acceptable cost, and it avoids a whole extra settings table/UI for it.
-export const ABANDONMENT_THRESHOLD_MS = 10 * 60 * 1000 // 10 minutes
+export const ABANDONMENT_THRESHOLD_MS = 1 * 60 * 1000 // 1 minute
 
 // Per-sweep cap on how many inactive users the worker processes in one
 // 60s tick — keeps each run bounded even if a backlog builds up; the

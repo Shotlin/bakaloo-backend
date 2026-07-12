@@ -21,6 +21,7 @@ import adminRiderRoutes from './riders/riders.routes.js'
 import adminNotificationRoutes from './notifications/notifications.routes.js'
 import adminAnalyticsRoutes from './analytics/analytics.routes.js'
 import adminBannerRoutes from './banners/banners.routes.js'
+import adminTutorialRoutes from './tutorials/tutorials.routes.js'
 import adminActivityLogRoutes from './activity-log/activity-log.routes.js'
 import { roleRoutes, teamRoutes } from './team/team.routes.js'
 import adminThemeRoutes from './themes/themes.routes.js'
@@ -79,6 +80,7 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminNotificationRoutes, { prefix: '/notifications' })
   fastify.register(adminAnalyticsRoutes, { prefix: '/analytics' })
   fastify.register(adminBannerRoutes, { prefix: '/banners' })
+  fastify.register(adminTutorialRoutes, { prefix: '/tutorials' })
   fastify.register(adminActivityLogRoutes, { prefix: '/activity-log' })
   fastify.register(roleRoutes, { prefix: '/roles' })
   fastify.register(teamRoutes, { prefix: '/team' })

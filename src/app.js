@@ -164,6 +164,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/banners',
   })
 
+  // Tutorials (public) — active in-app tutorial videos for mobile/web
+  await app.register(import('./modules/tutorials/tutorials.routes.js'), {
+    prefix: '/api/v1/tutorials',
+  })
+
   // Theme (public) — active theme for mobile/web app
   await app.register(import('./modules/themes/public.routes.js'), {
     prefix: '/api/v1/theme',

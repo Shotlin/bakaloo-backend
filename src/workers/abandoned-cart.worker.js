@@ -1,11 +1,18 @@
 /**
  * Abandoned Cart Sweep Worker
  *
- * Polls every 60s for carts inactive past ABANDONMENT_THRESHOLD_MS (10 min
+ * Polls every 15s for carts inactive past ABANDONMENT_THRESHOLD_MS (1 min
  * fixed constant — see src/constants/abandonedCart.js), following the same
  * in-process setInterval pattern as payment-expiry.worker.js rather than a
  * BullMQ repeatable job, since this runs inside the main API server and
  * needs no dedicated worker-process infrastructure.
+ *
+ * The poll interval is intentionally shorter than the threshold itself —
+ * with a 60s poll and a 60s threshold, a cart that goes idle right after a
+ * sweep wouldn't be caught until up to ~2 sweeps later (worst case ~120s),
+ * which reads as "way more than a minute" to whoever's watching the
+ * dashboard. 15s keeps worst-case detection latency close to the actual
+ * 1-minute threshold.
  *
  * Unlike payment-expiry.worker.js's single shared batch transaction, each
  * candidate user here is processed independently (its own try/catch) —
@@ -30,7 +37,7 @@ import {
 
 let _intervalHandle = null
 let _fastify = null
-const POLL_INTERVAL_MS = 60 * 1000 // 1 minute
+const POLL_INTERVAL_MS = 15 * 1000 // 15 seconds
 
 const cartRepository = new CartRepository()
 const cartService = new CartService(cartRepository)
@@ -47,7 +54,7 @@ export function startAbandonedCartWorker(fastify) {
   if (_intervalHandle) return
   _fastify = fastify || null
 
-  logger.info('Abandoned cart sweep worker started (polling every 60s)')
+  logger.info('Abandoned cart sweep worker started (polling every 15s)')
 
   _intervalHandle = setInterval(async () => {
     try {
@@ -148,6 +155,17 @@ async function _processCandidate(userId, lastActivityMs) {
       _fastify.emitAbandonedCartUpdate({ userId, abandonedCartId: id, status: 'DETECTED' })
     }
   }
+
+  // A user who's just been recorded (new detection or resweep) has no
+  // reason to occupy a slot in the next tick's candidate batch — nothing
+  // about their cart will change again until they touch it, which
+  // independently re-adds them here with a fresh score via saveCart's own
+  // zadd. Without this, a user who was detected once stays in the ZSET at
+  // their original (increasingly ancient) score forever, and since
+  // getInactiveUserIds selects the LOWEST scores first, a backlog of
+  // already-detected users can permanently starve genuinely fresh
+  // candidates out of every batch once it reaches the per-tick limit.
+  await cartRepository.removeActivity(userId)
 }
 
 /**
