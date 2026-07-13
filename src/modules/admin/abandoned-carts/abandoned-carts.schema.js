@@ -58,7 +58,7 @@ export const issueCouponSchema = {
       // ignored even if sent — see abandoned-carts.service.js).
       code: { type: 'string', minLength: 3, maxLength: 30 },
       description: { type: 'string', maxLength: 255 },
-      discountType: { type: 'string', enum: ['PERCENTAGE', 'FLAT', 'FREE_DELIVERY', 'BOGO', 'CASHBACK'] },
+      discountType: { type: 'string', enum: ['PERCENTAGE', 'FLAT', 'FREE_DELIVERY', 'CASHBACK'] },
       discountValue: { type: 'number', minimum: 0 },
       minOrderAmount: { type: 'number', minimum: 0 },
       maxDiscount: { type: 'number', minimum: 0 },

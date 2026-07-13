@@ -99,6 +99,15 @@ export class WalletService {
       return { success: false, message: 'Online payments are not configured' }
     }
 
+    // Admin kill-switch (Settings → Wallet) — checked before anything else
+    // so a known Razorpay outage or similar can be stopped at the source
+    // instead of letting customers hit a broken payment flow and land in
+    // the exact stuck-pending state the reconciliation worker exists for.
+    const { topupEnabled, maxWalletBalance } = await this.walletSettingsService.getConfig()
+    if (!topupEnabled) {
+      return { success: false, message: 'Wallet top-up is currently unavailable. Please try again later.' }
+    }
+
     const normalizedAmount = Number(amount)
     if (!Number.isFinite(normalizedAmount) || normalizedAmount < 10 || normalizedAmount > 10000) {
       return { success: false, message: 'Amount must be between ₹10 and ₹10,000' }
@@ -106,7 +115,6 @@ export class WalletService {
 
     const wallet = await this.repo.getOrCreate(userId)
 
-    const { maxWalletBalance } = await this.walletSettingsService.getConfig()
     if (wallet.balance + normalizedAmount > maxWalletBalance) {
       const remaining = Math.max(0, maxWalletBalance - wallet.balance)
       return {

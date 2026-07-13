@@ -87,6 +87,15 @@ export class CouponsController {
     return reply.code(200).send(success(users, 'Coupon target users fetched'))
   }
 
+  /** GET /:id/analytics — Admin */
+  async getAnalytics(request, reply) {
+    const analytics = await this.service.getAnalytics(request.params.id)
+    if (!analytics) {
+      return reply.code(404).send(error('Coupon not found', 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(analytics, 'Coupon analytics fetched'))
+  }
+
   /** DELETE /:id — Admin */
   async delete(request, reply) {
     const actor = this._actorCtx(request)

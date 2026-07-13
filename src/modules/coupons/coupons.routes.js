@@ -9,6 +9,7 @@ import {
   createCouponSchema,
   updateCouponSchema,
   deleteCouponSchema,
+  couponAnalyticsSchema,
 } from './coupons.schema.js'
 
 /**
@@ -60,6 +61,12 @@ export default async function couponsRoutes(fastify) {
   fastify.get('/:id/target-users', {
     preHandler: [fastify.authenticate, requirePermission('shop_coupons.view')],
   }, controller.getTargetUsers.bind(controller))
+
+  // GET /:id/analytics — Redemption/revenue stats for the dashboard drawer [ADMIN]
+  fastify.get('/:id/analytics', {
+    schema: couponAnalyticsSchema,
+    preHandler: [fastify.authenticate, requirePermission('shop_coupons.view')],
+  }, controller.getAnalytics.bind(controller))
 
   // PUT /:id — Update coupon [HQ or shop staff with shop_coupons.update]
   fastify.put('/:id', {

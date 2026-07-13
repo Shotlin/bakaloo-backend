@@ -196,3 +196,54 @@ export const deleteCouponSchema = {
     },
   },
 }
+
+export const couponAnalyticsSchema = {
+  tags: ['Coupons'],
+  summary: 'Redemption/revenue analytics for one coupon [ADMIN]',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', format: 'uuid' } },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            totalRedemptions: { type: 'integer' },
+            revenueGenerated: { type: 'number' },
+            avgOrderValue:    { type: 'number' },
+            avgDiscount:      { type: 'number' },
+            conversionRate:   { type: 'number' },
+            dailyRedemptions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  date:    { type: 'string' },
+                  count:   { type: 'integer' },
+                  revenue: { type: 'number' },
+                },
+              },
+            },
+            topUsers: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name:       { type: 'string' },
+                  uses:       { type: 'integer' },
+                  totalSpent: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}

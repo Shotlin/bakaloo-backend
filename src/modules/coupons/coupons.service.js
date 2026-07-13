@@ -688,6 +688,28 @@ export class CouponsService {
   }
 
   /**
+   * Usage analytics for the dashboard's coupon detail drawer. conversionRate
+   * has no dedicated tracking (no "coupon impression" event exists) — it's
+   * defined as redemptions against the coupon's own usage_limit_total when
+   * one is set (how much of the allotted budget has been used), and 0 when
+   * the coupon has no cap to measure against.
+   */
+  async getAnalytics(couponId) {
+    const coupon = await this.repo.findById(couponId)
+    if (!coupon) {
+      return null
+    }
+
+    const analytics = await this.repo.getAnalytics(couponId)
+    const usageLimit = coupon.usageLimitTotal ?? coupon.usageLimit
+    const conversionRate = usageLimit
+      ? Math.round((analytics.totalRedemptions / usageLimit) * 1000) / 10
+      : 0
+
+    return { ...analytics, conversionRate }
+  }
+
+  /**
    * Create coupon with scope enforcement (task 9.2) and audit (task 9.6).
    */
   async create(data, actor) {

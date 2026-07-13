@@ -371,4 +371,70 @@ export class CouponsRepository {
       updatedAt:             row.updated_at,
     }
   }
+
+  /**
+   * Usage analytics for one coupon — redemption count/revenue/avg order
+   * value plus a daily breakdown and top-users leaderboard. Everything is
+   * derived from coupon_usages joined to orders (for the amount actually
+   * paid) and users (for a display name) — no separate analytics table.
+   */
+  async getAnalytics(couponId) {
+    const { rows: overviewRows } = await query(
+      `SELECT
+         COUNT(cu.id)::int                        AS total_redemptions,
+         COALESCE(SUM(o.total_amount), 0)          AS revenue_generated,
+         COALESCE(AVG(o.total_amount), 0)          AS avg_order_value,
+         COALESCE(AVG(cu.discount_amount), 0)      AS avg_discount
+       FROM coupon_usages cu
+       LEFT JOIN orders o ON o.id = cu.order_id
+       WHERE cu.coupon_id = $1`,
+      [couponId]
+    )
+    const overview = overviewRows[0]
+
+    const { rows: dailyRows } = await query(
+      `SELECT
+         TO_CHAR(cu.used_at, 'YYYY-MM-DD') AS date,
+         COUNT(cu.id)::int                 AS count,
+         COALESCE(SUM(o.total_amount), 0)  AS revenue
+       FROM coupon_usages cu
+       LEFT JOIN orders o ON o.id = cu.order_id
+       WHERE cu.coupon_id = $1
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+      [couponId]
+    )
+
+    const { rows: topUserRows } = await query(
+      `SELECT
+         COALESCE(u.name, u.phone, 'Unknown') AS name,
+         COUNT(cu.id)::int                    AS uses,
+         COALESCE(SUM(o.total_amount), 0)     AS total_spent
+       FROM coupon_usages cu
+       LEFT JOIN orders o ON o.id = cu.order_id
+       LEFT JOIN users u ON u.id = cu.user_id
+       WHERE cu.coupon_id = $1
+       GROUP BY u.id, u.name, u.phone
+       ORDER BY uses DESC, total_spent DESC
+       LIMIT 10`,
+      [couponId]
+    )
+
+    return {
+      totalRedemptions: overview.total_redemptions,
+      revenueGenerated: parseFloat(overview.revenue_generated),
+      avgOrderValue: parseFloat(overview.avg_order_value),
+      avgDiscount: parseFloat(overview.avg_discount),
+      dailyRedemptions: dailyRows.map((r) => ({
+        date: r.date,
+        count: r.count,
+        revenue: parseFloat(r.revenue),
+      })),
+      topUsers: topUserRows.map((r) => ({
+        name: r.name,
+        uses: r.uses,
+        totalSpent: parseFloat(r.total_spent),
+      })),
+    }
+  }
 }
