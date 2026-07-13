@@ -231,6 +231,67 @@ export class WalletService {
   }
 
   /**
+   * Safety net for wallet top-ups — completes a PENDING top-up once we
+   * have independent confirmation (not from the client) that Razorpay
+   * actually captured the payment. Two callers:
+   *   - the Razorpay webhook (payment.captured), when configured
+   *   - the reconciliation worker, which polls Razorpay directly and
+   *     doesn't depend on the webhook being registered at all
+   * Both exist because verifyTopUp() above is a single client-side call
+   * with no retry: if the app is killed, loses network, or the UPI
+   * app-switch doesn't cleanly return control before that call fires,
+   * Razorpay has already captured the money but the wallet never gets
+   * credited, and the top-up sits at status='PENDING' forever with
+   * nothing to catch it otherwise.
+   *
+   * Idempotent: only acts on a PENDING row. A COMPLETED one means
+   * verifyTopUp() already won the race; a FAILED one means signature
+   * verification rejected it and is left alone here rather than silently
+   * re-credited.
+   */
+  async completeVerifiedTopUp(razorpayOrderId) {
+    const client = await getClient()
+
+    try {
+      await client.query('BEGIN')
+
+      const topup = await this.repo.findTopUpByOrderIdForUpdate(client, razorpayOrderId)
+      if (!topup) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Top-up record not found' }
+      }
+
+      if (topup.status !== 'PENDING') {
+        await client.query('ROLLBACK')
+        return { success: true, skipped: true, reason: topup.status }
+      }
+
+      const wallet = await this._getOrCreateWalletForUpdate(client, topup.userId)
+      if (!wallet) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Wallet not found' }
+      }
+
+      const result = await this.repo.applyPendingTopUp(client, wallet.id, topup.id, topup.amount)
+
+      await client.query('COMMIT')
+
+      logger.info(
+        { userId: topup.userId, amount: topup.amount, razorpayOrderId },
+        'Wallet top-up completed by safety net (client verify call never arrived)'
+      )
+
+      return { success: true, ...result }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      logger.error({ err, razorpayOrderId }, 'Wallet top-up safety-net completion failed')
+      return { success: false, message: 'Top-up completion failed: ' + err.message }
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
    * Internal only: add money to wallet without a payment gateway.
    * Use this for refunds or admin/manual credits, never for customer top-ups.
    */

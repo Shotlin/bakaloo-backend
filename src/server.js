@@ -18,6 +18,10 @@ import {
   startAbandonedCartWorker,
   stopAbandonedCartWorker,
 } from './workers/abandoned-cart.worker.js'
+import {
+  startWalletTopupReconciliationWorker,
+  stopWalletTopupReconciliationWorker,
+} from './workers/wallet-topup-reconciliation.worker.js'
 
 const start = async () => {
   try {
@@ -78,6 +82,10 @@ const start = async () => {
     // Start abandoned cart sweep worker (detects carts inactive 10+ min)
     startAbandonedCartWorker(app)
 
+    // Start wallet top-up reconciliation worker (catches payments Razorpay
+    // captured but the app never confirmed back to us)
+    startWalletTopupReconciliationWorker()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -101,6 +109,9 @@ const start = async () => {
 
       // Stop abandoned cart sweep worker
       stopAbandonedCartWorker()
+
+      // Stop wallet top-up reconciliation worker
+      stopWalletTopupReconciliationWorker()
 
       // Close Socket.IO
       if (app.io) {

@@ -1,4 +1,4 @@
-import { query } from '../../config/database.js'
+import { query, getClient } from '../../config/database.js'
 
 /**
  * Wallet repository — SQL queries for wallets + wallet_transactions
@@ -239,6 +239,35 @@ export class WalletRepository {
     )
 
     return rows[0] ? this._formatTransaction(rows[0]) : null
+  }
+
+  /**
+   * Reconciliation worker only: mark a long-abandoned pending top-up as
+   * FAILED after confirming with Razorpay that no payment was ever
+   * captured for it — cleans it out of admin views without ever touching
+   * a row that might still be genuinely in-flight. Self-contained (opens
+   * its own short transaction) since the worker calls this standalone,
+   * not as part of a larger unit of work.
+   */
+  async markStalePendingAsFailed(razorpayOrderId) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `UPDATE wallet_transactions
+         SET status = 'FAILED'
+         WHERE reference_id = $1 AND type = 'CREDIT' AND status = 'PENDING'
+         RETURNING *`,
+        [razorpayOrderId]
+      )
+      await client.query('COMMIT')
+      return rows[0] ? this._formatTransaction(rows[0]) : null
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
   }
 
   /**

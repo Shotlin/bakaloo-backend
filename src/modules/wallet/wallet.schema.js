@@ -22,7 +22,7 @@ const transactionResponseSchema = {
     amount: { type: 'number' },
     description: { type: 'string' },
     referenceId: { type: ['string', 'null'] },
-    balanceAfter: { type: 'number' },
+    balanceAfter: { type: ['number', 'null'] },
     status: { type: 'string', enum: ['PENDING', 'COMPLETED', 'FAILED'] },
     createdAt: { type: 'string' },
   },

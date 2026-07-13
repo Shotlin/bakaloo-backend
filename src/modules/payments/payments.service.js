@@ -7,6 +7,8 @@ import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
+import { WalletService } from '../wallet/wallet.service.js'
+import { WalletRepository } from '../wallet/wallet.repository.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -21,6 +23,7 @@ export class PaymentsService {
     this.ordersRepo = new OrdersRepository()
     this.paymentSettingsService = new PaymentSettingsService()
     this.cashbackService = new CashbackService()
+    this.walletService = new WalletService(new WalletRepository())
   }
 
   /**
@@ -265,6 +268,13 @@ export class PaymentsService {
               logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
             })
             logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
+          } else if (!payment) {
+            // Not a checkout order payment — check whether it's a wallet
+            // top-up instead (a completely separate Razorpay order created
+            // directly by WalletService, not the orders/payments module).
+            this.walletService.completeVerifiedTopUp(rzpOrderId).catch((err) => {
+              logger.warn({ err: err.message, rzpOrderId }, 'Wallet top-up webhook completion failed')
+            })
           }
         }
         break
