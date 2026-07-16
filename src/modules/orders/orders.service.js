@@ -542,7 +542,20 @@ export class OrdersService {
       if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
         await this.cartService.clearCart(userId)
       }
-      if (appliedCouponCode && createdOrders.length === 1) {
+      // Coupon usage counts against the customer's per-coupon limit the
+      // instant it's recorded — for ONLINE/WALLET, defer this to actual
+      // payment confirmation (payments.service.js / wallet.service.js call
+      // couponsService.recordUsageForOrder(orderId) there), same reasoning
+      // as the cart-clear deferral just above. Recording it here
+      // unconditionally meant a customer whose wallet/online payment never
+      // completed still had their coupon burned against a limit they never
+      // successfully used it under.
+      if (
+        appliedCouponCode &&
+        createdOrders.length === 1 &&
+        normalizedPaymentMethod !== 'ONLINE' &&
+        normalizedPaymentMethod !== 'WALLET'
+      ) {
         await this.couponsService.recordUsage(
           appliedCouponCode,
           userId,

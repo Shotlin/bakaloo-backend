@@ -192,6 +192,17 @@ export class PaymentsService {
       logger.warn({ err: err.message, userId }, 'Cart clear after payment verify failed (non-critical)')
     }
 
+    // Same "only after payment is confirmed" reasoning as the cart clear
+    // above — a coupon's usage must not count against the customer's limit
+    // until the order it was used on is actually confirmed.
+    try {
+      const { CouponsService } = await import('../coupons/coupons.service.js')
+      const { CouponsRepository } = await import('../coupons/coupons.repository.js')
+      await new CouponsService(new CouponsRepository()).recordUsageForOrder(payment.orderId)
+    } catch (err) {
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording after payment verify failed (non-critical)')
+    }
+
     // Send order placed notification after confirmed payment
     try {
       const order = await this.ordersRepo.findByIdAndUser(payment.orderId, userId)
@@ -266,6 +277,18 @@ export class PaymentsService {
             })
             this.cashbackService.evaluateAndCredit(payment.orderId, 'ORDER_CONFIRMED').catch((err) => {
               logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
+            })
+            // Same reasoning as verifyPayment() — this webhook is the
+            // fallback confirmation path when the client's own verify call
+            // never landed, so it needs the same coupon-usage recording.
+            // The unique index on coupon_usages(coupon_id, user_id,
+            // order_id) plus recordUsage()'s 23505 handling makes this
+            // safe to run even if verifyPayment() already recorded it.
+            import('../coupons/coupons.service.js').then(async ({ CouponsService }) => {
+              const { CouponsRepository } = await import('../coupons/coupons.repository.js')
+              return new CouponsService(new CouponsRepository()).recordUsageForOrder(payment.orderId)
+            }).catch((err) => {
+              logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording failed (webhook)')
             })
             logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
           } else if (!payment) {

@@ -96,3 +96,56 @@ describe('CouponsService.getAvailable — hides coupons the user is not eligible
     expect(available.find((c) => c.code === 'EVERY10')).toBeDefined()
   })
 })
+
+// Reported bug: an admin raises "Per User Limit" in the dashboard (e.g.
+// FAT51, raised to 9) but the coupon keeps disappearing from /available and
+// rejecting with COUPON_USER_LIMIT_REACHED after a single use. Root cause:
+// the dashboard's edit form only ever writes per_user_limit (legacy column —
+// updateCouponSchema doesn't even expose usageLimitPerUser). createCouponSchema
+// separately defaults usage_limit_per_user to 1 on every create regardless of
+// what the admin set. The eligibility checks used to read usageLimitPerUser
+// first, so every coupon was silently capped at 1 use/user no matter what the
+// dashboard displayed. per_user_limit (the field admins can actually change)
+// must win.
+describe('CouponsService — per-user limit precedence prefers the admin-editable column (positive/negative)', () => {
+  it('getAvailable: keeps a coupon visible when perUserLimit was raised even though the stale usageLimitPerUser default (1) would otherwise exclude it', async () => {
+    const repo = makeRepoMock({
+      findAvailable: vi.fn().mockResolvedValue([
+        { id: UUID_A, code: 'FAT51', targetType: 'ALL', perUserLimit: 9, usageLimitPerUser: 1, discountType: 'FLAT', discountValue: 51 },
+      ]),
+      getUserUsageCount: vi.fn().mockResolvedValue(1),
+    })
+    const service = new CouponsService(repo, makeSegmentsRepoMock())
+
+    const available = await service.getAvailable(UUID_A)
+
+    expect(available.find((c) => c.code === 'FAT51')).toBeDefined()
+  })
+
+  it('validateCouponEligibility: accepts a re-apply when perUserLimit was raised even though usageLimitPerUser is still stuck at 1 (positive)', async () => {
+    const repo = makeRepoMock({ getUserUsageCount: vi.fn().mockResolvedValue(1) })
+    const service = new CouponsService(repo, makeSegmentsRepoMock())
+    const coupon = {
+      id: UUID_A, code: 'FAT51', isActive: true, targetType: 'ALL',
+      perUserLimit: 9, usageLimitPerUser: 1, minOrderAmount: 1,
+    }
+
+    const result = await service.validateCouponEligibility(coupon, UUID_A, 100)
+
+    expect(result.valid).toBe(true)
+  })
+
+  it('validateCouponEligibility: still rejects once usage reaches the admin-set perUserLimit itself (negative — the cap must still work)', async () => {
+    const repo = makeRepoMock({ getUserUsageCount: vi.fn().mockResolvedValue(9) })
+    const service = new CouponsService(repo, makeSegmentsRepoMock())
+    const coupon = {
+      id: UUID_A, code: 'FAT51', isActive: true, targetType: 'ALL',
+      perUserLimit: 9, usageLimitPerUser: 1, minOrderAmount: 1,
+    }
+
+    const result = await service.validateCouponEligibility(coupon, UUID_A, 100)
+
+    expect(result.valid).toBe(false)
+    expect(result.code).toBe('COUPON_USER_LIMIT_REACHED')
+  })
+})

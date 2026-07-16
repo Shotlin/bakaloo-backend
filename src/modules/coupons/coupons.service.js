@@ -423,9 +423,14 @@ export class CouponsService {
       return { valid: false, code: ERROR_CODES.COUPON_LIMIT_REACHED, message: 'Coupon usage limit reached' }
     }
 
-    // usage_limit_per_user (new multi-vendor field)
-    // Skip DB lookup for demo coupons — they have non-UUID IDs
-    const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
+    // per_user_limit is what the admin dashboard's "Per User Limit" field
+    // actually writes (updateCouponSchema never exposes usageLimitPerUser,
+    // and createCouponSchema defaults it to 1 whenever the client omits it
+    // — which the dashboard always does). Preferring usageLimitPerUser here
+    // meant every coupon was silently capped at 1 use/user no matter what
+    // an admin set in the UI. per_user_limit must win until usage_limit_per_user
+    // is actually wired up end-to-end (task 9.2, see coupons.repository.js).
+    const perUserLimit = coupon.perUserLimit ?? coupon.usageLimitPerUser ?? 1
     const userUsage = _isValidUUID(coupon.id)
       ? await this.repo.getUserUsageCount(coupon.id, userId)
       : 0
@@ -630,7 +635,9 @@ export class CouponsService {
       const usage = coupon.isDemo
         ? 0
         : await this.repo.getUserUsageCount(coupon.id, userId)
-      const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
+      // See validateCouponEligibility() above — per_user_limit is the
+      // column the admin dashboard actually controls, so it must win.
+      const perUserLimit = coupon.perUserLimit ?? coupon.usageLimitPerUser ?? 1
       if (usage >= perUserLimit) continue
 
       if (!(await this._isTargetEligible(coupon, userId))) continue
@@ -669,9 +676,47 @@ export class CouponsService {
     // Demo coupons have string IDs (e.g. 'demo-coupon-bakaloo50') that
     // would cause a PostgreSQL UUID cast error on the coupon_usages INSERT.
     if (coupon && _isValidUUID(coupon.id)) {
-      await this.repo.recordUsage(coupon.id, userId, orderId, { shopId, discountAmount })
-      logger.info({ couponId: coupon.id, userId, orderId }, 'Coupon usage recorded')
+      try {
+        await this.repo.recordUsage(coupon.id, userId, orderId, { shopId, discountAmount })
+        logger.info({ couponId: coupon.id, userId, orderId }, 'Coupon usage recorded')
+      } catch (err) {
+        // coupon_usages has a UNIQUE(coupon_id, user_id, order_id) index —
+        // a retry of the same confirmation event (payment webhook firing
+        // twice, a client re-calling payFromWallet) must not double-count
+        // against the customer's usage limit or double-increment
+        // coupons.used_count.
+        if (err.code === '23505') {
+          logger.info({ couponId: coupon.id, userId, orderId }, 'Coupon usage already recorded for this order — skipping')
+          return
+        }
+        throw err
+      }
     }
+  }
+
+  /**
+   * Record coupon usage for an order that has just been confirmed
+   * (payment succeeded) — reads the coupon code/discount straight off the
+   * order row rather than requiring the caller to have those in scope.
+   * This is what ONLINE/WALLET payment confirmation calls; recordUsage()
+   * above is still called directly and immediately for COD, which has no
+   * separate confirmation step (see orders.service.js).
+   *
+   * Previously, coupon usage was recorded unconditionally the moment an
+   * order row was created — before an ONLINE/WALLET payment had actually
+   * been confirmed. A payment that then failed or was never completed
+   * still burned the customer's usage against their per-coupon limit,
+   * with no way to recover it (reported bug: first order's wallet payment
+   * never confirmed, but the coupon immediately showed "maximum uses").
+   */
+  async recordUsageForOrder(orderId) {
+    const { OrdersRepository } = await import('../orders/orders.repository.js')
+    const order = await new OrdersRepository().findById(orderId)
+    if (!order || !order.couponCode) return
+    await this.recordUsage(order.couponCode, order.userId, orderId, {
+      shopId: order.shopId,
+      discountAmount: order.discountAmount,
+    })
   }
 
   // ═══════════════════════════════════════════════════════════════════

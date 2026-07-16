@@ -481,6 +481,19 @@ export class WalletService {
         logger.warn({ err: cartErr.message, userId }, 'Cart clear after wallet pay failed (non-critical)')
       }
 
+      // Record coupon usage only now that the wallet deduction actually
+      // succeeded — reported bug: a customer whose wallet payment never
+      // completed still had their coupon immediately counted as used
+      // (orders.service.js used to record this unconditionally at order
+      // creation, before this confirmation step even ran).
+      try {
+        const { CouponsService } = await import('../coupons/coupons.service.js')
+        const { CouponsRepository } = await import('../coupons/coupons.repository.js')
+        await new CouponsService(new CouponsRepository()).recordUsageForOrder(orderId)
+      } catch (couponErr) {
+        logger.warn({ err: couponErr.message, orderId }, 'Coupon usage recording after wallet pay failed (non-critical)')
+      }
+
       // Send "Order placed" notification only after confirmed payment
       try {
         const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
