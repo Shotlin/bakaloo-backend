@@ -4,6 +4,7 @@ import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from './totals-engine.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
+import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { haversineKm } from '../../utils/distance.js'
 import { query } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
@@ -33,6 +34,7 @@ export class BillSummaryService {
     totalsEngine = null,
     paymentSettingsService = null,
     cartMilestonesService = null,
+    firstTimeOffersService = null,
   } = {}) {
     this.cartRepository = cartRepository ?? new CartRepository()
     this.cartService = cartService ?? new CartService(this.cartRepository)
@@ -41,6 +43,7 @@ export class BillSummaryService {
       totalsEngine ?? new TotalsEngine({ feeSettingsService: this.feeSettingsService })
     this.paymentSettingsService = paymentSettingsService ?? new PaymentSettingsService()
     this.cartMilestonesService = cartMilestonesService ?? new CartMilestonesService()
+    this.firstTimeOffersService = firstTimeOffersService ?? new FirstTimeOffersService()
   }
 
   /**
@@ -73,6 +76,40 @@ export class BillSummaryService {
       shopGroups.length === 1 ? shopGroups[0].shopId : null
     )
 
+    // First-time offer — auto-applies for eligible first-time customers on
+    // single-shop carts, mirroring OrdersService.placeOrder()'s rule
+    // (single discount slot, single-shop only). Resolved here — not just at
+    // order placement — so the customer actually SEES the promised discount
+    // while shopping, matching the "auto-apply, no claim step" admin setting.
+    // Payment method isn't known yet at cart-view time, so `onlinePayment`
+    // is left undefined (best-case preview); order placement re-validates
+    // the offer against the real payment method regardless.
+    let firstTimeOfferDiscount = 0
+    let firstTimeOfferFreeDelivery = false
+    let firstTimeOfferMeta = null
+    if (shopGroups.length === 1) {
+      try {
+        const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(
+          userId,
+          itemTotalDiscounted
+        )
+        if (resolvedOffer?.autoApply) {
+          const reward = this.firstTimeOffersService.computeReward(resolvedOffer, itemTotalDiscounted)
+          if (reward.discount || reward.freeDelivery) {
+            firstTimeOfferDiscount = this._round(reward.discount || 0)
+            firstTimeOfferFreeDelivery = !!reward.freeDelivery
+            firstTimeOfferMeta = {
+              id: resolvedOffer.id,
+              name: resolvedOffer.name,
+              rewardType: resolvedOffer.rewardType,
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ userId, err: err.message, action: 'bill_summary_first_time_offer' }, 'First-time offer resolve failed')
+      }
+    }
+
     let deliveryFee = 0
     let deliveryFeeOriginal = 0
     let handlingFee = 0
@@ -98,6 +135,7 @@ export class BillSummaryService {
         itemsSubtotal: group.subtotal,
         distanceKm,
         storeName: meta.name || group.shopName || null,
+        forceFreeDelivery: firstTimeOfferFreeDelivery,
       })
 
       deliveryFee = this._round(deliveryFee + breakdown.deliveryFee)
@@ -117,15 +155,21 @@ export class BillSummaryService {
       }
     }
 
-    // Build a single aggregate breakdown for the canonical response.
+    // Build a single aggregate breakdown for the canonical response. The
+    // first-time-offer discount is fed through the engine's `couponDiscount`
+    // slot — the same "single discount slot" convention OrdersService.
+    // placeOrder() already uses (coupon and first-time-offer share one slot,
+    // never stack) — so totalPayable/totalSavings stay consistent.
     const aggregate = this.totalsEngine.computeBreakdown({
       config,
       itemsSubtotal: itemTotalDiscounted,
       itemDiscount: mrpDiscount,
+      couponDiscount: firstTimeOfferDiscount,
       distanceKm: primaryDistanceKm,
       tipAmount,
       storeName: primaryStoreName,
       quickDeliverySelected,
+      forceFreeDelivery: firstTimeOfferFreeDelivery,
     })
 
     // Override the aggregate's per-fee numbers with the summed per-shop values
@@ -157,13 +201,17 @@ export class BillSummaryService {
     // other fee with the properly-summed multi-shop total — using the
     // stale single-shop tax figure would under/over-charge on any
     // multi-shop cart.
-    const preTaxTotal = this._round(Math.max(0, itemTotalDiscounted + feesTotal))
+    const preTaxTotal = this._round(
+      Math.max(0, itemTotalDiscounted - firstTimeOfferDiscount + feesTotal)
+    )
     const gstAmount = config.gst_enabled
       ? this._round((preTaxTotal * this._toNumber(config.gst_rate)) / 100)
       : 0
     aggregate.tax = gstAmount
 
-    const toPayFinal = this._round(itemTotalDiscounted + feesTotal + gstAmount + tipAmount)
+    const toPayFinal = this._round(
+      Math.max(0, itemTotalDiscounted - firstTimeOfferDiscount + feesTotal + gstAmount + tipAmount)
+    )
     const toPayOriginal = this._round(
       itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + gstAmount + tipAmount
     )
@@ -243,7 +291,13 @@ export class BillSummaryService {
         savedAmount: 0,
         isLateNight: false,
       },
-      couponDiscount: 0, // applied by coupon system at checkout
+      // Auto-applied first-time-offer discount (backend-known at cart-view
+      // time — no customer action needed). A manually-typed coupon code
+      // lives entirely in client-side state and is NOT reflected here; the
+      // Flutter app overlays that discount on top of / in place of this one
+      // (single discount slot — a manual coupon takes priority, matching
+      // OrdersService.placeOrder()'s rule).
+      couponDiscount: firstTimeOfferDiscount,
       tipAmount,
       toPay: {
         original: toPayOriginal,
@@ -251,9 +305,14 @@ export class BillSummaryService {
       },
       savings: {
         total: aggregate.totalSavings,
-        breakdown: mrpDiscount > 0
-          ? [{ type: 'mrp_discount', label: 'Discount on MRP', amount: mrpDiscount }]
-          : [],
+        breakdown: [
+          ...(mrpDiscount > 0
+            ? [{ type: 'mrp_discount', label: 'Discount on MRP', amount: mrpDiscount }]
+            : []),
+          ...(firstTimeOfferDiscount > 0
+            ? [{ type: 'first_time_offer', label: firstTimeOfferMeta?.name || 'First order offer', amount: firstTimeOfferDiscount }]
+            : []),
+        ],
       },
       deliveryEstimate: {
         minutes: deliveryEstimateMinutes,
@@ -276,6 +335,15 @@ export class BillSummaryService {
       totalPayable: toPayFinal,
       paymentMethods: this._buildPaymentMethods(paymentConfig, toPayFinal),
       cartMilestone,
+      firstTimeOffer: firstTimeOfferMeta
+        ? {
+            id: firstTimeOfferMeta.id,
+            name: firstTimeOfferMeta.name,
+            rewardType: firstTimeOfferMeta.rewardType,
+            discount: firstTimeOfferDiscount,
+            freeDelivery: firstTimeOfferFreeDelivery,
+          }
+        : null,
       // Whether the "Quick Delivery" opt-in is available at all right now —
       // independent of the fees[] line, which only appears once the
       // customer has actually selected it (see quickDeliverySelected param).
@@ -564,6 +632,7 @@ export class BillSummaryService {
       paymentMethods: paymentConfig ? this._buildPaymentMethods(paymentConfig, 0) : null,
       cartMilestone: { unlocked: null, next: null, ladder: [] },
       quickDelivery: { enabled: false, amount: 0, label: 'Quick delivery fee', etaMinutes: 0 },
+      firstTimeOffer: null,
     }
   }
 

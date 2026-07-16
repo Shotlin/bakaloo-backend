@@ -9,6 +9,7 @@ export class PaymentOffersRepository {
       `SELECT *
        FROM payment_offers
        WHERE is_active = true
+         AND (valid_from IS NULL OR valid_from <= NOW())
          AND (valid_until IS NULL OR valid_until > NOW())
        ORDER BY created_at DESC`
     )

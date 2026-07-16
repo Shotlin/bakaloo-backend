@@ -97,9 +97,39 @@ export class AdminNotificationsService {
    * Handles batch FCM, deactivates invalid tokens, updates campaign status.
    */
   async _executeSend(campaignId, { title, body, segment, segmentValue, image_url, deep_link, type, expires_at }) {
+    const notificationData = {
+      type: type || 'CAMPAIGN',
+      campaignId,
+      deepLink: deep_link || '',
+      expiresAt: expires_at || '',
+      imageUrl: image_url || '',
+    }
+
+    // Save to every targeted user's in-app Notification tab first, before
+    // attempting push at all — guarantees the message is visible there
+    // even for a user whose device never got a valid push token (see
+    // repository doc comment). Best-effort: a failure here must not skip
+    // the push attempt below.
+    const allTargetUserIds = await repo.getTargetUserIds(segment, segmentValue)
+    if (allTargetUserIds.length > 0) {
+      try {
+        await repo.createBulkNotifications(allTargetUserIds, {
+          title, body, type: type || 'general', data: notificationData,
+        })
+      } catch (err) {
+        logger.error({ err, campaignId }, 'Bulk in-app notification creation failed')
+      }
+    }
+
     const targets = await repo.getTargetUsersWithTokens(segment, segmentValue)
     if (!targets.length) {
-      await repo.updateCampaignStatus(campaignId, 'SENT', { sentCount: 0, failedCount: 0 })
+      await repo.updateCampaignStatus(campaignId, 'SENT', {
+        sentCount: 0,
+        failedCount: 0,
+        failureSummary: allTargetUserIds.length > 0
+          ? { reason: `Delivered in-app to ${allTargetUserIds.length} user(s) — none had an active push token, so no push notification was sent.` }
+          : undefined,
+      })
       return
     }
 
@@ -109,12 +139,7 @@ export class AdminNotificationsService {
       body,
       imageUrl: image_url,
       deepLink: deep_link,
-      data: {
-        type: type || 'CAMPAIGN',
-        campaignId,
-        deepLink: deep_link || '',
-        expiresAt: expires_at || '',
-      },
+      data: notificationData,
     })
 
     // Deactivate invalid tokens

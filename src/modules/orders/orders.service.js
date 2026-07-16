@@ -676,9 +676,18 @@ export class OrdersService {
         // COD orders reach CONFIRMED right here (no separate payment webhook
         // exists for COD) — credit any cashback whose trigger is
         // ORDER_CONFIRMED now instead of waiting for a hook that will never fire.
-        this.cashbackService.evaluateAndCredit(order.id, 'ORDER_CONFIRMED').catch((err) => {
-          logger.warn({ err: err.message, orderId: order.id }, 'Cashback evaluation failed (COD confirm)')
-        })
+        // Also fire PAYMENT_SUCCESS: COD has no distinct "payment succeeded"
+        // event separate from order confirmation (the cash itself changes
+        // hands at delivery), so confirmation is COD's stand-in for it —
+        // otherwise an offer configured with that trigger would stay
+        // PENDING forever for every COD order. Mirrors the same pair fired
+        // together for ONLINE/WALLET checkouts (payments.service.js,
+        // wallet.service.js).
+        for (const trigger of ['ORDER_CONFIRMED', 'PAYMENT_SUCCESS']) {
+          this.cashbackService.evaluateAndCredit(order.id, trigger).catch((err) => {
+            logger.warn({ err: err.message, orderId: order.id, trigger }, 'Cashback evaluation failed (COD confirm)')
+          })
+        }
       }
     }
 

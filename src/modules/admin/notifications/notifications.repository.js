@@ -218,16 +218,32 @@ export class AdminNotificationsRepository {
 
   /* ── Segment Queries ── */
 
+  // Deliberately NOT joined to fcm_tokens — this counts everyone the
+  // targeting criteria actually matches, which is what "X users in
+  // segment" honestly means to an admin. Previously this required an
+  // active push token to even be counted, so a "Specific User" target
+  // whose device had no valid token (missing permission, no push key
+  // configured, app not opened recently) showed "0 users in segment" —
+  // confusing and indistinguishable from "no such user."
   async getSegmentCount(segment, segmentValue) {
     const { where, params } = buildSegmentWhere(segment, segmentValue)
     const { rows: [{ count }] } = await query(
       `SELECT COUNT(DISTINCT u.id)::int AS count
        FROM users u
-       INNER JOIN fcm_tokens ft ON ft.user_id = u.id AND ft.is_active = true
        WHERE ${where}`,
       params
     )
     return count
+  }
+
+  /** Every matching user, regardless of whether they have a push token — used to guarantee the in-app notification fallback for the full target audience. */
+  async getTargetUserIds(segment, segmentValue) {
+    const { where, params } = buildSegmentWhere(segment, segmentValue)
+    const { rows } = await query(
+      `SELECT DISTINCT u.id AS user_id FROM users u WHERE ${where}`,
+      params
+    )
+    return rows.map((r) => r.user_id)
   }
 
   async getTargetUsersWithTokens(segment, segmentValue) {
@@ -241,6 +257,24 @@ export class AdminNotificationsRepository {
       params
     )
     return rows
+  }
+
+  /**
+   * Save the campaign notification into every targeted user's in-app
+   * Notification tab — independent of push delivery. This is the guarantee
+   * that a customer never gets literally nothing when an admin sends them
+   * a notification, even if their device's push token is missing/invalid/
+   * revoked (previously campaigns were push-only with no such fallback,
+   * unlike the single-user NotificationsService.sendNotification() path
+   * used by orders/wallet/abandoned-cart, which always wrote this row).
+   */
+  async createBulkNotifications(userIds, { title, body, type, data }) {
+    if (!userIds?.length) return
+    await query(
+      `INSERT INTO notifications (user_id, title, body, type, data)
+       SELECT unnest($1::uuid[]), $2, $3, $4, $5::jsonb`,
+      [userIds, title, body, type || 'general', JSON.stringify(data || {})]
+    )
   }
 
   async deactivateInvalidTokens(tokens) {

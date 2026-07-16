@@ -8,11 +8,26 @@ export class PaymentOffersService {
     this.repo = repository
   }
 
-  async getPublicOffers(cartTotal) {
+  async getPublicOffers(cartTotal, userId = null) {
     const normalizedCartTotal = Math.max(0, this._toNumber(cartTotal))
     const offers = await this.repo.getActive()
 
-    return offers
+    // A logged-in customer who has already hit an offer's per-user
+    // redemption cap shouldn't see it listed as available at all — it would
+    // otherwise show as unlocked/ready right up until checkout, where
+    // resolveForCheckout() (correctly) silently skips it. Anonymous
+    // requests (no userId — this route is public/unauthenticated) can't be
+    // checked and are shown every active offer, same as before.
+    const eligibleOffers = []
+    for (const offer of offers) {
+      if (userId && offer.usage_limit_per_user != null) {
+        const usage = await this.repo.getUserUsageCount(offer.id, userId)
+        if (usage >= offer.usage_limit_per_user) continue
+      }
+      eligibleOffers.push(offer)
+    }
+
+    return eligibleOffers
       .map((offer) => {
         const minOrderAmount = this._toNumber(offer.min_order_amount)
         const lockThreshold = this._toNumber(
@@ -102,6 +117,15 @@ export class PaymentOffersService {
     let best = null
     for (const offer of offers) {
       if (normalizedCartTotal < this._toNumber(offer.min_order_amount)) continue
+
+      // lock_threshold (when set) is the real unlock gate shown to the
+      // customer as "Shop for ₹X more to apply" — falls back to
+      // min_order_amount so an offer with no explicit threshold isn't
+      // silently un-lockable. Must be enforced here too, not just in the
+      // display-only getPublicOffers() above, or a customer could check out
+      // below the advertised unlock amount and still get credited.
+      const requiredThreshold = this._toNumber(offer.lock_threshold ?? offer.min_order_amount)
+      if (normalizedCartTotal < requiredThreshold) continue
 
       if (offer.usage_limit_per_user != null) {
         const usage = await this.repo.getUserUsageCount(offer.id, userId)

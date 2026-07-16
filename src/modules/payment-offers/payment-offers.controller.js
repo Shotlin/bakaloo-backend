@@ -10,7 +10,7 @@ export class PaymentOffersController {
 
   async getPublic(request, reply) {
     const cartTotal = request.query.cart_total ?? request.query.cartTotal ?? 0
-    const offers = await this.service.getPublicOffers(cartTotal)
+    const offers = await this.service.getPublicOffers(cartTotal, request.user?.id ?? null)
     return reply.code(200).send(success(offers, 'Payment offers fetched'))
   }
 

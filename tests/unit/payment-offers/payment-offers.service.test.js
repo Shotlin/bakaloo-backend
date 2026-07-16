@@ -126,6 +126,53 @@ describe('PaymentOffersService.resolveForCheckout — per-user usage limit (nega
   })
 })
 
+describe('PaymentOffersService.resolveForCheckout — lock_threshold enforcement (reported bug: admin-configured unlock amount was cosmetic-only)', () => {
+  // getPublicOffers() correctly showed the offer as "locked" below
+  // lock_threshold (falling back to min_order_amount), but
+  // resolveForCheckout() — the function that actually decides whether
+  // cashback gets credited — only ever checked min_order_amount, so a cart
+  // between min_order_amount and lock_threshold would silently earn
+  // cashback the UI told the customer they hadn't unlocked yet.
+  it('does not credit when the cart meets min_order_amount but not the higher lock_threshold (negative)', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([
+        offer({ min_order_amount: 50, lock_threshold: 200 }),
+      ]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.resolveForCheckout(USER_ID, 100)
+
+    expect(result).toBeNull()
+  })
+
+  it('credits once the cart clears lock_threshold (positive)', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([
+        offer({ min_order_amount: 50, lock_threshold: 200 }),
+      ]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.resolveForCheckout(USER_ID, 200)
+
+    expect(result).not.toBeNull()
+    expect(result.cashbackAmount).toBe(50)
+  })
+
+  it('falls back to min_order_amount when lock_threshold is unset (unaffected default case)', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([
+        offer({ min_order_amount: 50, lock_threshold: null }),
+      ]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    expect(await service.resolveForCheckout(USER_ID, 49)).toBeNull()
+    expect(await service.resolveForCheckout(USER_ID, 50)).not.toBeNull()
+  })
+})
+
 describe('PaymentOffersService.recordUsage', () => {
   it('delegates to the repository', async () => {
     const repo = makeRepoMock()
@@ -155,6 +202,60 @@ describe('PaymentOffersService.getPublicOffers — no longer injects hardcoded d
     const result = await service.getPublicOffers(50)
 
     expect(result).toEqual([])
+  })
+})
+
+describe('PaymentOffersService.getPublicOffers — per-user usage cap hides exhausted offers from a logged-in customer (reported gap)', () => {
+  // A customer who already hit usage_limit_per_user still saw the offer as
+  // unlocked/available (resolveForCheckout correctly skips it at checkout,
+  // but the list itself never checked). Fixed by threading the caller's
+  // userId through (from an optional-auth preHandler) and pre-filtering.
+  it('excludes an offer the given user has already exhausted', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([offer({ usage_limit_per_user: 1 })]),
+      getUserUsageCount: vi.fn().mockResolvedValue(1),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(50, USER_ID)
+
+    expect(result).toEqual([])
+    expect(repo.getUserUsageCount).toHaveBeenCalledWith('offer-1', USER_ID)
+  })
+
+  it('still includes it when the user has redemptions remaining', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([offer({ usage_limit_per_user: 3 })]),
+      getUserUsageCount: vi.fn().mockResolvedValue(1),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(50, USER_ID)
+
+    expect(result).toHaveLength(1)
+  })
+
+  it('shows every active offer to an anonymous caller (no userId — usage cannot be checked)', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([offer({ usage_limit_per_user: 1 })]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(50)
+
+    expect(result).toHaveLength(1)
+    expect(repo.getUserUsageCount).not.toHaveBeenCalled()
+  })
+
+  it('never checks usage for an offer with no per-user cap, even when a userId is given', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([offer({ usage_limit_per_user: null })]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    await service.getPublicOffers(50, USER_ID)
+
+    expect(repo.getUserUsageCount).not.toHaveBeenCalled()
   })
 })
 

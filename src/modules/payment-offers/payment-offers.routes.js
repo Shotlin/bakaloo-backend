@@ -18,8 +18,32 @@ export default async function paymentOffersRoutes(fastify) {
   const service = new PaymentOffersService(repository)
   const controller = new PaymentOffersController(service)
 
+  /**
+   * Best-effort JWT verification: if a token is present and valid the
+   * decoded payload lands on `request.user` (used to hide offers the
+   * customer has already exhausted their per-user redemption cap on);
+   * otherwise the request proceeds anonymously. Never rejects — this
+   * endpoint is public. Mirrors products.routes.js's tryAttachUser.
+   */
+  const tryAttachUser = async (request) => {
+    if (typeof fastify.optionalAuth === 'function') {
+      try {
+        await fastify.optionalAuth(request)
+      } catch {
+        /* anonymous fallback */
+      }
+      return
+    }
+    try {
+      await request.jwtVerify()
+    } catch {
+      /* anonymous fallback */
+    }
+  }
+
   fastify.get('/', {
     schema: getPaymentOffersSchema,
+    preHandler: [tryAttachUser],
   }, controller.getPublic.bind(controller))
 }
 
