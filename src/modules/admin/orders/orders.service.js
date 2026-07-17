@@ -122,6 +122,24 @@ export class AdminOrdersService {
     return { ...order, items, timeline, payment, delivery }
   }
 
+  async getOrderNotes(orderId) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+    return this.repository.getOrderNotes(orderId)
+  }
+
+  async addOrderNote(orderId, authorId, body, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+
+    const note = await this.repository.addOrderNote(orderId, authorId, body)
+
+    logAdminActivity(authorId, `Added note to order ${order.order_number}`, 'order', orderId,
+      null, { note: body }, ip)
+
+    return note
+  }
+
   async updateStatus(orderId, newStatus, adminId, note, ip) {
     const order = await this.repository.findById(orderId)
     if (!order) throw { statusCode: 404, message: 'Order not found' }

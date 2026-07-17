@@ -1,13 +1,19 @@
 import { query, getClient } from '../../../config/database.js'
 
 export class AdminOrdersRepository {
-  async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate }) {
+  async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate, deliveryType }) {
     let sql = `
       SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
-             ru.name AS rider_name
+             ru.name AS rider_name, sh.name AS shop_name,
+             CASE
+               WHEN o.delivery_mode = 'SCHEDULED' THEN 'SCHEDULED'
+               WHEN o.quick_delivery_selected = true THEN 'EXPRESS'
+               ELSE 'STANDARD'
+             END AS order_type
       FROM orders o
       LEFT JOIN users u ON u.id = o.user_id
       LEFT JOIN users ru ON ru.id = o.rider_id
+      LEFT JOIN shops sh ON sh.id = o.shop_id
       WHERE 1=1
     `
     const params = []
@@ -21,6 +27,13 @@ export class AdminOrdersRepository {
       params.push(`%${search}%`)
       sql += ` AND (o.order_number ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.name ILIKE $${idx})`
       idx++
+    }
+    if (deliveryType === 'express') {
+      sql += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = true`
+    } else if (deliveryType === 'standard') {
+      sql += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = false`
+    } else if (deliveryType === 'scheduled') {
+      sql += ` AND o.delivery_mode = 'SCHEDULED'`
     }
 
     const countSql = `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1` +
@@ -77,6 +90,33 @@ export class AdminOrdersRepository {
       [orderId]
     )
     return rows
+  }
+
+  async getOrderNotes(orderId) {
+    const { rows } = await query(
+      `SELECT n.*, u.name AS author_name
+       FROM order_notes n
+       LEFT JOIN users u ON u.id = n.author_id
+       WHERE n.order_id = $1
+       ORDER BY n.created_at ASC`,
+      [orderId]
+    )
+    return rows
+  }
+
+  async addOrderNote(orderId, authorId, body) {
+    const { rows } = await query(
+      `WITH ins AS (
+         INSERT INTO order_notes (order_id, author_id, body)
+         VALUES ($1, $2, $3)
+         RETURNING *
+       )
+       SELECT ins.*, u.name AS author_name
+       FROM ins
+       LEFT JOIN users u ON u.id = ins.author_id`,
+      [orderId, authorId, body]
+    )
+    return rows[0]
   }
 
   async getOrderPayment(orderId) {

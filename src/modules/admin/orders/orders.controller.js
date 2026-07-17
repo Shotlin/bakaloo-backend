@@ -24,6 +24,24 @@ export class AdminOrdersController {
     }
   }
 
+  async getOrderNotes(request, reply) {
+    try {
+      const data = await this.service.getOrderNotes(request.params.id)
+      return reply.send(success(data, 'Order notes'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
+  async addOrderNote(request, reply) {
+    try {
+      const data = await this.service.addOrderNote(request.params.id, request.user.id, request.body.body, request.ip)
+      return reply.code(201).send(success(data, 'Note added'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
   async updateStatus(request, reply) {
     try {
       const { status, note } = request.body

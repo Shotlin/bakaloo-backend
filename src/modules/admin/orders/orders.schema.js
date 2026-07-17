@@ -13,6 +13,7 @@ export const listOrdersSchema = {
       search: { type: 'string' },
       startDate: { type: 'string', format: 'date-time' },
       endDate: { type: 'string', format: 'date-time' },
+      deliveryType: { type: 'string', enum: ['express', 'scheduled', 'standard'] },
     },
   },
 }
@@ -23,6 +24,25 @@ export const orderDetailSchema = {
   tags: ['Admin Orders'],
   summary: 'Full order detail with items, timeline, payment, delivery',
   params: uuidParam,
+}
+
+export const orderNotesListSchema = {
+  tags: ['Admin Orders'],
+  summary: 'List all internal notes for an order (chronological, oldest first)',
+  params: uuidParam,
+}
+
+export const addOrderNoteSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Add a free-text internal note to an order',
+  params: uuidParam,
+  body: {
+    type: 'object',
+    required: ['body'],
+    properties: {
+      body: { type: 'string', minLength: 1, maxLength: 2000 },
+    },
+  },
 }
 
 export const updateStatusSchema = {
