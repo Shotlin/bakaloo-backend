@@ -26,8 +26,14 @@ import { WalletService } from '../modules/wallet/wallet.service.js'
 import { WalletRepository } from '../modules/wallet/wallet.repository.js'
 
 let _intervalHandle = null
-const POLL_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
-const GRACE_PERIOD_MINUTES = 10
+// Worst-case customer-facing delay for the (rare) fallback path is
+// GRACE_PERIOD_MINUTES + POLL_INTERVAL_MS — previously 10 + 5 = ~15 minutes,
+// which is what customers were experiencing when the app's own verify call
+// failed to land. Tightened to a ~4 minute worst case; GRACE_PERIOD_MINUTES
+// still comfortably outlasts how long a real UPI payment takes to settle,
+// so this still never touches a payment that's still genuinely in flight.
+const POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
+const GRACE_PERIOD_MINUTES = 2
 const ABANDON_AFTER_HOURS = 24
 const BATCH_LIMIT = 25
 
@@ -37,7 +43,7 @@ const walletService = new WalletService(walletRepo)
 export function startWalletTopupReconciliationWorker() {
   if (_intervalHandle) return
 
-  logger.info('Wallet top-up reconciliation worker started (polling every 5 min)')
+  logger.info('Wallet top-up reconciliation worker started (polling every 2 min)')
 
   _intervalHandle = setInterval(async () => {
     try {
