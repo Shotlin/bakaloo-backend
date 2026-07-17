@@ -113,6 +113,20 @@ export default async function walletRoutes(fastify) {
     return reply.send({ success: true, message: 'Wallet stats', data: stats })
   })
 
+  // GET /admin/resolve-user — Resolve a User ID or phone to name/phone [ADMIN]
+  fastify.get('/admin/resolve-user', {
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['query'],
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 100 },
+        },
+      },
+    },
+  }, controller.resolveUser.bind(controller))
+
   // POST /admin/:userId/credit — Credit a user's wallet [ADMIN]
   fastify.post('/admin/:userId/credit', {
     schema: adminCreditSchema,

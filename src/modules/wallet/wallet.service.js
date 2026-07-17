@@ -718,6 +718,22 @@ export class WalletService {
   }
 
   /**
+   * Admin: resolve a User ID or phone number to the matching user's basic
+   * info — used by the Credit/Debit dialogs so an admin sees who they're
+   * about to act on (name + phone) before submitting, instead of pasting
+   * a bare UUID blind with no confirmation.
+   */
+  async resolveUser(input) {
+    if (!input) return null
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input)
+    if (isUuid) {
+      return this.repo.findUserById(input)
+    }
+    const isPhone = /^[6-9]\d{9}$/.test(input)
+    return isPhone ? this.repo.findUserByPhone(input) : null
+  }
+
+  /**
    * Admin: get wallet overview statistics
    */
   async getAdminStats() {

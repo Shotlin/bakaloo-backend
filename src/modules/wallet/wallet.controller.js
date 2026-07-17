@@ -112,6 +112,18 @@ export class WalletController {
   }
 
   /**
+   * Admin: resolve a User ID or phone number to the matching user's
+   * name/phone, for the Credit/Debit dialogs' confirmation caption.
+   */
+  async resolveUser(request, reply) {
+    const user = await this.service.resolveUser(request.query.query)
+    if (!user) {
+      return reply.code(404).send(error('No user found', 'USER_NOT_FOUND'))
+    }
+    return reply.send(success(user, 'User found'))
+  }
+
+  /**
    * Admin: debit user wallet
    */
   async adminDebit(request, reply) {
