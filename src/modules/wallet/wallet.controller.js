@@ -110,4 +110,17 @@ export class WalletController {
       success({ wallet: result.wallet, transaction: result.transaction }, 'Wallet credited')
     )
   }
+
+  /**
+   * Admin: debit user wallet
+   */
+  async adminDebit(request, reply) {
+    const result = await this.service.adminDebit(request.params.userId, request.body)
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'DEBIT_FAILED'))
+    }
+    return reply.send(
+      success({ wallet: result.wallet, transaction: result.transaction }, 'Wallet debited')
+    )
+  }
 }

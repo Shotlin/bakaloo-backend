@@ -645,6 +645,48 @@ export class WalletService {
   }
 
   /**
+   * Admin: debit (withdraw) money from a user's wallet. Unlike
+   * deductMoney() (cashback clawback, which clamps to available balance),
+   * this fails outright on insufficient funds — an admin manually deducting
+   * money should get an explicit error, not a silent partial debit.
+   */
+  async adminDebit(targetUserId, { amount, description, referenceId }) {
+    const client = await getClient()
+
+    try {
+      await client.query('BEGIN')
+
+      const wallet = await this.repo.getForUpdate(client, targetUserId)
+      if (!wallet) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Wallet not found' }
+      }
+
+      const result = await this.repo.debit(
+        client,
+        wallet.id,
+        amount,
+        description || 'Amount deducted by company',
+        referenceId
+      )
+
+      await client.query('COMMIT')
+
+      logger.info({ userId: targetUserId, amount, balance: result.wallet.balance }, 'Wallet debited (admin)')
+      return { success: true, ...result }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      if (err.message === 'Insufficient wallet balance') {
+        return { success: false, message: 'Insufficient wallet balance' }
+      }
+      logger.error({ err, userId: targetUserId, amount }, 'Admin wallet debit failed')
+      return { success: false, message: 'Failed to debit money: ' + err.message }
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
    * Admin: get wallet overview statistics
    */
   async getAdminStats() {

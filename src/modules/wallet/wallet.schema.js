@@ -290,3 +290,40 @@ export const adminCreditSchema = {
     },
   },
 }
+
+export const adminDebitSchema = {
+  tags: ['Wallet', 'Admin'],
+  summary: 'Admin: debit a user wallet',
+  params: {
+    type: 'object',
+    required: ['userId'],
+    properties: {
+      userId: { type: 'string', format: 'uuid' },
+    },
+  },
+  body: {
+    type: 'object',
+    required: ['amount'],
+    properties: {
+      amount: { type: 'number', minimum: 1 },
+      description: { type: 'string', maxLength: 255, default: 'Amount deducted by company' },
+      referenceId: { type: 'string', maxLength: 100 },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            wallet: walletResponseSchema,
+            transaction: transactionResponseSchema,
+          },
+        },
+      },
+    },
+  },
+}

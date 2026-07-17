@@ -71,6 +71,22 @@ export const creditWalletSchema = {
   },
 }
 
+export const debitWalletSchema = {
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', pattern: uuidPattern } },
+  },
+  body: {
+    type: 'object',
+    required: ['amount'],
+    properties: {
+      amount: { type: 'number', minimum: 1, maximum: 50000 },
+      description: { type: 'string', maxLength: 255, default: 'Amount deducted by company' },
+    },
+  },
+}
+
 export const sendNotificationSchema = {
   params: {
     type: 'object',

@@ -57,7 +57,7 @@ export class AdminOrdersRepository {
 
   async getOrderItems(orderId) {
     const { rows } = await query(
-      `SELECT oi.*, p.thumbnail_url
+      `SELECT oi.*, p.thumbnail_url, p.net_quantity
        FROM order_items oi
        LEFT JOIN products p ON p.id = oi.product_id
        WHERE oi.order_id = $1

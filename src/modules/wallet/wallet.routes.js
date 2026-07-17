@@ -11,6 +11,7 @@ import {
   searchRecipientSchema,
   transferSchema,
   adminCreditSchema,
+  adminDebitSchema,
 } from './wallet.schema.js'
 
 /**
@@ -117,4 +118,10 @@ export default async function walletRoutes(fastify) {
     schema: adminCreditSchema,
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.adminCredit.bind(controller))
+
+  // POST /admin/:userId/debit — Debit a user's wallet [ADMIN]
+  fastify.post('/admin/:userId/debit', {
+    schema: adminDebitSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.adminDebit.bind(controller))
 }

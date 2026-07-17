@@ -53,6 +53,15 @@ export class AdminCustomersController {
     return success({ wallet_balance: result.wallet.balance }, 'Wallet credited')
   }
 
+  async debitWallet(request, reply) {
+    const { amount, description } = request.body
+    const result = await svc.debitWallet(request.params.id, amount, description, request.user.id, request.ip)
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'DEBIT_FAILED'))
+    }
+    return success({ wallet_balance: result.wallet.balance }, 'Wallet debited')
+  }
+
   async sendNotification(request, reply) {
     const { title, body } = request.body
     await svc.sendPersonalNotification(request.params.id, title, body, request.server)

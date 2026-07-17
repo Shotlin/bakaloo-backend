@@ -88,6 +88,26 @@ export class AdminCustomersService {
     return result
   }
 
+  async debitWallet(userId, amount, description, adminId, ip) {
+    const result = await walletService.adminDebit(userId, { amount, description })
+    if (result.success) {
+      logAdminActivity(adminId, 'DEBIT_WALLET', 'user', userId, null, { amount, description }, ip)
+      try {
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        const note = description || 'Amount deducted by company'
+        await notifService.sendNotification(userId, {
+          title: '💸 Wallet debited',
+          body: `₹${amount} has been deducted from your wallet — ${note}.`,
+          type: 'WALLET',
+          data: { type: 'WALLET', amount, description: description || '' },
+        })
+      } catch (err) {
+        console.error('Wallet-debit notification failed (non-blocking):', err?.message || err)
+      }
+    }
+    return result
+  }
+
   async toggleBlock(userId, blocked, adminId, ip) {
     const user = await repo.toggleBlock(userId, blocked)
     logAdminActivity(adminId, blocked ? 'BLOCK_USER' : 'UNBLOCK_USER', 'user', userId, null, null, ip)
