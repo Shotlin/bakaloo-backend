@@ -14,7 +14,7 @@ import {
  */
 export default async function paymentsRoutes(fastify) {
   const repository = new PaymentsRepository()
-  const service = new PaymentsService(repository)
+  const service = new PaymentsService(repository, fastify)
   const controller = new PaymentsController(service)
 
   // ─── Customer routes (AUTH) ─────────────────────────────

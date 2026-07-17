@@ -682,6 +682,15 @@ export class OrdersService {
             status: order.status,
           })
         )
+
+        this.fastify?.emitDashboardNewOrder?.({
+          id: order.id,
+          order_number: order.orderNumber,
+          total: order.totalAmount,
+          payment_method: normalizedPaymentMethod,
+          delivery_mode: order.deliveryMode,
+          created_at: order.createdAt,
+        })
       }
 
       if (order.status === ORDER_STATUS.CONFIRMED) {

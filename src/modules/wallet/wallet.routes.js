@@ -20,7 +20,7 @@ import {
  */
 export default async function walletRoutes(fastify) {
   const repository = new WalletRepository()
-  const service = new WalletService(repository)
+  const service = new WalletService(repository, fastify)
   const controller = new WalletController(service)
 
   // ─── Customer routes (AUTH) ─────────────────────────────

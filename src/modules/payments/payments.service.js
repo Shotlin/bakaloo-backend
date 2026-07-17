@@ -18,7 +18,8 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
  * Payments service — Razorpay integration + payment management
  */
 export class PaymentsService {
-  constructor(repository) {
+  constructor(repository, fastify = null) {
+    this.fastify = fastify
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
     this.paymentSettingsService = new PaymentSettingsService()
@@ -217,6 +218,15 @@ export class PaymentsService {
           timelineType: 'ORDER_PLACED',
           status: 'CONFIRMED',
         }))
+
+        this.fastify?.emitDashboardNewOrder?.({
+          id: order.id,
+          order_number: order.orderNumber,
+          total: order.totalAmount,
+          payment_method: 'ONLINE',
+          delivery_mode: order.deliveryMode,
+          created_at: order.createdAt,
+        })
       }
     } catch (err) {
       logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment verify failed (non-critical)')

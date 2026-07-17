@@ -21,8 +21,9 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
  * Wallet service — business logic for digital wallet
  */
 export class WalletService {
-  constructor(repository) {
+  constructor(repository, fastify = null) {
     this.repo = repository
+    this.fastify = fastify
     this.ordersRepo = new OrdersRepository()
     this.paymentSettingsService = new PaymentSettingsService()
     this.walletSettingsService = new WalletSettingsService()
@@ -506,6 +507,15 @@ export class WalletService {
           timelineType: 'ORDER_PLACED',
           status: 'CONFIRMED',
         }))
+
+        this.fastify?.emitDashboardNewOrder?.({
+          id: order.id,
+          order_number: order.orderNumber,
+          total: order.totalAmount,
+          payment_method: 'WALLET',
+          delivery_mode: order.deliveryMode,
+          created_at: order.createdAt,
+        })
       } catch (notifErr) {
         logger.warn({ err: notifErr.message, orderId }, 'Notification after wallet pay failed (non-critical)')
       }
