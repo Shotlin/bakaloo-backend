@@ -118,9 +118,15 @@ export class ShopProductsController {
     )
 
     if (!result.success) {
-      return reply
-        .code(this._statusForCode(result.code))
-        .send(error(result.message, result.code))
+      const body = error(result.message, result.code)
+      // Duplicate-add case: the dashboard needs the existing row's id to
+      // offer a direct "edit existing product" link instead of a dead-end
+      // error. Left out of the shared `error()` helper (used by every
+      // other endpoint) so this one extra field doesn't ripple elsewhere.
+      if (result.code === 'SHOP_PRODUCT_DUPLICATE' && result.existingId) {
+        body.existingId = result.existingId
+      }
+      return reply.code(this._statusForCode(result.code)).send(body)
     }
 
     return reply.code(201).send(success(result.data, 'Shop product created'))

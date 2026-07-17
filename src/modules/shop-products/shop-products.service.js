@@ -493,6 +493,7 @@ export class ShopProductsService {
         success: false,
         message: 'This product is already listed for the shop',
         code: 'SHOP_PRODUCT_DUPLICATE',
+        existingId: existing.id,
       }
     }
 

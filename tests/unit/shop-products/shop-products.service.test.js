@@ -182,6 +182,9 @@ describe('ShopProductsService.create', () => {
       success: false,
       message: expect.any(String),
       code: 'SHOP_PRODUCT_DUPLICATE',
+      // The dashboard's duplicate-add banner links straight to editing the
+      // existing row, so the response carries its id alongside the error.
+      existingId: 'existing-row',
     })
     expect(repo.create).not.toHaveBeenCalled()
   })
