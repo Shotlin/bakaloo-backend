@@ -58,17 +58,38 @@ export class WalletService {
 
   /**
    * Admin: get all transactions across all users (paginated, filterable)
+   *
+   * `filters.userId` accepts either an exact user UUID (existing behavior)
+   * or an Indian mobile number, resolved to the matching user's id via
+   * `findUserByPhone` — the wallet search box only exposes a single free-text
+   * field, so this needs to detect which shape was pasted in. Anything that
+   * matches neither shape can never match a real user/wallet, so it short-
+   * circuits to an empty result instead of letting an invalid-UUID string
+   * reach Postgres and 500 the whole page.
    */
   async getAdminTransactions(filters = {}) {
     const page = filters.page || 1
     const limit = filters.limit || 20
     const offset = (page - 1) * limit
 
+    let resolvedUserId = filters.userId || undefined
+    if (resolvedUserId) {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedUserId)
+      if (!isUuid) {
+        const isPhone = /^[6-9]\d{9}$/.test(resolvedUserId)
+        const user = isPhone ? await this.repo.findUserByPhone(resolvedUserId) : null
+        if (!user) {
+          return { transactions: [], pagination: buildPagination({ page, limit, total: 0 }) }
+        }
+        resolvedUserId = user.id
+      }
+    }
+
     const { transactions, total } = await this.repo.getAdminTransactions({
       limit,
       offset,
       type: filters.type,
-      userId: filters.userId,
+      userId: resolvedUserId,
     })
 
     return {

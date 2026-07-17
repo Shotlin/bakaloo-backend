@@ -3,7 +3,12 @@ import { query, getClient } from '../../../config/database.js'
 export class AdminCustomersRepository {
   async findAll({ offset, limit, search, status, sortBy = 'created_at', sortOrder = 'DESC' }) {
     const params = []
-    const clauses = ["u.role = 'CUSTOMER'"]
+    // A user who registered as a customer and later also signed up as a
+    // rider (via OTP in the rider app, which overwrites users.role to
+    // 'RIDER') must still show up here — they can place orders regardless
+    // of which app they most recently logged into. Anyone with real order
+    // history counts as a customer even if role now reads 'RIDER'.
+    const clauses = [`(u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id))`]
     let idx = 1
 
     if (search) {
@@ -43,6 +48,16 @@ export class AdminCustomersRepository {
       params
     )
 
+    // Real daily-active count — anyone matching the current filters who has
+    // made an authenticated request in the last 24h (stamped by the
+    // `authenticate` preHandler). Replaces the old client-side "not
+    // blocked" proxy the dashboard used to show as "Active".
+    const activeTodayRes = await query(
+      `SELECT COUNT(*)::int AS active_today FROM users u
+       WHERE ${where} AND u.last_active_at >= NOW() - INTERVAL '24 hours'`,
+      params
+    )
+
     const total = countRes.rows[0].total
     const page = Math.floor(offset / limit) + 1
 
@@ -52,6 +67,7 @@ export class AdminCustomersRepository {
         wallet_balance: parseFloat(r.wallet_balance || 0),
         total_spent: parseFloat(r.total_spent || 0),
       })),
+      activeToday: activeTodayRes.rows[0].active_today,
       pagination: {
         page,
         limit,
@@ -89,7 +105,7 @@ export class AdminCustomersRepository {
                 COUNT(*) FILTER (WHERE status = 'REFUNDED')::int AS returned_orders
          FROM orders GROUP BY user_id
        ) o_status ON o_status.user_id = u.id
-       WHERE u.id = $1 AND u.role = 'CUSTOMER'`,
+       WHERE u.id = $1 AND (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id))`,
       [id]
     )
     if (!customer) return null
@@ -151,7 +167,7 @@ export class AdminCustomersRepository {
          SELECT user_id, SUM(total_amount) AS total_spent, COUNT(*)::int AS order_count, AVG(total_amount) AS avg_order
          FROM orders WHERE status = 'DELIVERED' GROUP BY user_id
        ) o ON o.user_id = u.id
-       WHERE u.role = 'CUSTOMER'
+       WHERE (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id))
        ORDER BY ltv DESC NULLS LAST
        LIMIT 100`
     )
@@ -172,7 +188,7 @@ export class AdminCustomersRepository {
          SELECT user_id, MAX(created_at) AS last_order_at, COUNT(*)::int AS order_count, SUM(total_amount) AS total_spent
          FROM orders WHERE status = 'DELIVERED' GROUP BY user_id HAVING COUNT(*) >= 2
        ) o ON o.user_id = u.id
-       WHERE u.role = 'CUSTOMER' AND u.is_active = true
+       WHERE (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id)) AND u.is_active = true
          AND o.last_order_at < NOW() - make_interval(days => $1)
        ORDER BY o.total_spent DESC`,
       [days]
@@ -193,7 +209,7 @@ export class AdminCustomersRepository {
                 AVG(total_amount) AS avg_order, MAX(created_at) AS last_order_at
          FROM orders WHERE status = 'DELIVERED' GROUP BY user_id HAVING COUNT(*) >= $1
        ) o ON o.user_id = u.id
-       WHERE u.role = 'CUSTOMER' AND u.is_active = true
+       WHERE (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id)) AND u.is_active = true
        ORDER BY o.total_spent DESC`,
       [minOrders]
     )
@@ -244,7 +260,7 @@ export class AdminCustomersRepository {
          SELECT user_id, COUNT(*)::int AS order_count, SUM(total_amount) AS total_spent
          FROM orders WHERE status != 'CANCELLED' GROUP BY user_id
        ) o ON o.user_id = u.id
-       WHERE u.role = 'CUSTOMER'
+       WHERE (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id))
        ORDER BY u.created_at DESC`
     )
     return rows

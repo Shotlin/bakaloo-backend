@@ -69,6 +69,26 @@ async function authPlugin(fastify) {
         [request.user.id]
       )
 
+      // Daily-active-customer stamp — fire-and-forget (never awaited) and
+      // throttled at the SQL level (skip if stamped within the last 10
+      // minutes) so this doesn't turn into a write on every single
+      // authenticated request platform-wide. Wrapped in a synchronous
+      // try/catch (not just a trailing .catch()) because `query()` isn't
+      // guaranteed to return a thenable in every context this decorator
+      // runs in — this must never affect the auth decision or add latency
+      // to the request it's riding on.
+      try {
+        query(
+          `UPDATE users SET last_active_at = NOW()
+           WHERE id = $1 AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL '10 minutes')`,
+          [request.user.id]
+        ).catch((err) => {
+          logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
+        })
+      } catch (err) {
+        logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
+      }
+
       // ── 1. Blocked-account gate ─────────────────────────────────
       if (rows.length > 0 && rows[0].is_blocked) {
         return reply.code(403).send({
