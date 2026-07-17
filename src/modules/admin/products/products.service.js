@@ -52,12 +52,19 @@ export class AdminProductsService {
     }
   }
 
-  async bulkUpdate(updates, adminId, ip) {
-    const results = await repo.bulkUpdate(updates)
+  async bulkUpdate(updates, propagateToShops, adminId, ip) {
+    const { results, shopProductsUpdated } = await repo.bulkUpdate(updates, propagateToShops)
     await cacheDeletePattern('products:*')
     await cacheDeletePattern('categories:*')
-    logAdminActivity(adminId, 'BULK_UPDATE_PRODUCTS', 'product', null, null, { count: results.length }, ip)
-    return results
+    if (shopProductsUpdated > 0) {
+      // Broad invalidation (not per-shop) since a propagated price change
+      // can touch many shops in one batch — matches the simplicity of the
+      // products:* clear above.
+      await cacheDeletePattern('bakaloo:shop-products:v1:*')
+    }
+    logAdminActivity(adminId, 'BULK_UPDATE_PRODUCTS', 'product', null, null,
+      { count: results.length, propagateToShops, shopProductsUpdated }, ip)
+    return { results, shopProductsUpdated }
   }
 
   async duplicate(productId, adminId, ip) {

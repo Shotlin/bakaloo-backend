@@ -71,17 +71,27 @@ export class AdminProductsRepository {
     return rows
   }
 
-  async bulkUpdate(updates) {
+  /**
+   * @param {Array<object>} updates
+   * @param {boolean} propagateToShops - When true, any product whose `price`
+   *   is included in this batch also has that price written to every
+   *   `shop_products` row selling it (Req: master-catalog quick-edit "push
+   *   to stores" toggle). Left false, master and per-shop prices stay fully
+   *   independent, matching existing behavior.
+   */
+  async bulkUpdate(updates, propagateToShops = false) {
     const client = await getClient()
     try {
       await client.query('BEGIN')
       const results = []
+      let shopProductsUpdated = 0
       for (const u of updates) {
         const sets = []
         const params = []
         let idx = 1
         if (u.price !== undefined) { sets.push(`price = $${idx++}`); params.push(u.price) }
         if (u.sale_price !== undefined) { sets.push(`sale_price = $${idx++}`); params.push(u.sale_price) }
+        if (u.stock_quantity !== undefined) { sets.push(`stock_quantity = $${idx++}`); params.push(u.stock_quantity) }
         if (u.category_id !== undefined) { sets.push(`category_id = $${idx++}`); params.push(u.category_id) }
         if (u.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(u.is_active) }
         if (sets.length === 0) continue
@@ -93,9 +103,18 @@ export class AdminProductsRepository {
           params
         )
         if (rows[0]) results.push(rows[0])
+
+        if (propagateToShops && u.price !== undefined && rows[0]) {
+          const { rowCount } = await client.query(
+            `UPDATE shop_products SET price = $1, updated_at = NOW()
+             WHERE product_id = $2 AND deleted_at IS NULL`,
+            [u.price, u.id]
+          )
+          shopProductsUpdated += rowCount
+        }
       }
       await client.query('COMMIT')
-      return results
+      return { results, shopProductsUpdated }
     } catch (err) {
       await client.query('ROLLBACK')
       throw err

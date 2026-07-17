@@ -49,14 +49,23 @@ export const bulkUpdateSchema = {
           type: 'object',
           required: ['id'],
           properties: {
-            id: { type: 'integer' },
+            // Bug fix: products.id is UUID, not integer — this previously
+            // rejected every real request (Activate/Deactivate/quick-edit
+            // all call this endpoint with real product ids).
+            id: { type: 'string', format: 'uuid' },
             price: { type: 'number', minimum: 0 },
             sale_price: { type: ['number', 'null'], minimum: 0 },
-            category_id: { type: 'integer' },
+            stock_quantity: { type: 'integer', minimum: 0 },
+            // Same bug as id above — categories.id is also UUID.
+            category_id: { type: 'string', format: 'uuid' },
             is_active: { type: 'boolean' },
           },
         },
       },
+      // Quick-edit price changes only — when true, also overwrites
+      // shop_products.price for every shop currently selling each updated
+      // product, so the storefront price matches the new master price.
+      propagate_to_shops: { type: 'boolean', default: false },
     },
   },
 }

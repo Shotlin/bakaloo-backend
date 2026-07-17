@@ -31,8 +31,16 @@ export class AdminProductsController {
   }
 
   async bulkUpdate(request, reply) {
-    const results = await svc.bulkUpdate(request.body.products, request.user.id, request.ip)
-    return success({ updated: results }, `${results.length} products updated`)
+    const { results, shopProductsUpdated } = await svc.bulkUpdate(
+      request.body.products,
+      request.body.propagate_to_shops,
+      request.user.id,
+      request.ip
+    )
+    const message = shopProductsUpdated > 0
+      ? `${results.length} products updated (${shopProductsUpdated} shop listings synced)`
+      : `${results.length} products updated`
+    return success({ updated: results, shop_products_updated: shopProductsUpdated }, message)
   }
 
   async duplicate(request, reply) {
