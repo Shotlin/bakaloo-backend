@@ -75,29 +75,30 @@ function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
 }
 
 /**
- * Customer-scoped price resolution. A customer-facing response must show
- * the price they'll actually be charged — the shop's own `shop_products`
- * listing — never the master `products.price`, which is only the
- * admin-facing catalog/MRP figure and can legitimately differ per shop.
+ * Customer-scoped price/stock resolution. A customer-facing response must
+ * show the price they'll actually be charged and the stock the shop
+ * actually has — the shop's own `shop_products` listing — never the
+ * master `products.price`/`products.stock_quantity`, which are only the
+ * admin-facing catalog/MRP figures and can legitimately differ per shop.
  *
  * LEFT JOIN LATERAL picks the single best-matching shop_products row
  * (cheapest among the customer's allocated shops that actually carry it)
- * and pulls BOTH price and sale_price from that same row, so the two
- * never mismatch across different shops. `allocatedShopIds = null`
- * (admin/anonymous callers) falls back to the master price unchanged —
+ * and pulls price, sale_price AND stock_quantity from that same row, so
+ * none of them mismatch across different shops. `allocatedShopIds = null`
+ * (admin/anonymous callers) falls back to the master values unchanged —
  * this only changes customer-facing (mobile app) responses.
  *
  * When a customer is allocated to exactly one shop carrying the product —
  * the only case a bare add-to-cart resolves without an explicit shop pick
  * (see cart.service.js `_resolveCartIdentity()` Path 3, which rejects
  * with CART_SHOP_REQUIRED for multi-shop matches) — this is EXACTLY the
- * price that will be charged. In the rarer multi-shop case it shows the
- * cheapest option, a defensible "starting from ₹X" display.
+ * price/stock that will be charged/deducted. In the rarer multi-shop case
+ * it shows the cheapest option, a defensible "starting from ₹X" display.
  *
  * @param {string[]|null} allocatedShopIds
  * @param {any[]} params - Mutated; the array of $-placeholder values.
  * @param {number} startIdx - Next available $-placeholder index.
- * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, nextIdx: number }}
+ * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, nextIdx: number }}
  */
 function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
   if (!Array.isArray(allocatedShopIds) || allocatedShopIds.length === 0) {
@@ -105,6 +106,7 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
       joinSql: '',
       priceExpr: 'p.price',
       salePriceExpr: 'p.sale_price',
+      stockExpr: 'p.stock_quantity',
       nextIdx: startIdx,
     }
   }
@@ -112,7 +114,8 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
   const idx = startIdx
   return {
     joinSql: `LEFT JOIN LATERAL (
-      SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price
+      SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price,
+             sp.stock_quantity AS sp_stock_quantity
         FROM shop_products sp
        WHERE sp.product_id = p.id
          AND sp.shop_id = ANY($${idx}::uuid[])
@@ -122,6 +125,7 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
     ) shop_price ON true`,
     priceExpr: 'COALESCE(shop_price.sp_price, p.price)',
     salePriceExpr: 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
+    stockExpr: 'COALESCE(shop_price.sp_stock_quantity, p.stock_quantity)',
     nextIdx: startIdx + 1,
   }
 }
@@ -161,15 +165,38 @@ export class ProductsRepository {
     const params = []
     let paramIdx = 1
 
+    // Customer scoping (Req 1.5, 4.5, 11.5)
+    const visibility = buildCustomerVisibilitySnippet(
+      allocatedShopIds,
+      params,
+      paramIdx
+    )
+    if (visibility.sql) {
+      // Strip the leading "AND " — we add it back via the conditions join
+      conditions.push(visibility.sql.replace(/^AND\s+/, ''))
+      paramIdx = visibility.nextIdx
+    }
+
+    // Customer-facing price/stock must be the shop's own listing, not the
+    // master catalog — see buildShopPriceJoin() docstring. No-ops (falls
+    // back to p.price/p.sale_price/p.stock_quantity) for admin/anonymous
+    // callers. Computed before the stock/status filters below so they can
+    // reference shopPrice.stockExpr instead of the raw master column.
+    // Note: minPrice/maxPrice still filter on the master p.price —
+    // changing filter semantics is a separate, riskier scope than fixing
+    // the DISPLAYED price and isn't part of the reported bug.
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx)
+    paramIdx = shopPrice.nextIdx
+
     // Status filter (for admin dashboard)
     if (status === 'active') {
       conditions.push('p.is_active = true')
     } else if (status === 'inactive') {
       conditions.push('p.is_active = false')
     } else if (status === 'out_of_stock') {
-      conditions.push('p.stock_quantity = 0')
+      conditions.push(`${shopPrice.stockExpr} = 0`)
     } else if (status === 'low_stock') {
-      conditions.push('p.stock_quantity > 0 AND p.stock_quantity <= p.low_stock_threshold')
+      conditions.push(`${shopPrice.stockExpr} > 0 AND ${shopPrice.stockExpr} <= p.low_stock_threshold`)
     } else if (status === 'on_sale') {
       conditions.push('p.sale_price IS NOT NULL AND p.sale_price < p.price')
     }
@@ -196,31 +223,10 @@ export class ProductsRepository {
     }
 
     if (inStock === true || inStock === 'true') {
-      conditions.push('p.stock_quantity > 0')
+      conditions.push(`${shopPrice.stockExpr} > 0`)
     } else if (inStock === false || inStock === 'false') {
-      conditions.push('p.stock_quantity = 0')
+      conditions.push(`${shopPrice.stockExpr} = 0`)
     }
-
-    // Customer scoping (Req 1.5, 4.5, 11.5)
-    const visibility = buildCustomerVisibilitySnippet(
-      allocatedShopIds,
-      params,
-      paramIdx
-    )
-    if (visibility.sql) {
-      // Strip the leading "AND " — we add it back via the conditions join
-      conditions.push(visibility.sql.replace(/^AND\s+/, ''))
-      paramIdx = visibility.nextIdx
-    }
-
-    // Customer-facing price must be the shop's own listing price, not the
-    // master catalog price — see buildShopPriceJoin() docstring. No-ops
-    // (falls back to p.price/p.sale_price) for admin/anonymous callers.
-    // Note: minPrice/maxPrice above still filter on the master p.price —
-    // changing filter semantics is a separate, riskier scope than fixing
-    // the DISPLAYED price and isn't part of the reported bug.
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx)
-    paramIdx = shopPrice.nextIdx
 
     const sortMap = {
       price_asc: 'p.price ASC',
@@ -249,7 +255,7 @@ export class ProductsRepository {
         `WITH ranked AS (
           SELECT
             p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-            p.stock_quantity, p.unit, p.thumbnail_url,
+            ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
             p.is_active, p.is_featured, p.total_sold,
             p.sku, p.barcode, p.low_stock_threshold, p.category_id,
             p.product_family_id, p.option_label, p.option_sort_order,
@@ -294,6 +300,7 @@ export class ProductsRepository {
               ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
             ) AS rn
           FROM products p
+          ${shopPrice.joinSql}
           WHERE ${where}
         )
         SELECT COUNT(*)::int AS total FROM ranked WHERE rn = 1`,
@@ -314,7 +321,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT
         p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-        p.stock_quantity, p.unit, p.thumbnail_url,
+        ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
         p.is_active, p.is_featured, p.total_sold,
         p.sku, p.barcode, p.low_stock_threshold, p.category_id,
         p.product_family_id, p.option_label, p.option_sort_order,
@@ -329,13 +336,13 @@ export class ProductsRepository {
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        ${shopPrice.joinSql}
        WHERE ${where}
-       ORDER BY ${orderBy.replace('p.price', 'price')}
+       ORDER BY ${orderBy.replace('p.price', 'price').replace('p.stock_quantity', 'stock_quantity')}
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
       [...params, limit, offset]
     )
 
     const { rows: countRows } = await query(
-      `SELECT COUNT(*)::int AS total FROM products p WHERE ${where}`,
+      `SELECT COUNT(*)::int AS total FROM products p ${shopPrice.joinSql} WHERE ${where}`,
       params
     )
 
@@ -403,7 +410,7 @@ export class ProductsRepository {
           p.slug,
           ${shopPrice.priceExpr} AS price,
           ${shopPrice.salePriceExpr} AS sale_price,
-          p.stock_quantity,
+          ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
           c.name AS category_name,
@@ -431,7 +438,7 @@ export class ProductsRepository {
           p.slug,
           ${shopPrice.priceExpr} AS price,
           ${shopPrice.salePriceExpr} AS sale_price,
-          p.stock_quantity,
+          ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
           c.name AS category_name,
@@ -563,7 +570,7 @@ export class ProductsRepository {
 
       const { rows } = await query(
         `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-                p.stock_quantity, p.unit, p.thumbnail_url,
+                ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
                 c.name AS category_name,
                 p.is_featured, p.total_sold,
                 GREATEST(
@@ -611,7 +618,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url,
+              ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
               c.name AS category_name, p.total_sold,
               p.product_family_id, p.option_label, p.option_sort_order,
               p.is_default_option, p.food_type, p.origin_tag,
@@ -715,7 +722,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.cost_price, p.category_id, p.stock_quantity, p.unit,
+              p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
@@ -765,7 +772,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.cost_price, p.category_id, p.stock_quantity, p.unit,
+              p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
@@ -819,7 +826,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url, p.total_sold,
+              ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url, p.total_sold,
               p.product_family_id, p.option_label, p.option_sort_order,
               p.is_default_option, p.food_type, p.origin_tag,
               p.custom_badges, p.display_delivery_minutes,
@@ -829,7 +836,7 @@ export class ProductsRepository {
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        ${shopPrice.joinSql}
        WHERE p.is_active = true
-         AND p.stock_quantity > 0
+         AND ${shopPrice.stockExpr} > 0
          AND p.category_id = $1
          AND p.id != $2
          ${visibility.sql}
@@ -897,7 +904,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url,
+              ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
               p.brand, p.total_sold, p.avg_rating, p.rating_count,
               c.name AS category_name,
               p.product_family_id, p.option_label, p.option_sort_order,
@@ -910,7 +917,7 @@ export class ProductsRepository {
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        ${shopPrice.joinSql}
        WHERE p.is_active = true
-         AND p.stock_quantity > 0
+         AND ${shopPrice.stockExpr} > 0
          AND ${categoryPredicate}
          AND p.id != $2
          ${visibility.sql}
@@ -957,16 +964,20 @@ export class ProductsRepository {
         const shop = shopData[product.id]
         if (shop) {
           Object.assign(option, shop)
-          // Customer-facing price must be the shop's own listing — the
-          // Object.assign above only added sp_price/sp_sale_price as
-          // EXTRA keys alongside the master price/sale_price already on
-          // `option`, so a caller reading the conventional `price` field
-          // got the wrong (master) value. Overwrite, then drop the now-
-          // redundant sp_* keys so there's exactly one unambiguous price.
+          // Customer-facing price/stock must be the shop's own listing —
+          // the Object.assign above only added sp_price/sp_sale_price/
+          // sp_stock_quantity as EXTRA keys alongside the master price/
+          // sale_price/stock_quantity already on `option`, so a caller
+          // reading the conventional field names got the wrong (master)
+          // values. Overwrite, then drop the now-redundant sp_* keys so
+          // there's exactly one unambiguous value per field.
           option.price = shop.sp_price ?? option.price
           option.sale_price = shop.sp_sale_price ?? null
+          option.stock_quantity = shop.sp_stock_quantity ?? option.stock_quantity
           delete option.sp_price
           delete option.sp_sale_price
+          delete option.sp_stock_quantity
+          delete option.sp_is_available
         }
       }
       return {
@@ -1004,10 +1015,13 @@ export class ProductsRepository {
       const shopData = await this._fetchShopDataForProducts(productIds, allocatedShopIds)
 
       // Filter out options with no available shop_product and enrich the
-      // rest. Same price-overwrite as the standalone-product branch above
-      // — the merge alone leaves sp_price/sp_sale_price as extra keys
-      // beside the master price/sale_price, which is exactly the bug that
-      // let a variant selector show the wrong price.
+      // rest. Same price/stock-overwrite as the standalone-product branch
+      // above — the merge alone leaves sp_price/sp_sale_price/
+      // sp_stock_quantity as extra keys beside the master price/sale_price/
+      // stock_quantity, which is exactly the bug that let a variant
+      // selector show the wrong price AND the wrong stock (a shop-listed,
+      // in-stock item could show "not available" because of the master
+      // product's unrelated stock number).
       const enrichedOptions = options
         .filter(o => shopData[o.id])
         .map(o => {
@@ -1015,8 +1029,11 @@ export class ProductsRepository {
           const merged = { ...o, ...shop }
           merged.price = shop.sp_price ?? merged.price
           merged.sale_price = shop.sp_sale_price ?? null
+          merged.stock_quantity = shop.sp_stock_quantity ?? merged.stock_quantity
           delete merged.sp_price
           delete merged.sp_sale_price
+          delete merged.sp_stock_quantity
+          delete merged.sp_is_available
           return merged
         })
 
@@ -1294,7 +1311,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.thumbnail_url,
-              ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price, p.unit, p.stock_quantity,
+              ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price, p.unit, ${shopPrice.stockExpr} AS stock_quantity,
               (${shopPrice.priceExpr} - ${shopPrice.salePriceExpr}) AS discount
        FROM products p
        ${shopPrice.joinSql}

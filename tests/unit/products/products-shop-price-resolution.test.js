@@ -6,6 +6,12 @@
 // listing priced at ₹150 while the master catalog said ₹290 for the same
 // variant — a data-entry mistake that this pricing-pipeline bug made much
 // harder to spot, since the browse screens never revealed the mismatch).
+//
+// The same class of bug existed for stock_quantity: every customer-facing
+// query displayed the master products.stock_quantity, so a product a shop
+// had actually stocked (or actually run out of) could show the wrong
+// availability in search/browse purely because of the unrelated master
+// catalog number. Fixed alongside price via the same shop_price join.
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
@@ -73,6 +79,59 @@ describe('ProductsRepository — customer-facing price resolution', () => {
   })
 })
 
+describe('ProductsRepository — customer-facing stock resolution', () => {
+  it('findById() resolves stock_quantity from shop_products when allocatedShopIds is set', async () => {
+    const repo = new ProductsRepository()
+    await repo.findById('product-1', [SHOP_A])
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) AS stock_quantity/)
+  })
+
+  it('findById() falls back to master stock_quantity for admin/anonymous callers', async () => {
+    const repo = new ProductsRepository()
+    await repo.findById('product-1', null)
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/p\.stock_quantity AS stock_quantity/)
+  })
+
+  it('findMany() out_of_stock/low_stock/inStock filters reference the resolved shop stock, not the raw master column, when customer-scoped', async () => {
+    const repo = new ProductsRepository()
+    await repo.findMany({ allocatedShopIds: [SHOP_A], status: 'out_of_stock' })
+    let [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) = 0/)
+
+    queryMock.mockClear()
+    await repo.findMany({ allocatedShopIds: [SHOP_A], inStock: true })
+    ;[sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+  })
+
+  it('findMany() count query joins shop_products too, so a customer-scoped stock filter does not reference an undefined alias', async () => {
+    const repo = new ProductsRepository()
+    await repo.findMany({ allocatedShopIds: [SHOP_A], status: 'out_of_stock' })
+
+    // [0] = data query, [1] = count query — both must carry the LATERAL
+    // join whenever the WHERE clause references shop_price.*.
+    const [countSql] = queryMock.mock.calls[1]
+    expect(countSql).toContain('LEFT JOIN LATERAL')
+    expect(countSql).toMatch(/shop_price\.sp_stock_quantity/)
+  })
+
+  it('findRelated()/findPairWith() require shop stock > 0, not master stock, when customer-scoped', async () => {
+    const repo = new ProductsRepository()
+    await repo.findRelated('product-1', 'cat-1', 10, [SHOP_A])
+    let [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+
+    queryMock.mockClear()
+    await repo.findPairWith('product-1', 'cat-1', 10, [SHOP_A])
+    ;[sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+  })
+})
+
 describe('ProductsRepository.findFamilyOptions — overwrites price, never leaves both fields', () => {
   it('overwrites price/sale_price from the matched shop listing and drops the redundant sp_* keys (standalone product)', async () => {
     const repo = new ProductsRepository()
@@ -96,6 +155,12 @@ describe('ProductsRepository.findFamilyOptions — overwrites price, never leave
     expect(option.sale_price).toBeNull()
     expect(option).not.toHaveProperty('sp_price')
     expect(option).not.toHaveProperty('sp_sale_price')
+    // A shop's own stock (98) must win over whatever the master row had —
+    // a shop with real stock showing "not available" because of an
+    // unrelated master stock number is the other half of this bug.
+    expect(option.stock_quantity).toBe(98)
+    expect(option).not.toHaveProperty('sp_stock_quantity')
+    expect(option).not.toHaveProperty('sp_is_available')
   })
 
   it('overwrites price for every option in a family, not just the first', async () => {
@@ -131,5 +196,11 @@ describe('ProductsRepository.findFamilyOptions — overwrites price, never leave
     expect(byId['product-500g'].price).toBe('150.00')
     expect(byId['product-100g']).not.toHaveProperty('sp_price')
     expect(byId['product-500g']).not.toHaveProperty('sp_price')
+    // Same crossing bug, for stock: each shop listing's own stock number
+    // must come through per-option, never the sibling's or the master's.
+    expect(byId['product-100g'].stock_quantity).toBe(100)
+    expect(byId['product-500g'].stock_quantity).toBe(98)
+    expect(byId['product-100g']).not.toHaveProperty('sp_stock_quantity')
+    expect(byId['product-500g']).not.toHaveProperty('sp_stock_quantity')
   })
 })
