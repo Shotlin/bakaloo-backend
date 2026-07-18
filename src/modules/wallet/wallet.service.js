@@ -721,16 +721,26 @@ export class WalletService {
    * Admin: resolve a User ID or phone number to the matching user's basic
    * info — used by the Credit/Debit dialogs so an admin sees who they're
    * about to act on (name + phone) before submitting, instead of pasting
-   * a bare UUID blind with no confirmation.
+   * a bare UUID blind with no confirmation. Also carries the user's recent
+   * actually-PAID order amounts, so the Credit dialog can warn when the
+   * amount an admin is about to credit doesn't match any real paid order —
+   * the mistake that lets a customer get refunded for an order that was
+   * never actually paid for (e.g. a COD order cancelled before delivery,
+   * or an ONLINE order whose payment window expired unpaid).
    */
   async resolveUser(input) {
     if (!input) return null
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input)
-    if (isUuid) {
-      return this.repo.findUserById(input)
-    }
     const isPhone = /^[6-9]\d{9}$/.test(input)
-    return isPhone ? this.repo.findUserByPhone(input) : null
+    const user = isUuid
+      ? await this.repo.findUserById(input)
+      : isPhone
+        ? await this.repo.findUserByPhone(input)
+        : null
+    if (!user) return null
+
+    const recentPaidOrders = await this.repo.getRecentPaidOrderAmounts(user.id)
+    return { ...user, recentPaidOrders }
   }
 
   /**

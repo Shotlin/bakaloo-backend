@@ -310,6 +310,26 @@ export class WalletRepository {
   }
 
   /**
+   * A user's most recent orders that were actually paid for — powers the
+   * Credit Wallet dialog's "does this amount match a real paid order"
+   * warning, so an admin refunding/compensating a customer can see at a
+   * glance whether the order they have in mind was ever actually paid
+   * (as opposed to a COD order that was cancelled before cash changed
+   * hands, or an ONLINE order whose payment window simply expired).
+   */
+  async getRecentPaidOrderAmounts(userId, limit = 10) {
+    const { rows } = await query(
+      `SELECT order_number, total_amount
+       FROM orders
+       WHERE user_id = $1 AND payment_status = 'PAID'
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [userId, limit]
+    )
+    return rows.map((r) => ({ orderNumber: r.order_number, amount: parseFloat(r.total_amount) }))
+  }
+
+  /**
    * Get ALL wallet transactions across all users (admin view)
    * Joins users table to show customer info
    */
