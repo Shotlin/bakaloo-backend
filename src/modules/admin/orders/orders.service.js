@@ -40,15 +40,22 @@ export class AdminOrdersService {
    * Restore stock for every line item of an order being cancelled
    * pre-delivery (Requirements 23 — CANCELLATION_RESTORE). Best-effort: a
    * restore failure must never block the cancellation response, since the
-   * order's CANCELLED status has already committed by the time this runs.
+   * order's CANCELLED status has already committed by the time this runs —
+   * but the result IS returned (previously only logged) so the caller can
+   * surface a warning instead of silently reporting "Order cancelled" when
+   * stock wasn't actually restored (e.g. the listing was deleted between
+   * order placement and cancellation).
+   *
+   * @returns {Promise<{ restoredCount: number, failedItems: Array<{shopProductId: string, productName: string|null, reason: string}> }>}
    */
   async _restoreStockForCancellation(orderId, shopId, adminId) {
     try {
       const items = await this.repository.getOrderItems(orderId)
       const client = await getClient()
+      let result
       try {
         await client.query('BEGIN')
-        await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
+        result = await this.shopProductsRepo.restoreStockForCancelledOrder(client, {
           orderId,
           items,
           source: 'DASHBOARD',
@@ -66,11 +73,16 @@ export class AdminOrdersService {
       if (shopId) {
         await new ShopProductsService(this.shopProductsRepo).invalidateShopCache(shopId)
       }
+      return result
     } catch (err) {
       logger.warn(
         { err: err.message, orderId },
         'Stock restore failed during admin cancellation (non-blocking)'
       )
+      return {
+        restoredCount: 0,
+        failedItems: [{ shopProductId: null, productName: null, reason: err.message }],
+      }
     }
   }
 
@@ -438,7 +450,7 @@ export class AdminOrdersService {
     // understated real available stock. CANCELLED is only reachable
     // pre-delivery (never from DELIVERED), so the product never physically
     // left the store and restoring is always correct here.
-    await this._restoreStockForCancellation(orderId, order.shop_id, adminId)
+    const stockRestoreResult = await this._restoreStockForCancellation(orderId, order.shop_id, adminId)
 
     // Refund only makes sense once money has actually changed hands — most
     // cancellations happen on PENDING/CONFIRMED orders that were never
@@ -510,7 +522,19 @@ export class AdminOrdersService {
     // until they manually refreshed.
     this._emitOrderStatus(order, 'CANCELLED')
 
-    return { orderId, status: 'CANCELLED', refundAmount, refundTo: appliedRefundTo }
+    const stockRestoreWarning = stockRestoreResult.failedItems.length > 0
+      ? `Stock could not be restored for: ${stockRestoreResult.failedItems
+          .map((f) => f.productName || 'an item')
+          .join(', ')}. Please check inventory manually.`
+      : null
+
+    return {
+      orderId,
+      status: 'CANCELLED',
+      refundAmount,
+      refundTo: appliedRefundTo,
+      ...(stockRestoreWarning && { stockRestoreWarning }),
+    }
   }
 
   async bulkUpdateStatus(orderIds, newStatus, adminId, ip) {

@@ -813,6 +813,33 @@ describe('CartService.validateCart', () => {
     for (const [, lines] of result.groupedByShop) flattened.push(...lines)
     expect(flattened).toHaveLength(result.items.length)
   })
+
+  // Regression: a shop with no price set for a listing (shop_products.price
+  // IS NULL — the schema allows it) previously fell through to the master
+  // catalog price in _effectivePrice()/_listPrice() instead of being
+  // treated as unavailable, silently charging a price the shop never set.
+  it('rejects with SHOP_PRICE_NOT_SET when sp_price is null, never falling back to the master price', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: null, product_price: 999 }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.validateCart(USER_ID)
+
+    expect(result.valid).toBe(false)
+    expect(result.items).toEqual([])
+    expect(result.failed).toEqual([
+      expect.objectContaining({
+        productId: PROD_1,
+        shopId: SHOP_A,
+        code: 'SHOP_PRICE_NOT_SET',
+      }),
+    ])
+  })
 })
 
 

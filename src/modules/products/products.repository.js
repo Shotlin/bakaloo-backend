@@ -75,6 +75,58 @@ function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
 }
 
 /**
+ * Customer-scoped price resolution. A customer-facing response must show
+ * the price they'll actually be charged — the shop's own `shop_products`
+ * listing — never the master `products.price`, which is only the
+ * admin-facing catalog/MRP figure and can legitimately differ per shop.
+ *
+ * LEFT JOIN LATERAL picks the single best-matching shop_products row
+ * (cheapest among the customer's allocated shops that actually carry it)
+ * and pulls BOTH price and sale_price from that same row, so the two
+ * never mismatch across different shops. `allocatedShopIds = null`
+ * (admin/anonymous callers) falls back to the master price unchanged —
+ * this only changes customer-facing (mobile app) responses.
+ *
+ * When a customer is allocated to exactly one shop carrying the product —
+ * the only case a bare add-to-cart resolves without an explicit shop pick
+ * (see cart.service.js `_resolveCartIdentity()` Path 3, which rejects
+ * with CART_SHOP_REQUIRED for multi-shop matches) — this is EXACTLY the
+ * price that will be charged. In the rarer multi-shop case it shows the
+ * cheapest option, a defensible "starting from ₹X" display.
+ *
+ * @param {string[]|null} allocatedShopIds
+ * @param {any[]} params - Mutated; the array of $-placeholder values.
+ * @param {number} startIdx - Next available $-placeholder index.
+ * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, nextIdx: number }}
+ */
+function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
+  if (!Array.isArray(allocatedShopIds) || allocatedShopIds.length === 0) {
+    return {
+      joinSql: '',
+      priceExpr: 'p.price',
+      salePriceExpr: 'p.sale_price',
+      nextIdx: startIdx,
+    }
+  }
+  params.push(allocatedShopIds)
+  const idx = startIdx
+  return {
+    joinSql: `LEFT JOIN LATERAL (
+      SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price
+        FROM shop_products sp
+       WHERE sp.product_id = p.id
+         AND sp.shop_id = ANY($${idx}::uuid[])
+         AND sp.is_available = true AND sp.deleted_at IS NULL
+       ORDER BY COALESCE(sp.sale_price, sp.price) ASC
+       LIMIT 1
+    ) shop_price ON true`,
+    priceExpr: 'COALESCE(shop_price.sp_price, p.price)',
+    salePriceExpr: 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
+    nextIdx: startIdx + 1,
+  }
+}
+
+/**
  * Products repository — all SQL queries for products
  * NEVER uses SELECT * — always named columns
  *
@@ -161,6 +213,15 @@ export class ProductsRepository {
       paramIdx = visibility.nextIdx
     }
 
+    // Customer-facing price must be the shop's own listing price, not the
+    // master catalog price — see buildShopPriceJoin() docstring. No-ops
+    // (falls back to p.price/p.sale_price) for admin/anonymous callers.
+    // Note: minPrice/maxPrice above still filter on the master p.price —
+    // changing filter semantics is a separate, riskier scope than fixing
+    // the DISPLAYED price and isn't part of the reported bug.
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx)
+    paramIdx = shopPrice.nextIdx
+
     const sortMap = {
       price_asc: 'p.price ASC',
       price_desc: 'p.price DESC',
@@ -187,7 +248,7 @@ export class ProductsRepository {
       const { rows } = await query(
         `WITH ranked AS (
           SELECT
-            p.id, p.name, p.slug, p.price, p.sale_price,
+            p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
             p.stock_quantity, p.unit, p.thumbnail_url,
             p.is_active, p.is_featured, p.total_sold,
             p.sku, p.barcode, p.low_stock_threshold, p.category_id,
@@ -206,6 +267,7 @@ export class ProductsRepository {
           FROM products p
           LEFT JOIN categories c ON c.id = p.category_id
           LEFT JOIN product_families pf ON pf.id = p.product_family_id
+          ${shopPrice.joinSql}
           WHERE ${where}
         )
         SELECT id, name, slug, price, sale_price,
@@ -251,7 +313,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT
-        p.id, p.name, p.slug, p.price, p.sale_price,
+        p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
         p.stock_quantity, p.unit, p.thumbnail_url,
         p.is_active, p.is_featured, p.total_sold,
         p.sku, p.barcode, p.low_stock_threshold, p.category_id,
@@ -265,8 +327,9 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE ${where}
-       ORDER BY ${orderBy}
+       ORDER BY ${orderBy.replace('p.price', 'price')}
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
       [...params, limit, offset]
     )
@@ -324,10 +387,13 @@ export class ProductsRepository {
     )
     const visClause = visibility.sql
 
-    // $1 = prefixTsQuery, $2 = likePattern, optional $3 = shop_ids,
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+
+    // $1 = prefixTsQuery, $2 = likePattern, optional $3 = shop_ids for
+    // visibility, optional $4 = shop_ids again for price resolution,
     // then limit + offset.
-    const limitIdx = visibility.nextIdx
-    const offsetIdx = visibility.nextIdx + 1
+    const limitIdx = shopPrice.nextIdx
+    const offsetIdx = shopPrice.nextIdx + 1
 
     const sql = `
       WITH fts AS (
@@ -335,8 +401,8 @@ export class ProductsRepository {
           p.id,
           p.name,
           p.slug,
-          p.price,
-          p.sale_price,
+          ${shopPrice.priceExpr} AS price,
+          ${shopPrice.salePriceExpr} AS sale_price,
           p.stock_quantity,
           p.unit,
           p.thumbnail_url,
@@ -353,6 +419,7 @@ export class ProductsRepository {
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
         LEFT JOIN product_families pf ON pf.id = p.product_family_id
+        ${shopPrice.joinSql}
         WHERE p.is_active = true
           AND p.search_vector @@ to_tsquery('simple', $1)
           ${visClause}
@@ -362,8 +429,8 @@ export class ProductsRepository {
           p.id,
           p.name,
           p.slug,
-          p.price,
-          p.sale_price,
+          ${shopPrice.priceExpr} AS price,
+          ${shopPrice.salePriceExpr} AS sale_price,
           p.stock_quantity,
           p.unit,
           p.thumbnail_url,
@@ -380,6 +447,7 @@ export class ProductsRepository {
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
         LEFT JOIN product_families pf ON pf.id = p.product_family_id
+        ${shopPrice.joinSql}
         WHERE p.is_active = true
           AND p.id NOT IN (SELECT id FROM fts)
           AND (
@@ -489,11 +557,12 @@ export class ProductsRepository {
         params,
         params.length + 1
       )
+      const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
       params.push(limit)
-      const limitIdx = visibility.nextIdx
+      const limitIdx = shopPrice.nextIdx
 
       const { rows } = await query(
-        `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+        `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
                 p.stock_quantity, p.unit, p.thumbnail_url,
                 c.name AS category_name,
                 p.is_featured, p.total_sold,
@@ -504,6 +573,7 @@ export class ProductsRepository {
                 ) AS sim
          FROM products p
          LEFT JOIN categories c ON c.id = p.category_id
+         ${shopPrice.joinSql}
          WHERE p.is_active = true
            AND (
              similarity(p.name, $1) > 0.08
@@ -535,11 +605,12 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
     params.push(limit)
-    const limitIdx = visibility.nextIdx
+    const limitIdx = shopPrice.nextIdx
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+      `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
               c.name AS category_name, p.total_sold,
               p.product_family_id, p.option_label, p.option_sort_order,
@@ -555,6 +626,7 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE p.is_active = true AND p.is_featured = true
          ${visibility.sql}
        ORDER BY p.total_sold DESC
@@ -639,9 +711,10 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price,
+      `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
@@ -667,6 +740,7 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE p.id = $1
          ${visibility.sql}`,
       params
@@ -687,9 +761,10 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.description, p.price, p.sale_price,
+      `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
@@ -715,6 +790,7 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE p.slug = $1 AND p.is_active = true
          ${visibility.sql}`,
       params
@@ -737,11 +813,12 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
     params.push(limit)
-    const limitIdx = visibility.nextIdx
+    const limitIdx = shopPrice.nextIdx
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+      `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url, p.total_sold,
               p.product_family_id, p.option_label, p.option_sort_order,
               p.is_default_option, p.food_type, p.origin_tag,
@@ -750,6 +827,7 @@ export class ProductsRepository {
               pf.name AS family_name
        FROM products p
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE p.is_active = true
          AND p.stock_quantity > 0
          AND p.category_id = $1
@@ -813,11 +891,12 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
     params.push(limit)
-    const limitIdx = visibility.nextIdx
+    const limitIdx = shopPrice.nextIdx
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
+      `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
               p.stock_quantity, p.unit, p.thumbnail_url,
               p.brand, p.total_sold, p.avg_rating, p.rating_count,
               c.name AS category_name,
@@ -829,6 +908,7 @@ export class ProductsRepository {
        FROM products p
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
        WHERE p.is_active = true
          AND p.stock_quantity > 0
          AND ${categoryPredicate}
@@ -874,8 +954,19 @@ export class ProductsRepository {
       // Enrich with shop data if customer context
       if (Array.isArray(allocatedShopIds) && allocatedShopIds.length > 0) {
         const shopData = await this._fetchShopDataForProducts([product.id], allocatedShopIds)
-        if (shopData[product.id]) {
-          Object.assign(option, shopData[product.id])
+        const shop = shopData[product.id]
+        if (shop) {
+          Object.assign(option, shop)
+          // Customer-facing price must be the shop's own listing — the
+          // Object.assign above only added sp_price/sp_sale_price as
+          // EXTRA keys alongside the master price/sale_price already on
+          // `option`, so a caller reading the conventional `price` field
+          // got the wrong (master) value. Overwrite, then drop the now-
+          // redundant sp_* keys so there's exactly one unambiguous price.
+          option.price = shop.sp_price ?? option.price
+          option.sale_price = shop.sp_sale_price ?? null
+          delete option.sp_price
+          delete option.sp_sale_price
         }
       }
       return {
@@ -912,10 +1003,22 @@ export class ProductsRepository {
       const productIds = options.map(o => o.id)
       const shopData = await this._fetchShopDataForProducts(productIds, allocatedShopIds)
 
-      // Filter out options with no available shop_product and enrich the rest
+      // Filter out options with no available shop_product and enrich the
+      // rest. Same price-overwrite as the standalone-product branch above
+      // — the merge alone leaves sp_price/sp_sale_price as extra keys
+      // beside the master price/sale_price, which is exactly the bug that
+      // let a variant selector show the wrong price.
       const enrichedOptions = options
         .filter(o => shopData[o.id])
-        .map(o => ({ ...o, ...shopData[o.id] }))
+        .map(o => {
+          const shop = shopData[o.id]
+          const merged = { ...o, ...shop }
+          merged.price = shop.sp_price ?? merged.price
+          merged.sale_price = shop.sp_sale_price ?? null
+          delete merged.sp_price
+          delete merged.sp_sale_price
+          return merged
+        })
 
       return { family, options: enrichedOptions }
     }
@@ -1180,13 +1283,21 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    // Which PRODUCTS qualify as "on sale" stays a master-catalog/admin
+    // curation signal (p.sale_price < p.price below, unchanged) — but the
+    // price actually DISPLAYED for a qualifying product must still be the
+    // shop's own listing, same as everywhere else, so the discount shown
+    // here always matches what checkout will charge.
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
     params.push(limit)
-    const limitIdx = visibility.nextIdx
+    const limitIdx = shopPrice.nextIdx
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.thumbnail_url, p.price, p.sale_price, p.unit, p.stock_quantity,
-              (p.price - p.sale_price) AS discount
+      `SELECT p.id, p.name, p.thumbnail_url,
+              ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price, p.unit, p.stock_quantity,
+              (${shopPrice.priceExpr} - ${shopPrice.salePriceExpr}) AS discount
        FROM products p
+       ${shopPrice.joinSql}
        WHERE p.is_active = true
          AND p.sale_price IS NOT NULL
          AND p.sale_price < p.price
@@ -1212,13 +1323,18 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
+    // "cheap enough to feature here" stays a master-catalog curation
+    // filter (p.price <= 150 below, unchanged) — displayed price is the
+    // shop's own listing, same reasoning as getPriceDrops() above.
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
     params.push(limit)
-    const limitIdx = visibility.nextIdx
+    const limitIdx = shopPrice.nextIdx
 
     const { rows } = await query(
-      `SELECT p.id, p.name, p.thumbnail_url, p.price, p.sale_price, p.unit
+      `SELECT p.id, p.name, p.thumbnail_url, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price, p.unit
        FROM products p
        JOIN categories c ON p.category_id = c.id
+       ${shopPrice.joinSql}
        WHERE p.is_active = true
          AND p.price <= 150
          AND (c.slug IN ('snacks','cafe','bakery','sweets','beverages')

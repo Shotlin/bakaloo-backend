@@ -1,0 +1,135 @@
+// Regression coverage for a real production bug: every customer-facing
+// product query displayed the master products.price/sale_price instead of
+// the shop's own shop_products listing price — cart/checkout mostly got
+// this right, but browsing showed a different number than what was
+// actually charged. Root-caused via order BKLOO-20260718-005 (a shop
+// listing priced at ₹150 while the master catalog said ₹290 for the same
+// variant — a data-entry mistake that this pricing-pipeline bug made much
+// harder to spot, since the browse screens never revealed the mismatch).
+
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+
+const queryMock = vi.fn(async () => ({ rows: [] }))
+vi.mock('../../../src/config/database.js', () => ({
+  query: (...args) => queryMock(...args),
+  getClient: vi.fn(),
+}))
+
+const { ProductsRepository } = await import('../../../src/modules/products/products.repository.js')
+
+beforeEach(() => {
+  queryMock.mockClear()
+})
+
+const SHOP_A = '11111111-1111-1111-1111-111111111111'
+
+describe('ProductsRepository — customer-facing price resolution', () => {
+  it('findById() joins shop_products and prefers the shop price when allocatedShopIds is set', async () => {
+    const repo = new ProductsRepository()
+    await repo.findById('product-1', [SHOP_A])
+
+    const [sql, params] = queryMock.mock.calls[0]
+    expect(sql).toContain('LEFT JOIN LATERAL')
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_sale_price, p\.sale_price\) AS sale_price/)
+    // The allocatedShopIds array is bound once for visibility and once
+    // for the price join — both must carry the real shop id array.
+    expect(params.filter((p) => Array.isArray(p) && p.includes(SHOP_A)).length).toBe(2)
+  })
+
+  it('findById() falls back to the master price for admin/anonymous callers (allocatedShopIds = null)', async () => {
+    const repo = new ProductsRepository()
+    await repo.findById('product-1', null)
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).not.toContain('LEFT JOIN LATERAL')
+    expect(sql).toMatch(/p\.price AS price,\s*p\.sale_price AS sale_price/)
+  })
+
+  it('findMany() (plain branch) resolves price from shop_products when scoped to a customer', async () => {
+    const repo = new ProductsRepository()
+    await repo.findMany({ allocatedShopIds: [SHOP_A] })
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toContain('LEFT JOIN LATERAL')
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
+  })
+
+  it('findMany() (groupOptions branch) resolves price from shop_products when scoped to a customer', async () => {
+    const repo = new ProductsRepository()
+    await repo.findMany({ allocatedShopIds: [SHOP_A], groupOptions: true })
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toContain('LEFT JOIN LATERAL')
+    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
+  })
+
+  it('does not apply the shop-price join for admin listing calls', async () => {
+    const repo = new ProductsRepository()
+    await repo.findMany({ status: 'active' })
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).not.toContain('LEFT JOIN LATERAL')
+  })
+})
+
+describe('ProductsRepository.findFamilyOptions — overwrites price, never leaves both fields', () => {
+  it('overwrites price/sale_price from the matched shop listing and drops the redundant sp_* keys (standalone product)', async () => {
+    const repo = new ProductsRepository()
+    queryMock
+      .mockResolvedValueOnce({
+        rows: [{ id: 'product-1', price: '290.00', sale_price: null, product_family_id: null }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          product_id: 'product-1', shop_product_id: 'sp-1', shop_id: SHOP_A,
+          sp_price: '150.00', sp_sale_price: null,
+          stock_quantity: 98, max_order_qty: 100, is_available: true,
+        }],
+      })
+
+    const result = await repo.findFamilyOptions('product-1', [SHOP_A])
+
+    expect(result.options).toHaveLength(1)
+    const [option] = result.options
+    expect(option.price).toBe('150.00')
+    expect(option.sale_price).toBeNull()
+    expect(option).not.toHaveProperty('sp_price')
+    expect(option).not.toHaveProperty('sp_sale_price')
+  })
+
+  it('overwrites price for every option in a family, not just the first', async () => {
+    const repo = new ProductsRepository()
+    queryMock
+      .mockResolvedValueOnce({
+        rows: [{ id: 'product-500g', price: '290.00', sale_price: null, product_family_id: 'family-1' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'family-1', name: 'Sumul Malai Peda' }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'product-100g', price: '150.00', sale_price: null, product_family_id: 'family-1' },
+          { id: 'product-500g', price: '290.00', sale_price: null, product_family_id: 'family-1' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { product_id: 'product-100g', shop_product_id: 'sp-100', shop_id: SHOP_A, sp_price: '290.00', sp_sale_price: null, stock_quantity: 100, max_order_qty: 100, is_available: true },
+          { product_id: 'product-500g', shop_product_id: 'sp-500', shop_id: SHOP_A, sp_price: '150.00', sp_sale_price: null, stock_quantity: 98, max_order_qty: 100, is_available: true },
+        ],
+      })
+
+    const result = await repo.findFamilyOptions('product-500g', [SHOP_A])
+
+    const byId = Object.fromEntries(result.options.map((o) => [o.id, o]))
+    // The exact bug from BKLOO-20260718-005: the shop's 100gm/500gm
+    // listings had their prices crossed. Whatever the shop_products rows
+    // say is what must come through — never the master price sitting
+    // alongside it.
+    expect(byId['product-100g'].price).toBe('290.00')
+    expect(byId['product-500g'].price).toBe('150.00')
+    expect(byId['product-100g']).not.toHaveProperty('sp_price')
+    expect(byId['product-500g']).not.toHaveProperty('sp_price')
+  })
+})

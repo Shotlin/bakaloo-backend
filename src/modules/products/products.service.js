@@ -5,6 +5,7 @@ import { logger } from '../../config/logger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { AllocationService } from '../allocation/allocation.service.js'
 import { AllocationRepository } from '../allocation/allocation.repository.js'
+import { logAdminActivity } from '../../utils/activityLogger.js'
 
 const CACHE_TTL_LIST = 600     // 10 min for lists
 const CACHE_TTL_FEATURED = 1800 // 30 min for featured
@@ -522,7 +523,7 @@ export class ProductsService {
   /**
    * Create product [ADMIN]
    */
-  async create(data) {
+  async create(data, adminId = null, ip = null) {
     const productData = {
       ...data,
       slug: generateSlug(data.name),
@@ -537,6 +538,11 @@ export class ProductsService {
     // goes stale the moment a product is added to a category.
     await cacheDeletePattern('categories:*')
     logger.info({ productId: product.id, action: 'products.create' }, 'Product created')
+    // Previously unaudited — single-product edits never appeared in the
+    // Activity Log at all, unlike the sibling admin/products module's
+    // bulkUpdate()/duplicate(), which is why a price mix-up on a single
+    // product was untraceable without a direct DB investigation.
+    logAdminActivity(adminId, 'CREATE_PRODUCT', 'product', product.id, null, product, ip)
 
     return { success: true, product: this._normalizeProduct(product) }
   }
@@ -544,7 +550,7 @@ export class ProductsService {
   /**
    * Update product [ADMIN]
    */
-  async update(id, data) {
+  async update(id, data, adminId = null, ip = null) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Product not found' }
 
@@ -562,6 +568,7 @@ export class ProductsService {
     // list's cached product_count needs to reflect that.
     await cacheDeletePattern('categories:*')
     logger.info({ productId: id, action: 'products.update' }, 'Product updated')
+    logAdminActivity(adminId, 'UPDATE_PRODUCT', 'product', id, existing, product, ip)
 
     return { success: true, product: this._normalizeProduct(product) }
   }
@@ -569,7 +576,7 @@ export class ProductsService {
   /**
    * Update stock [ADMIN]
    */
-  async updateStock(id, stock) {
+  async updateStock(id, stock, adminId = null, ip = null) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Product not found' }
 
@@ -577,6 +584,10 @@ export class ProductsService {
 
     await cacheDeletePattern(`products:detail:*:${id}`)
     await cacheDeletePattern('products:list:*')
+    logAdminActivity(
+      adminId, 'UPDATE_PRODUCT_STOCK', 'product', id,
+      { stock_quantity: existing.stock_quantity }, { stock_quantity: stock }, ip
+    )
 
     return { success: true, product }
   }
@@ -584,7 +595,7 @@ export class ProductsService {
   /**
    * Delete (deactivate) product [ADMIN]
    */
-  async delete(id) {
+  async delete(id, adminId = null, ip = null) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Product not found' }
 
@@ -593,6 +604,7 @@ export class ProductsService {
     await cacheDeletePattern('products:*')
     await cacheDeletePattern('categories:*')
     logger.info({ productId: id, action: 'products.delete' }, 'Product deleted')
+    logAdminActivity(adminId, 'DELETE_PRODUCT', 'product', id, existing, null, ip)
 
     return { success: true }
   }

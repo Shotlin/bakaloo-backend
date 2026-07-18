@@ -777,13 +777,14 @@ export class ShopProductsRepository {
    * @param {import('pg').PoolClient} client - Transactional client.
    * @param {object} params
    * @param {string} params.orderId
-   * @param {Array<{shop_product_id?: string, shopProductId?: string, quantity: number}>} params.items
+   * @param {Array<{shop_product_id?: string, shopProductId?: string, quantity: number, name?: string}>} params.items
    * @param {'DASHBOARD'|'ORDER'|'JOB'|'API'} params.source
    * @param {{ userId: string|null, shopRole: string|null }|null} [params.actor]
-   * @returns {Promise<number>} count of lines successfully restored
+   * @returns {Promise<{ restoredCount: number, failedItems: Array<{ shopProductId: string, productName: string|null, reason: string }> }>}
    */
   async restoreStockForCancelledOrder(client, { orderId, items, source, actor = null }) {
     let restoredCount = 0
+    const failedItems = []
     for (const item of items || []) {
       const shopProductId = item.shopProductId || item.shop_product_id
       const quantity = Number(item.quantity)
@@ -800,13 +801,24 @@ export class ShopProductsRepository {
         })
         restoredCount++
       } catch (err) {
+        // Previously silent — only logged, never surfaced to the admin who
+        // cancelled the order. Most commonly hit when the listing was
+        // deleted between order placement and cancellation (applyStockChange
+        // excludes soft-deleted rows), in which case there's genuinely
+        // nothing left to restore stock to — but the admin still needs to
+        // know so they don't assume inventory is accurate.
         logger.error(
           { err: err.message, orderId, shopProductId, quantity },
           'Stock restore failed for one order line during cancellation (non-blocking)'
         )
+        failedItems.push({
+          shopProductId,
+          productName: item.name || null,
+          reason: err.message,
+        })
       }
     }
-    return restoredCount
+    return { restoredCount, failedItems }
   }
 
   // ────────────────────────────────────────────────────────

@@ -27,24 +27,45 @@ export default async function adminActivityLogRoutes(fastify) {
     const clauses = []
     let idx = 1
 
-    if (adminId) { clauses.push(`al.admin_id = $${idx++}`); params.push(adminId) }
-    if (action) { clauses.push(`al.action = $${idx++}`); params.push(action) }
-    if (entityType) { clauses.push(`al.entity_type = $${idx++}`); params.push(entityType) }
+    if (adminId) { clauses.push(`c.admin_id = $${idx++}`); params.push(adminId) }
+    if (action) { clauses.push(`c.action = $${idx++}`); params.push(action) }
+    if (entityType) { clauses.push(`c.entity_type = $${idx++}`); params.push(entityType) }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
 
+    // Two independent audit systems exist: admin_activity_log (most admin
+    // actions) and audit_logs (shop_products mutations, plus auth/security
+    // events) — this UNION merges both into one feed so a shop-listing
+    // price edit shows up here instead of requiring a direct DB
+    // investigation to find. Column names on the combined CTE match
+    // admin_activity_log's original shape so the response contract (and
+    // the dashboard's ActivityLog type) is unchanged.
+    const combinedCte = `
+      WITH combined AS (
+        SELECT id, admin_id, action, entity_type, entity_id,
+               old_value, new_value, ip_address::text AS ip_address, created_at
+          FROM admin_activity_log
+        UNION ALL
+        SELECT id, actor_user_id AS admin_id, action, target_type AS entity_type, target_id AS entity_id,
+               before AS old_value, after AS new_value, ip_address::text AS ip_address, created_at
+          FROM audit_logs
+      )
+    `
+
     const { rows } = await query(
-      `SELECT al.*, u.name AS admin_name
-       FROM admin_activity_log al
-       LEFT JOIN users u ON u.id = al.admin_id
-       ${where}
-       ORDER BY al.created_at DESC
-       LIMIT $${idx} OFFSET $${idx + 1}`,
+      `${combinedCte}
+       SELECT c.*, u.name AS admin_name
+         FROM combined c
+         LEFT JOIN users u ON u.id = c.admin_id
+         ${where}
+        ORDER BY c.created_at DESC
+        LIMIT $${idx} OFFSET $${idx + 1}`,
       [...params, limit, offset]
     )
 
     const countRes = await query(
-      `SELECT COUNT(*)::int AS total FROM admin_activity_log al ${where}`,
+      `${combinedCte}
+       SELECT COUNT(*)::int AS total FROM combined c ${where}`,
       params
     )
 

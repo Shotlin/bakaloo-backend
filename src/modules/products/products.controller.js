@@ -134,13 +134,13 @@ export class ProductsController {
 
   /** POST / — Create product */
   async create(request, reply) {
-    const result = await this.service.create(request.body)
+    const result = await this.service.create(request.body, request.user.id, request.ip)
     return reply.code(201).send(success(result.product, 'Product created'))
   }
 
   /** PUT /:id — Update product */
   async update(request, reply) {
-    const result = await this.service.update(request.params.id, request.body)
+    const result = await this.service.update(request.params.id, request.body, request.user.id, request.ip)
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }
@@ -149,7 +149,7 @@ export class ProductsController {
 
   /** PUT /:id/stock — Update stock */
   async updateStock(request, reply) {
-    const result = await this.service.updateStock(request.params.id, request.body.stock)
+    const result = await this.service.updateStock(request.params.id, request.body.stock, request.user.id, request.ip)
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }
@@ -158,7 +158,7 @@ export class ProductsController {
 
   /** DELETE /:id — Delete product */
   async delete(request, reply) {
-    const result = await this.service.delete(request.params.id)
+    const result = await this.service.delete(request.params.id, request.user.id, request.ip)
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }

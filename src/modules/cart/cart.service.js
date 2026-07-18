@@ -641,6 +641,21 @@ export class CartService {
         continue
       }
 
+      // A shop is expected to always price its own listing — a null
+      // shop_products.price (the schema allows it) must never silently
+      // fall back to the master catalog price in _effectivePrice() below;
+      // that's exactly the kind of "price shown/charged doesn't match the
+      // shop's real price" bug this treats as unavailable instead.
+      if (sp.sp_price === null || sp.sp_price === undefined) {
+        failed.push({
+          productId: item.productId,
+          shopId: item.shopId,
+          reason: 'This shop has not set a price for this product',
+          code: 'SHOP_PRICE_NOT_SET',
+        })
+        continue
+      }
+
       const maxOrderQty = Number(sp.max_order_qty)
       if (item.quantity > maxOrderQty) {
         failed.push({
@@ -743,6 +758,9 @@ export class CartService {
       if (!sp) continue
       if (sp.shop_active !== true) continue
       if (sp.product_active !== true) continue
+      // See the matching check in validateCart() above — a shop with no
+      // price set for this listing must never display the master price.
+      if (sp.sp_price === null || sp.sp_price === undefined) continue
 
       const effective = this._effectivePrice(sp)
       const listPrice = this._listPrice(sp)
