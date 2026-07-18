@@ -14,6 +14,12 @@ export class CategoriesController {
     return reply.code(200).send(success(categories, 'Categories fetched'))
   }
 
+  /** GET /admin — All non-deleted categories, including inactive [ADMIN] */
+  async listAdmin(request, reply) {
+    const categories = await this.service.listAllAdmin()
+    return reply.code(200).send(success(categories, 'Categories fetched'))
+  }
+
   /** GET /:id */
   async getOne(request, reply) {
     const category = await this.service.getById(request.params.id)

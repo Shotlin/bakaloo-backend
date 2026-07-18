@@ -75,6 +75,23 @@ export class CategoriesService {
   }
 
   /**
+   * Get all categories for the admin dashboard — includes inactive (but
+   * not deleted) categories, unlike listAll() which is customer-facing.
+   * Separate cache key/entry so the public and admin views never collide,
+   * but same `categories:` prefix so cacheDeletePattern('categories:*')
+   * still sweeps it on every create/update/delete/membership change.
+   */
+  async listAllAdmin() {
+    const cacheKey = `categories:all:admin:${CACHE_VERSION}`
+    const cached = await cacheGet(cacheKey)
+    if (cached) return cached
+
+    const categories = this._normalizeCategories(await this.repo.findAllAdmin())
+    await cacheSet(cacheKey, categories, CACHE_TTL)
+    return categories
+  }
+
+  /**
    * Get single category by ID
    */
   async getById(id) {

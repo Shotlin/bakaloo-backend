@@ -58,6 +58,25 @@ export class CategoriesRepository {
   }
 
   /**
+   * Admin variant of findAll() — every non-deleted STANDARD category
+   * regardless of is_active, so a category the admin deactivated (but
+   * didn't delete) still shows in the dashboard's category list, badged as
+   * inactive, instead of silently vanishing like a deleted one. The public
+   * findAll() above intentionally keeps its is_active filter — customer
+   * menus must never show a deactivated category.
+   */
+  async findAllAdmin() {
+    const { rows } = await query(
+      `SELECT c.id, c.name, c.slug, c.description, c.image_url, c.parent_id, c.sort_order, c.is_active, c.category_type, c.created_at,
+              ${PRODUCT_COUNT_EXPR('c')} AS product_count
+       FROM categories c
+       WHERE c.deleted_at IS NULL AND c.category_type != 'BUNDLE'
+       ORDER BY c.sort_order ASC, c.name ASC`
+    )
+    return rows
+  }
+
+  /**
    * List all BUNDLE-type categories (admin "Bundles" tab) — mirrors
    * findAll() but returns exactly the rows findAll() excludes, plus does
    * NOT filter on is_active so a temporarily-disabled bundle still shows in

@@ -3,6 +3,7 @@ import { CategoriesService } from './categories.service.js'
 import { CategoriesRepository } from './categories.repository.js'
 import {
   listCategoriesSchema,
+  listCategoriesAdminSchema,
   getCategorySchema,
   getCategoryProductsSchema,
   createCategorySchema,
@@ -49,6 +50,12 @@ export default async function categoriesRoutes(fastify) {
   fastify.get('/', {
     schema: listCategoriesSchema,
   }, controller.list.bind(controller))
+
+  // GET /admin — All non-deleted categories, including inactive [ADMIN]
+  fastify.get('/admin', {
+    schema: listCategoriesAdminSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.listAdmin.bind(controller))
 
   // GET /bundles — All bundle (promo-only) categories [ADMIN]
   fastify.get('/bundles', {

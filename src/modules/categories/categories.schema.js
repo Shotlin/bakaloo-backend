@@ -35,6 +35,13 @@ export const listCategoriesSchema = {
   },
 }
 
+export const listCategoriesAdminSchema = {
+  tags: ['Categories'],
+  summary: 'Get all non-deleted categories, including inactive [ADMIN]',
+  security: [{ bearerAuth: [] }],
+  response: listCategoriesSchema.response,
+}
+
 export const getCategorySchema = {
   tags: ['Categories'],
   summary: 'Get single category',
