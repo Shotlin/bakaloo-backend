@@ -132,6 +132,58 @@ describe('ProductsRepository — customer-facing stock resolution', () => {
   })
 })
 
+// Regression coverage for a real bug this fix introduced and shipped to
+// production before being caught: fullTextSearch()'s countSql never joins
+// shop_price (it only counts matching ids), so it must never be called with
+// the extra shopPrice param that buildShopPriceJoin() appends to `params`
+// for the main data query — Postgres rejects the bind with "supplies N
+// parameters, but prepared statement requires N-1" the moment a customer
+// (allocatedShopIds set) searches. The SQL-text regex tests above wouldn't
+// catch this class of bug at all, since the string looks fine — only the
+// actual param COUNT passed alongside it is wrong. Caught via a live
+// production dry-run immediately after deploying, not by the test suite.
+function maxPlaceholder(sql) {
+  const matches = [...sql.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]))
+  return matches.length ? Math.max(...matches) : 0
+}
+
+describe('ProductsRepository — query/params placeholder-count consistency', () => {
+  it('fullTextSearch(): every query call receives exactly as many params as its highest $N placeholder, customer-scoped', async () => {
+    const repo = new ProductsRepository()
+    await repo.fullTextSearch('peda', { allocatedShopIds: [SHOP_A] })
+
+    expect(queryMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+    for (const [sql, params] of queryMock.mock.calls) {
+      expect(params.length, `params length mismatch for query:\n${sql}`).toBe(maxPlaceholder(sql))
+    }
+  })
+
+  it('fullTextSearch(): same consistency check for anonymous/admin callers (allocatedShopIds = null)', async () => {
+    const repo = new ProductsRepository()
+    await repo.fullTextSearch('peda', { allocatedShopIds: null })
+
+    for (const [sql, params] of queryMock.mock.calls) {
+      expect(params.length, `params length mismatch for query:\n${sql}`).toBe(maxPlaceholder(sql))
+    }
+  })
+
+  it('findMany(), findRelated(), findPairWith(), fuzzySuggest(), findFeatured(), getPriceDrops(), getLastMinute(): same consistency check', async () => {
+    const repo = new ProductsRepository()
+    queryMock.mockClear()
+    await repo.findMany({ allocatedShopIds: [SHOP_A], status: 'out_of_stock' })
+    await repo.findRelated('product-1', 'cat-1', 10, [SHOP_A])
+    await repo.findPairWith('product-1', 'cat-1', 10, [SHOP_A])
+    await repo.fuzzySuggest('peda', 6, [SHOP_A])
+    await repo.findFeatured(20, [SHOP_A])
+    await repo.getPriceDrops(10, [SHOP_A])
+    await repo.getLastMinute(10, [SHOP_A])
+
+    for (const [sql, params] of queryMock.mock.calls) {
+      expect(params.length, `params length mismatch for query:\n${sql}`).toBe(maxPlaceholder(sql))
+    }
+  })
+})
+
 describe('ProductsRepository.findFamilyOptions — overwrites price, never leaves both fields', () => {
   it('overwrites price/sale_price from the matched shop listing and drops the redundant sp_* keys (standalone product)', async () => {
     const repo = new ProductsRepository()

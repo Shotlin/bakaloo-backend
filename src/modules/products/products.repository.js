@@ -520,9 +520,16 @@ export class ProductsRepository {
       ) AS matches
     `
 
+    // countSql only ever references up through the visibility placeholder
+    // ($3 at most) — it doesn't join shop_price, so it must never receive
+    // the extra shopPrice param appended to `params` below, or Postgres
+    // rejects the bind ("supplies N parameters, but prepared statement
+    // requires N-1").
+    const countParams = params.slice(0, visibility.nextIdx - 1)
+
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(sql, [...params, limit, offset]),
-      query(countSql, params),
+      query(countSql, countParams),
     ])
 
     const total = countRows[0]?.total || 0
