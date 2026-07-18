@@ -21,6 +21,9 @@ export const createShopSchema = z.object({
   lng: z.number().min(-180).max(180),
   serviceable_pincodes: z.array(z.string().max(10)).default([]),
   delivery_radius_km: z.number().min(0.5).max(100).default(5.0),
+  // When true, this shop is matchable ONLY via serviceable_pincodes —
+  // delivery_radius_km is never used as a fallback match (migration 086).
+  pincode_only: z.boolean().default(false),
   operating_hours: z.record(z.any()).default({}),
   commission_rate: z.number().min(0).max(100).default(10.0),
   bank_account_number: z.string().max(20).optional(),
@@ -48,6 +51,7 @@ export const updateShopSchema = z.object({
   lng: z.number().min(-180).max(180).optional(),
   serviceable_pincodes: z.array(z.string().max(10)).optional(),
   delivery_radius_km: z.number().min(0.5).max(100).optional(),
+  pincode_only: z.boolean().optional(),
   is_active: z.boolean().optional(),
   is_verified: z.boolean().optional(),
   operating_hours: z.record(z.any()).optional(),

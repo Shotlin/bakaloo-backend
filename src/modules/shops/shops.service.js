@@ -22,6 +22,7 @@ const SHOP_AUDIT_COMPARE_FIELDS = Object.freeze([
   'lng',
   'serviceable_pincodes',
   'delivery_radius_km',
+  'pincode_only',
   'name',
   'slug',
   'description',
@@ -186,8 +187,8 @@ export class ShopsService {
     await cacheDel(`${CACHE_PREFIX}:${id}`)
     await cacheDeletePattern('bakaloo:shops:active:*')
 
-    // Task 13.3: Trigger allocation recompute when serviceable_pincodes
-    // or delivery_radius_km changes (Requirements 4.8, 4.9).
+    // Task 13.3: Trigger allocation recompute when serviceable_pincodes,
+    // delivery_radius_km, or pincode_only changes (Requirements 4.8, 4.9).
     // Fire-and-forget — allocation recompute is a background job.
     const pincodesChanged =
       data.serviceable_pincodes !== undefined &&
@@ -196,8 +197,14 @@ export class ShopsService {
     const radiusChanged =
       data.delivery_radius_km !== undefined &&
       data.delivery_radius_km !== existing.delivery_radius_km
+    // Toggling pincode_only alone (no pincode/radius edit) must also
+    // recompute — turning it on drops any existing radius-only-matched
+    // allocations for this shop; turning it off can newly add some.
+    const pincodeOnlyChanged =
+      data.pincode_only !== undefined &&
+      data.pincode_only !== existing.pincode_only
 
-    if (pincodesChanged || radiusChanged) {
+    if (pincodesChanged || radiusChanged || pincodeOnlyChanged) {
       try {
         await allocationQueue.add(
           'recompute-by-shop',
@@ -205,7 +212,7 @@ export class ShopsService {
           { jobId: `recompute-by-shop:${id}` }
         )
         logger.info(
-          { shopId: id, pincodesChanged, radiusChanged, action: 'allocation_recompute_enqueued' },
+          { shopId: id, pincodesChanged, radiusChanged, pincodeOnlyChanged, action: 'allocation_recompute_enqueued' },
           'Allocation recompute enqueued for shop area change'
         )
       } catch (err) {

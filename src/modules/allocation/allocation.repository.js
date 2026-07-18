@@ -141,7 +141,10 @@ export class AllocationRepository {
 
   /**
    * Find shops whose haversine distance to (lat, lng) is within their own
-   * delivery_radius_km (Requirement 4.2). Excludes inactive/deleted shops.
+   * delivery_radius_km (Requirement 4.2). Excludes inactive/deleted shops,
+   * and any shop with pincode_only = true — that flag means the shop is
+   * matchable ONLY via its exact serviceable_pincodes list, never via
+   * distance, regardless of how close (migration 086).
    *
    * The haversine acos argument is clamped via LEAST/GREATEST to ±1 to guard
    * against floating-point drift causing acos() domain errors at antipodes.
@@ -171,11 +174,64 @@ export class AllocationRepository {
              FROM shops s
             WHERE s.is_active = true
               AND s.deleted_at IS NULL
+              AND s.pincode_only = false
          ) candidates
         WHERE distance_km <= delivery_radius_km`,
       [lat, lng]
     )
     return rows
+  }
+
+  /**
+   * True if at least one active shop serves this pincode/location — same
+   * pincode-array-membership OR haversine-within-radius logic as
+   * findShopsByPincode/findShopsByRadius above, collapsed into a single
+   * boolean check instead of fetching full shop rows — except for a shop
+   * with pincode_only = true, which is matchable ONLY via its exact
+   * serviceable_pincodes list, never via distance (migration 086). Used to
+   * hard-block saving an address, or placing an order, outside every
+   * shop's declared service area.
+   *
+   * @param {object} params
+   * @param {string|null} [params.pincode]
+   * @param {number} [params.lat]
+   * @param {number} [params.lng]
+   * @param {string|null} [params.shopId] - When given, scopes the check to
+   *   that one shop specifically (e.g. "is this address inside THIS
+   *   order's fulfilling shop's area", not just "some shop somewhere").
+   * @returns {Promise<boolean>}
+   */
+  async isServiceable({ pincode, lat, lng, shopId = null } = {}) {
+    const hasCoords = Number.isFinite(lat) && Number.isFinite(lng)
+    const { rows } = await query(
+      `SELECT EXISTS (
+         SELECT 1 FROM shops s
+          WHERE s.is_active = true
+            AND s.deleted_at IS NULL
+            AND ($1::uuid IS NULL OR s.id = $1)
+            AND (
+              ($2::text IS NOT NULL AND $2 = ANY(s.serviceable_pincodes))
+              OR (
+                $5::boolean AND NOT s.pincode_only AND
+                (${EARTH_RADIUS_KM} * acos(
+                  LEAST(1.0, GREATEST(-1.0,
+                    cos(radians($3::float8)) * cos(radians(s.lat::float8))
+                      * cos(radians(s.lng::float8) - radians($4::float8))
+                      + sin(radians($3::float8)) * sin(radians(s.lat::float8))
+                  ))
+                )) <= s.delivery_radius_km::float8
+              )
+            )
+       ) AS serviceable`,
+      [
+        shopId || null,
+        pincode || null,
+        hasCoords ? lat : null,
+        hasCoords ? lng : null,
+        hasCoords,
+      ]
+    )
+    return rows[0]?.serviceable === true
   }
 
   // ────────────────────────────────────────────────────────
@@ -290,7 +346,7 @@ export class AllocationRepository {
 
     const { rows } = await query(
       `WITH target AS (
-         SELECT id, lat, lng, serviceable_pincodes, delivery_radius_km
+         SELECT id, lat, lng, serviceable_pincodes, delivery_radius_km, pincode_only
            FROM shops
           WHERE id = $1
             AND is_active = true
@@ -309,7 +365,8 @@ export class AllocationRepository {
         WHERE (
                 addr.pincode = ANY(t.serviceable_pincodes)
                 OR (
-                  addr.lat IS NOT NULL AND addr.lng IS NOT NULL
+                  NOT t.pincode_only
+                  AND addr.lat IS NOT NULL AND addr.lng IS NOT NULL
                   AND (${EARTH_RADIUS_KM} * acos(
                         LEAST(1.0, GREATEST(-1.0,
                           cos(radians(t.lat::float8)) * cos(radians(addr.lat::float8))

@@ -60,8 +60,13 @@ async function getServiceablePincodes() {
  * Addresses service — business logic for delivery addresses
  */
 export class AddressesService {
-  constructor(repository) {
+  constructor(repository, options = {}) {
     this.repo = repository
+    // Hard serviceability gate at save time — separate from the
+    // fire-and-forget allocation recompute below, which only populates
+    // user_shop_allocations for cart/catalog scoping and never blocks
+    // anything. Injectable for tests.
+    this.allocationRepo = options.allocationRepository || new AllocationRepository()
   }
 
   /**
@@ -80,6 +85,24 @@ export class AddressesService {
         success: false,
         message: 'Map pin is required. Please select your exact location.',
         code: 'ADDRESS_COORDINATES_REQUIRED',
+      }
+    }
+
+    // Hard-block an address outside every active shop's declared service
+    // area (pincode list OR delivery radius) — previously the only check
+    // was a separate, client-invoked /validate-pincode endpoint the
+    // mobile UI called for a soft warning; the actual save was never
+    // gated by it, so any pincode/location could be saved regardless.
+    const serviceable = await this.allocationRepo.isServiceable({
+      pincode: data.pincode,
+      lat: data.lat,
+      lng: data.lng,
+    })
+    if (!serviceable) {
+      return {
+        success: false,
+        message: 'Delivery is not available at this address yet.',
+        code: 'ADDRESS_NOT_SERVICEABLE',
       }
     }
 
@@ -157,14 +180,41 @@ export class AddressesService {
       }
     }
 
+    // Effective post-update values — computed here (moved up from after
+    // the DB write) so the serviceability gate below can see them before
+    // anything is saved. Falls back to the existing row's values for
+    // whichever field wasn't part of this update.
+    const effectiveLat = hasLat ? Number(data.lat) : Number(existing.lat)
+    const effectiveLng = hasLng ? Number(data.lng) : Number(existing.lng)
+    const effectivePincode = data.pincode ?? existing.pincode
+
+    // Hard-block moving an address outside every active shop's service
+    // area — only re-checked when the location actually changed (new
+    // coordinates or a different pincode); an unrelated edit (e.g.
+    // renaming the label) on an already-saved address must never be
+    // retroactively blocked by this gate.
+    const locationChanged =
+      hasLat || (data.pincode !== undefined && data.pincode !== existing.pincode)
+    if (locationChanged) {
+      const serviceable = await this.allocationRepo.isServiceable({
+        pincode: effectivePincode,
+        lat: effectiveLat,
+        lng: effectiveLng,
+      })
+      if (!serviceable) {
+        return {
+          success: false,
+          message: 'Delivery is not available at this address yet.',
+          code: 'ADDRESS_NOT_SERVICEABLE',
+        }
+      }
+    }
+
     const address = await this.repo.update(id, userId, data)
     logger.info({ userId, addressId: id }, 'Address updated')
 
     // FIX: Recompute allocation when a default address coordinates/pincode change.
     // Use updated coords if provided, fall back to existing.
-    const effectiveLat = hasLat ? Number(data.lat) : Number(existing.lat)
-    const effectiveLng = hasLng ? Number(data.lng) : Number(existing.lng)
-    const effectivePincode = data.pincode ?? existing.pincode
     if (
       this._hasValidCoordinates(effectiveLat, effectiveLng) &&
       effectivePincode

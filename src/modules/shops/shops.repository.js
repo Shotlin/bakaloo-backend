@@ -24,21 +24,21 @@ export class ShopsRepository {
       `INSERT INTO shops (
         name, slug, branch_code, description, logo_url, banner_url,
         phone, email, address_line1, address_line2, city, state, pincode,
-        lat, lng, serviceable_pincodes, delivery_radius_km,
+        lat, lng, serviceable_pincodes, delivery_radius_km, pincode_only,
         operating_hours, commission_rate,
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, created_by
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
         $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17,
-        $18, $19,
-        $20, $21, $22, $23,
-        $24, $25, $26
+        $14, $15, $16, $17, $18,
+        $19, $20,
+        $21, $22, $23, $24,
+        $25, $26, $27
       )
       RETURNING id, name, slug, branch_code, description, logo_url, banner_url,
         phone, email, address_line1, address_line2, city, state, pincode,
-        lat, lng, serviceable_pincodes, delivery_radius_km,
+        lat, lng, serviceable_pincodes, delivery_radius_km, pincode_only,
         is_active, is_verified, operating_hours, commission_rate,
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, total_orders, total_revenue,
@@ -52,6 +52,7 @@ export class ShopsRepository {
         data.lat, data.lng,
         data.serviceable_pincodes || [],
         data.delivery_radius_km,
+        data.pincode_only ?? false,
         JSON.stringify(data.operating_hours || {}),
         data.commission_rate,
         data.bank_account_number || null, data.bank_ifsc || null,
@@ -76,7 +77,7 @@ export class ShopsRepository {
     const sql =
       `SELECT id, name, slug, branch_code, description, logo_url, banner_url,
         phone, email, address_line1, address_line2, city, state, pincode,
-        lat, lng, serviceable_pincodes, delivery_radius_km,
+        lat, lng, serviceable_pincodes, delivery_radius_km, pincode_only,
         is_active, is_verified, operating_hours, commission_rate,
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, total_orders, total_revenue,
@@ -200,7 +201,7 @@ export class ShopsRepository {
         `SELECT s.id, s.name, s.slug, s.branch_code, s.description,
           s.logo_url, s.banner_url, s.phone, s.email,
           s.address_line1, s.address_line2, s.city, s.state, s.pincode,
-          s.lat, s.lng, s.serviceable_pincodes, s.delivery_radius_km,
+          s.lat, s.lng, s.serviceable_pincodes, s.delivery_radius_km, s.pincode_only,
           s.is_active, s.is_verified, s.operating_hours, s.commission_rate,
           s.total_orders, s.total_revenue, s.created_at, s.updated_at
         FROM shops s
@@ -243,6 +244,7 @@ export class ShopsRepository {
       lat: 'lat',
       lng: 'lng',
       delivery_radius_km: 'delivery_radius_km',
+      pincode_only: 'pincode_only',
       is_active: 'is_active',
       is_verified: 'is_verified',
       commission_rate: 'commission_rate',
@@ -287,7 +289,7 @@ export class ShopsRepository {
        WHERE id = $${idx} AND deleted_at IS NULL
        RETURNING id, name, slug, branch_code, description, logo_url, banner_url,
         phone, email, address_line1, address_line2, city, state, pincode,
-        lat, lng, serviceable_pincodes, delivery_radius_km,
+        lat, lng, serviceable_pincodes, delivery_radius_km, pincode_only,
         is_active, is_verified, operating_hours, commission_rate,
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, total_orders, total_revenue,

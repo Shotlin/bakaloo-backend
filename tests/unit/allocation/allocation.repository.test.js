@@ -210,6 +210,15 @@ describe('AllocationRepository.findShopsByRadius()', () => {
     const text = normalize(query.mock.calls[0][0])
     expect(text).toContain('LEAST(1.0, GREATEST(-1.0,')
   })
+
+  it('excludes pincode_only shops — radius must never match one', async () => {
+    query.mockResolvedValue({ rows: [] })
+
+    await repo.findShopsByRadius(12.97, 77.59)
+
+    const text = normalize(query.mock.calls[0][0])
+    expect(text).toContain('s.pincode_only = false')
+  })
 })
 
 // ═══════════════════════════════════════════════════════════
@@ -421,5 +430,90 @@ describe('AllocationRepository.findUsersAffectedByShop()', () => {
     // Haversine + radius filter
     expect(text).toMatch(/6371 \* acos/)
     expect(text).toContain('<= t.delivery_radius_km::float8')
+    // Radius branch must never apply to a pincode_only shop
+    expect(text).toContain('NOT t.pincode_only')
+    expect(text).toContain('t.pincode_only')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════
+// isServiceable() — hard-block gate for address save / order placement
+// ═══════════════════════════════════════════════════════════
+describe('AllocationRepository.isServiceable()', () => {
+  let repo
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    repo = new AllocationRepository()
+  })
+
+  it('checks pincode membership OR haversine-within-radius, scoped to no shop by default', async () => {
+    query.mockResolvedValue({ rows: [{ serviceable: true }] })
+
+    const result = await repo.isServiceable({
+      pincode: '560001',
+      lat: 12.97,
+      lng: 77.59,
+    })
+
+    expect(result).toBe(true)
+    expect(query).toHaveBeenCalledTimes(1)
+    const [sql, params] = query.mock.calls[0]
+    const text = normalize(sql)
+
+    expect(text).toContain('SELECT EXISTS')
+    expect(text).toContain('$2 = ANY(s.serviceable_pincodes)')
+    expect(text).toMatch(/6371 \* acos/)
+    expect(text).toContain('<= s.delivery_radius_km::float8')
+    expect(text).toContain('s.is_active = true')
+    expect(text).toContain('s.deleted_at IS NULL')
+    // shopId not passed — first param is null, no shop-scoping applied beyond it
+    expect(params).toEqual([null, '560001', 12.97, 77.59, true])
+  })
+
+  it('gates the radius branch with NOT s.pincode_only — a pincode_only shop is never matched by distance', async () => {
+    query.mockResolvedValue({ rows: [{ serviceable: true }] })
+
+    await repo.isServiceable({ pincode: '560001', lat: 12.97, lng: 77.59 })
+
+    const text = normalize(query.mock.calls[0][0])
+    expect(text).toContain('$5::boolean AND NOT s.pincode_only AND')
+  })
+
+  it('scopes to one shop when shopId is given', async () => {
+    query.mockResolvedValue({ rows: [{ serviceable: false }] })
+
+    const result = await repo.isServiceable({
+      shopId: SHOP_A,
+      pincode: '999999',
+      lat: 1,
+      lng: 2,
+    })
+
+    expect(result).toBe(false)
+    const [sql, params] = query.mock.calls[0]
+    const text = normalize(sql)
+    expect(text).toContain('$1::uuid IS NULL OR s.id = $1')
+    expect(params[0]).toBe(SHOP_A)
+  })
+
+  it('falls back to pincode-only matching when coordinates are missing (no NaN reaches SQL)', async () => {
+    query.mockResolvedValue({ rows: [{ serviceable: true }] })
+
+    await repo.isServiceable({ pincode: '560001' })
+
+    const [, params] = query.mock.calls[0]
+    // lat/lng params are null, hasCoords flag is false — the radius branch
+    // is short-circuited in SQL via the $5::boolean guard rather than ever
+    // evaluating acos() with non-finite input.
+    expect(params).toEqual([null, '560001', null, null, false])
+  })
+
+  it('returns false (not throws) when the query yields no row', async () => {
+    query.mockResolvedValue({ rows: [] })
+
+    const result = await repo.isServiceable({ pincode: '560001', lat: 1, lng: 2 })
+
+    expect(result).toBe(false)
   })
 })

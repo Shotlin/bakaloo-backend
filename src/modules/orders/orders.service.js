@@ -15,6 +15,7 @@ import { CartRepository } from '../cart/cart.repository.js'
 import { CartService } from '../cart/cart.service.js'
 import { AbandonedCartsRepository } from '../abandoned-carts/abandoned-carts.repository.js'
 import { AddressesRepository } from '../addresses/addresses.repository.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { CouponsService } from '../coupons/coupons.service.js'
 import { ShopProductsRepository } from '../shop-products/shop-products.repository.js'
@@ -52,6 +53,8 @@ export class OrdersService {
     this.abandonedCartsRepo =
       options.abandonedCartsRepository || new AbandonedCartsRepository()
     this.addressRepo = options.addressesRepository || new AddressesRepository()
+    // Serviceable-area gate at order placement — see placeOrder() step 2c.
+    this.allocationRepo = options.allocationRepository || new AllocationRepository()
     this.couponsRepo = options.couponsRepository || new CouponsRepository()
     this.couponsService =
       options.couponsService || new CouponsService(this.couponsRepo)
@@ -271,6 +274,34 @@ export class OrdersService {
       ...address,
       lat: addressLat,
       lng: addressLng,
+    }
+
+    // 2c. Serviceable-area gate — the cart's shop(s) were resolved against
+    // user_shop_allocations, which reflects whichever address most
+    // recently triggered a recompute (typically the customer's default
+    // address), NOT necessarily the addressId chosen for this checkout.
+    // Without this, a customer allocated via a serviceable home address
+    // could switch to a completely different, unserviceable saved address
+    // at this final step and still have the order go through — this is
+    // the actual gap that let orders be placed from pincodes/locations
+    // outside every shop's declared service area (serviceable_pincodes /
+    // delivery_radius_km). Checked per-shop, not "any shop", since what
+    // matters is whether THIS address is inside THIS order's fulfilling
+    // shop's area.
+    for (const shopId of groupedByShop.keys()) {
+      const serviceable = await this.allocationRepo.isServiceable({
+        shopId,
+        pincode: deliveryAddress.pincode,
+        lat: deliveryAddress.lat,
+        lng: deliveryAddress.lng,
+      })
+      if (!serviceable) {
+        return {
+          success: false,
+          message: 'This delivery address is outside the service area for your cart. Please choose a different address.',
+          code: 'ADDRESS_NOT_SERVICEABLE',
+        }
+      }
     }
 
     // 2b. Payment-method gate — enforce the admin's COD/Razorpay/Wallet

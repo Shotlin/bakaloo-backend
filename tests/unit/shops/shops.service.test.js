@@ -12,6 +12,15 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+// Prevent the pincodesChanged/radiusChanged/pincodeOnlyChanged recompute
+// branch from touching a real Redis connection — it previously had zero
+// test coverage (every existing update() test only changes fields like
+// phone/name, which never enter that branch) so this was never needed
+// until the pincode_only toggle test below started exercising it.
+vi.mock('../../../src/config/bullmq.js', () => ({
+  allocationQueue: { add: vi.fn().mockResolvedValue({ id: 'job-1' }) },
+}))
+
 import { ShopsService } from '../../../src/modules/shops/shops.service.js'
 import {
   cacheGet,
@@ -343,6 +352,17 @@ describe('ShopsService.update()', () => {
 
     expect(result.success).toBe(false)
     expect(result.code).toBe('SHOP_NOT_FOUND')
+  })
+
+  it('persists a pincode_only toggle even with no pincode/radius edit', async () => {
+    repo.findById.mockResolvedValue({ ...MOCK_SHOP, pincode_only: false })
+    repo.update.mockResolvedValue({ ...MOCK_SHOP, pincode_only: true })
+
+    const result = await service.update(SHOP_ID, { pincode_only: true }, USER_ID)
+
+    expect(repo.update).toHaveBeenCalledWith(SHOP_ID, { pincode_only: true })
+    expect(result.success).toBe(true)
+    expect(result.shop.pincode_only).toBe(true)
   })
 })
 
