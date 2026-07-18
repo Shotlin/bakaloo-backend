@@ -48,11 +48,24 @@ export class FirstTimeOffersRepository {
     return rows[0] ? this._format(rows[0]) : null
   }
 
-  /** Same first-order check used by FIRST_TIME coupon targeting (coupons.repository.js). */
+  /**
+   * True only once userId has an order that was actually DELIVERED — same
+   * first-order check used by FIRST_TIME coupon targeting
+   * (coupons.repository.js). Checks delivered_at rather than status, since
+   * delivered_at is written exactly once (COALESCE-guarded) the moment an
+   * order is marked DELIVERED and is never cleared afterward — so a later
+   * REFUNDED transition still correctly counts as "has ordered before",
+   * while a cancelled order, or one stuck PENDING after a failed payment,
+   * correctly does NOT. A simple `status != 'CANCELLED'` check used to gate
+   * this, which meant any non-cancelled order — including one abandoned
+   * after a failed online payment that never formally transitions to
+   * CANCELLED — silently and permanently killed the customer's first-order
+   * offer even though nothing was ever delivered to them.
+   */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
+         SELECT 1 FROM orders WHERE user_id = $1 AND delivered_at IS NOT NULL
        ) AS has_prior`,
       [userId]
     )

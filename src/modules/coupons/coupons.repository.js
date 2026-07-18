@@ -99,15 +99,22 @@ export class CouponsRepository {
   }
 
   /**
-   * True if userId has any prior order that isn't cancelled — used by
-   * FIRST_TIME coupon targeting. Real-time (not cached) so it can't go
+   * True only once userId has an order that was actually DELIVERED — used
+   * by FIRST_TIME coupon targeting. Real-time (not cached) so it can't go
    * stale; re-checked inside the order-creation transaction as the final
    * source of truth (never trust the cart-preview-time check alone).
+   *
+   * Checks delivered_at rather than status: delivered_at is written exactly
+   * once (COALESCE-guarded) the moment an order is marked DELIVERED and is
+   * never cleared afterward, so a later REFUNDED transition still correctly
+   * counts as "has ordered before", while a cancelled order — or one stuck
+   * PENDING forever after a failed online payment that never formally
+   * transitions to CANCELLED — correctly does not.
    */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
+         SELECT 1 FROM orders WHERE user_id = $1 AND delivered_at IS NOT NULL
        ) AS has_prior`,
       [userId]
     )

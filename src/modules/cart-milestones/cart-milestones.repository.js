@@ -29,10 +29,16 @@ export class CartMilestonesRepository {
     return rows.map(this._format)
   }
 
+  /**
+   * True only once userId has an order that was actually DELIVERED — same
+   * check used by FIRST_TIME coupon targeting (coupons.repository.js) and
+   * first-time-offers.repository.js. See those for the full rationale on
+   * why this checks delivered_at rather than status.
+   */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
+         SELECT 1 FROM orders WHERE user_id = $1 AND delivered_at IS NOT NULL
        ) AS has_prior`,
       [userId]
     )
