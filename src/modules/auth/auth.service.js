@@ -27,13 +27,20 @@ export class AuthService {
     this.repo = repository
   }
 
+  _demoOtpPhones() {
+    return `${env.DEMO_OTP_PHONES || ''}`
+      .split(',')
+      .map((p) => normalizePhoneForOtp(p))
+      .filter(Boolean)
+  }
+
   _isDemoOtpEnabled() {
-    return env.ALLOW_DEMO_OTP && Boolean(env.DEMO_OTP_PHONE)
+    return env.ALLOW_DEMO_OTP && this._demoOtpPhones().length > 0
   }
 
   _isDemoOtpPhone(phone) {
     if (!this._isDemoOtpEnabled()) return false
-    return normalizePhoneForOtp(phone) === normalizePhoneForOtp(env.DEMO_OTP_PHONE)
+    return this._demoOtpPhones().includes(normalizePhoneForOtp(phone))
   }
 
   /**
@@ -141,6 +148,10 @@ export class AuthService {
     // Normalize role: RIDER, DELIVERY → 'RIDER' (canonical value)
     const requestedRole = (role === 'RIDER' || role === 'DELIVERY') ? 'RIDER' : null
 
+    // Demo-OTP riders (App Store / Play Store reviewer accounts) skip the
+    // manual admin-approval step so the app opens straight to /home.
+    const isDemoRider = requestedRole === 'RIDER' && this._isDemoOtpPhone(phone)
+
     // Find or create user
     let user = await this.repo.findByPhone(phone)
     let isNewUser = false
@@ -152,15 +163,19 @@ export class AuthService {
 
       // Auto-create rider_profile for new RIDER registrations
       if (user.role === 'RIDER') {
-        await this.repo.ensureRiderProfile(user.id)
-        logger.info({ userId: user.id }, 'Auto-created rider_profile for new rider')
+        await this.repo.ensureRiderProfile(user.id, { isApproved: isDemoRider })
+        logger.info({ userId: user.id, isDemoRider }, 'Auto-created rider_profile for new rider')
       }
     } else if (requestedRole === 'RIDER' && user.role === 'CUSTOMER') {
       // Existing customer registering as rider via rider app
       await this.repo.updateRole(user.id, 'RIDER')
       user.role = 'RIDER'
-      await this.repo.ensureRiderProfile(user.id)
+      await this.repo.ensureRiderProfile(user.id, { isApproved: isDemoRider })
       logger.info({ userId: user.id }, 'Upgraded CUSTOMER to RIDER with rider_profile')
+    } else if (isDemoRider && user.role === 'RIDER') {
+      // Returning demo rider — make sure a pre-existing profile is approved
+      // (covers accounts created before demo phones were configured).
+      await this.repo.ensureRiderProfile(user.id, { isApproved: true })
     }
 
     // Check if user is blocked

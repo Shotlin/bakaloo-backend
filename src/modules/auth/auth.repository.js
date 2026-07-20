@@ -63,18 +63,29 @@ export class AuthRepository {
 
   /**
    * Ensure a rider_profile row exists for this user.
-   * Creates one if missing (with is_approved = false for admin review).
+   * Creates one if missing (is_approved defaults to false for admin review,
+   * unless the caller passes isApproved: true — e.g. demo-OTP riders).
+   * If a profile already exists and isApproved is true, flips it to approved
+   * (never demotes an already-approved profile back to false here).
    * @param {string} userId
+   * @param {{ isApproved?: boolean }} [options]
    */
-  async ensureRiderProfile(userId) {
+  async ensureRiderProfile(userId, { isApproved = false } = {}) {
     const { rows } = await query(
-      `SELECT id FROM rider_profiles WHERE user_id = $1`,
+      `SELECT id, is_approved FROM rider_profiles WHERE user_id = $1`,
       [userId]
     )
     if (rows.length === 0) {
       await query(
         `INSERT INTO rider_profiles (user_id, is_approved, is_online)
-         VALUES ($1, false, false)`,
+         VALUES ($1, $2, false)`,
+        [userId, !!isApproved]
+      )
+      return
+    }
+    if (isApproved && !rows[0].is_approved) {
+      await query(
+        `UPDATE rider_profiles SET is_approved = true, updated_at = NOW() WHERE user_id = $1`,
         [userId]
       )
     }

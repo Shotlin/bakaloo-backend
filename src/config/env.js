@@ -58,7 +58,9 @@ const envSchema = z.object({
   OTP_LOCKOUT_SECONDS: z.coerce.number().default(1800),
   OTP_LENGTH: z.coerce.number().default(6),
   ALLOW_DEMO_OTP: booleanFromEnv.default(false),
-  DEMO_OTP_PHONE: z.string().optional(),
+  // Comma-separated list of 10-digit phones that bypass real SMS delivery
+  // (used for App Store / Play Store reviewer demo accounts).
+  DEMO_OTP_PHONES: z.string().optional(),
   DEMO_OTP_CODE: z.string().regex(/^\d{4,8}$/).default('123456'),
   ALLOW_ALL_PINCODES: booleanFromEnv.default(false),
 
