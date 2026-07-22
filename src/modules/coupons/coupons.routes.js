@@ -1,6 +1,8 @@
 import { CouponsController } from './coupons.controller.js'
 import { CouponsService } from './coupons.service.js'
 import { CouponsRepository } from './coupons.repository.js'
+import { CartService } from '../cart/cart.service.js'
+import { CartRepository } from '../cart/cart.repository.js'
 import { requirePermission } from '../../middlewares/permission-check.js'
 import {
   validateCouponSchema,
@@ -24,7 +26,8 @@ import {
 export default async function couponsRoutes(fastify) {
   const repository = new CouponsRepository()
   const service = new CouponsService(repository)
-  const controller = new CouponsController(service)
+  const cartService = new CartService(new CartRepository())
+  const controller = new CouponsController(service, cartService)
 
   // ─── Customer routes (AUTH) ─────────────────────────────
 

@@ -25,6 +25,7 @@ const COUPON_COLUMNS = `
   usage_limit_total, usage_limit_per_user,
   target_type, target_segment_id,
   cashback_credit_trigger,
+  grants_free_delivery,
   created_by,
   created_at, updated_at
 `
@@ -232,6 +233,7 @@ export class CouponsRepository {
          usage_limit_total, usage_limit_per_user,
          target_type, target_segment_id,
          cashback_credit_trigger,
+         grants_free_delivery,
          created_by
        )
        VALUES (
@@ -245,7 +247,8 @@ export class CouponsRepository {
          $17, $18,
          $19, $20,
          $21,
-         $22
+         $22,
+         $23
        )
        RETURNING ${COUPON_COLUMNS}`,
       [
@@ -270,6 +273,7 @@ export class CouponsRepository {
         data.targetType ?? 'ALL',
         data.targetSegmentId ?? null,
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
+        !!data.grantsFreeDelivery,
         data.createdBy ?? null,
       ]
     )
@@ -311,6 +315,7 @@ export class CouponsRepository {
       targetType:            'target_type',
       targetSegmentId:       'target_segment_id',
       cashbackCreditTrigger: 'cashback_credit_trigger',
+      grantsFreeDelivery:    'grants_free_delivery',
       createdBy:             'created_by',
     }
 
@@ -337,6 +342,56 @@ export class CouponsRepository {
       params
     )
     return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /**
+   * Of `cartProductIds`, which ones fall inside a coupon's
+   * applicable_category_ids/applicable_product_ids scope. A category id in
+   * `applicableCategoryIds` can be either an ordinary/sub- category
+   * (matched via products.category_id directly) or a BUNDLE-type category
+   * (066_category_bundles_and_ranking.sql — bundle membership lives in
+   * category_products, not products.category_id), so both are checked with
+   * one OR — the caller never needs to know or care which kind of id it
+   * passed. No `applicableCategoryIds`/`applicableProductIds` at all means
+   * the coupon is unscoped: every cart product matches (the safe default
+   * that keeps existing PLATFORM_COUPON behavior unchanged).
+   *
+   * @param {string[]} cartProductIds
+   * @param {{applicableCategoryIds?: string[]|null, applicableProductIds?: string[]|null}} scope
+   * @returns {Promise<Set<string>>} matching product ids
+   */
+  async resolveMatchingProductIds(cartProductIds, { applicableCategoryIds, applicableProductIds } = {}) {
+    const hasProductScope = Array.isArray(applicableProductIds) && applicableProductIds.length > 0
+    const hasCategoryScope = Array.isArray(applicableCategoryIds) && applicableCategoryIds.length > 0
+
+    if (!hasProductScope && !hasCategoryScope) {
+      return new Set(cartProductIds)
+    }
+    if (cartProductIds.length === 0) {
+      return new Set()
+    }
+
+    const { rows } = await query(
+      `SELECT DISTINCT p.id AS product_id
+         FROM products p
+        WHERE p.id = ANY($1::uuid[])
+          AND (
+               ($2::uuid[] IS NOT NULL AND p.id = ANY($2::uuid[]))
+            OR ($3::uuid[] IS NOT NULL AND (
+                     p.category_id = ANY($3::uuid[])
+                  OR EXISTS (
+                       SELECT 1 FROM category_products cp
+                       WHERE cp.product_id = p.id AND cp.category_id = ANY($3::uuid[])
+                     )
+                ))
+              )`,
+      [
+        cartProductIds,
+        hasProductScope ? applicableProductIds : null,
+        hasCategoryScope ? applicableCategoryIds : null,
+      ]
+    )
+    return new Set(rows.map((r) => r.product_id))
   }
 
   /**
@@ -373,6 +428,7 @@ export class CouponsRepository {
       targetType:            row.target_type,
       targetSegmentId:       row.target_segment_id,
       cashbackCreditTrigger: row.cashback_credit_trigger,
+      grantsFreeDelivery:    row.grants_free_delivery,
       createdBy:             row.created_by,
       createdAt:             row.created_at,
       updatedAt:             row.updated_at,

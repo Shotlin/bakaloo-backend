@@ -6,8 +6,9 @@ import { ERROR_CODES, httpStatusFor } from '../../constants/errors.js'
  * Coupons controller — thin HTTP layer
  */
 export class CouponsController {
-  constructor(service) {
+  constructor(service, cartService) {
     this.service = service
+    this.cartService = cartService
   }
 
   /**
@@ -28,10 +29,20 @@ export class CouponsController {
 
   /** POST /validate */
   async validate(request, reply) {
+    // Cart items are read fresh from the server-side cart (not trusted from
+    // the client) so a category/product-scoped coupon can be checked
+    // against what's actually there — same reasoning as orders.service.js,
+    // just for the pre-checkout preview rather than the final placement.
+    // A cart spanning multiple shops is still allowed to preview here (this
+    // endpoint doesn't place an order); every line across shops is passed
+    // through so a scoped coupon at least gets an accurate match instead of
+    // being evaluated against nothing.
+    const cart = await this.cartService.getCart(request.user.id)
     const result = await this.service.validate(
       request.user.id,
       request.body.code,
-      request.body.cartTotal
+      request.body.cartTotal,
+      cart.items
     )
     if (!result.valid) {
       return reply.code(400).send(error(result.message, result.code || 'INVALID_COUPON'))

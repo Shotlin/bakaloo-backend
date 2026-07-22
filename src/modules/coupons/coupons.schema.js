@@ -22,6 +22,10 @@ const couponProperties = {
   targetType:      { type: 'string' },
   targetSegmentId: { type: ['string', 'null'] },
   cashbackCreditTrigger: { type: 'string' },
+  couponType:            { type: 'string' },
+  applicableCategoryIds: { type: ['array', 'null'], items: { type: 'string' } },
+  applicableProductIds:  { type: ['array', 'null'], items: { type: 'string' } },
+  grantsFreeDelivery:    { type: 'boolean' },
 }
 
 const couponResponse = {
@@ -141,6 +145,7 @@ export const createCouponSchema = {
       targetSegmentId:       { type: 'string', format: 'uuid' },
       targetUserIds:         { type: 'array', items: { type: 'string', format: 'uuid' } },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'], default: 'ORDER_DELIVERED' },
+      grantsFreeDelivery:    { type: 'boolean', default: false },
     },
   },
   response: { 201: couponResponse },
@@ -172,6 +177,13 @@ export const updateCouponSchema = {
       targetSegmentId:       { type: 'string', format: 'uuid' },
       targetUserIds:         { type: 'array', items: { type: 'string', format: 'uuid' } },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'] },
+      // couponType is create-time-only (changing it later would orphan the
+      // shop_id/absorber pairing the DB's CHECK constraints enforce) — only
+      // the scope arrays and the free-delivery flag are editable after
+      // creation.
+      applicableCategoryIds: { type: ['array', 'null'], items: { type: 'string', format: 'uuid' } },
+      applicableProductIds:  { type: ['array', 'null'], items: { type: 'string', format: 'uuid' } },
+      grantsFreeDelivery:    { type: 'boolean' },
     },
   },
   response: { 200: couponResponse },

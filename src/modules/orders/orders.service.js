@@ -346,7 +346,16 @@ export class OrdersService {
           code: 'COUPON_MULTI_SHOP_UNSUPPORTED',
         }
       }
-      const couponResult = await this.couponsService.validate(userId, couponCode, subtotal)
+      // Resolved before validate() so a category/product-scoped coupon can
+      // be checked against this shop's actual cart lines (see
+      // coupons.service.js#validateCouponEligibility) instead of just the
+      // flat subtotal number — a Dairy-only coupon must not discount a
+      // cart that's all vegetables just because the total happens to
+      // clear min_order_amount.
+      couponShopId = Array.from(groupedByShop.keys())[0]
+      const couponResult = await this.couponsService.validate(
+        userId, couponCode, subtotal, groupedByShop.get(couponShopId)
+      )
       if (!couponResult.valid) {
         return { success: false, message: couponResult.message, code: 'INVALID_COUPON' }
       }
@@ -354,7 +363,6 @@ export class OrdersService {
       // Capture the discount amount so it is actually deducted from the order
       // total (previously the code was stored but the discount was dropped).
       appliedCouponDiscount = Number(couponResult.discount || 0)
-      couponShopId = Array.from(groupedByShop.keys())[0]
       if (couponResult.freeDelivery) {
         freeDeliveryOverride = true
         freeDeliveryShopId = couponShopId

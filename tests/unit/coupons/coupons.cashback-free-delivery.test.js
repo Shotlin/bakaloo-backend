@@ -87,6 +87,38 @@ describe('CouponsService.validate — FREE_DELIVERY discountType (positive)', ()
   })
 })
 
+describe('CouponsService.validate — grantsFreeDelivery (088): free delivery independent of discountType', () => {
+  it('a PERCENTAGE coupon with grantsFreeDelivery still discounts AND sets freeDelivery — both effects, not one or the other', async () => {
+    const coupon = baseCoupon({ discountType: 'PERCENTAGE', discountValue: 10, grantsFreeDelivery: true })
+    const service = new CouponsService(makeRepoMock(coupon), makeSegmentsRepoMock())
+
+    const result = await service.validate('user-1', 'TESTCODE', 500)
+
+    expect(result.valid).toBe(true)
+    expect(result.discount).toBe(50) // 10% of 500
+    expect(result.freeDelivery).toBe(true)
+  })
+
+  it('a FLAT coupon without grantsFreeDelivery does not set freeDelivery', async () => {
+    const coupon = baseCoupon({ discountType: 'FLAT', discountValue: 20, grantsFreeDelivery: false })
+    const service = new CouponsService(makeRepoMock(coupon), makeSegmentsRepoMock())
+
+    const result = await service.validate('user-1', 'TESTCODE', 500)
+
+    expect(result.freeDelivery).toBe(false)
+  })
+
+  it('a CASHBACK coupon can also grantFreeDelivery alongside the cashback', async () => {
+    const coupon = baseCoupon({ discountType: 'CASHBACK', discountValue: 30, grantsFreeDelivery: true })
+    const service = new CouponsService(makeRepoMock(coupon), makeSegmentsRepoMock())
+
+    const result = await service.validate('user-1', 'TESTCODE', 500)
+
+    expect(result.cashbackAmount).toBe(30)
+    expect(result.freeDelivery).toBe(true)
+  })
+})
+
 describe('CouponsService.validate — PERCENTAGE/FLAT still unaffected (regression)', () => {
   it('a plain FLAT coupon still reduces the order total as before', async () => {
     const coupon = baseCoupon({ discountType: 'FLAT', discountValue: 50 })
@@ -96,6 +128,11 @@ describe('CouponsService.validate — PERCENTAGE/FLAT still unaffected (regressi
 
     expect(result.discount).toBe(50)
     expect(result.cashbackAmount).toBeUndefined()
-    expect(result.freeDelivery).toBeUndefined()
+    // Explicitly false, not undefined — grantsFreeDelivery (088) means
+    // every coupon now carries a real freeDelivery verdict, not just the
+    // FREE_DELIVERY discountType. Both are falsy to any `if (freeDelivery)`
+    // caller, but `false` is the correct value for the Flutter side's
+    // non-nullable `bool freeDelivery` field.
+    expect(result.freeDelivery).toBe(false)
   })
 })

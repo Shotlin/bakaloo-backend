@@ -370,9 +370,14 @@ export class CouponsService {
    * @param {object} coupon - formatted coupon
    * @param {string} userId - user attempting to use the coupon
    * @param {number} cartTotal - total cart amount
-   * @returns {Promise<{ valid: boolean, code?: string, message?: string }>}
+   * @param {Array<{productId:string, quantity:number, effectivePrice?:number, lineTotal?:number}>} [cartItems] -
+   *   current cart lines (single shop's worth — orders.service.js already
+   *   restricts coupons to a single-shop cart). Only needed when the coupon
+   *   has a category/product scope; omit it for an unscoped coupon and the
+   *   min-order check falls back to `cartTotal` exactly as before.
+   * @returns {Promise<{ valid: boolean, code?: string, message?: string, scopedSubtotal?: number }>}
    */
-  async validateCouponEligibility(coupon, userId, cartTotal) {
+  async validateCouponEligibility(coupon, userId, cartTotal, cartItems = null) {
     if (!coupon) {
       return { valid: false, code: ERROR_CODES.COUPON_NOT_FOUND, message: 'Coupon not found' }
     }
@@ -438,8 +443,45 @@ export class CouponsService {
       return { valid: false, code: ERROR_CODES.COUPON_USER_LIMIT_REACHED, message: 'You have already used this coupon the maximum number of times' }
     }
 
-    // min_order_amount
-    if (coupon.minOrderAmount && cartTotal < coupon.minOrderAmount) {
+    // Category/product scope — a coupon with either array set only ever
+    // discounts the matching slice of the cart, not the whole order (see
+    // resolveMatchingProductIds). "Category is the optional rule": most
+    // coupons leave both arrays empty/null, which resolveMatchingProductIds
+    // treats as "matches everything", so scopedSubtotal collapses to
+    // cartTotal below with no special-casing needed here.
+    const hasScope = (coupon.applicableCategoryIds?.length > 0) || (coupon.applicableProductIds?.length > 0)
+    let scopedSubtotal = cartTotal
+    if (hasScope) {
+      if (!cartItems || cartItems.length === 0) {
+        return {
+          valid: false,
+          code: ERROR_CODES.COUPON_NOT_APPLICABLE,
+          message: 'This coupon only applies to specific products or categories that aren’t in your cart.',
+        }
+      }
+      const matchingIds = await this.repo.resolveMatchingProductIds(
+        cartItems.map((i) => i.productId),
+        { applicableCategoryIds: coupon.applicableCategoryIds, applicableProductIds: coupon.applicableProductIds }
+      )
+      scopedSubtotal = parseFloat(
+        cartItems
+          .filter((i) => matchingIds.has(i.productId))
+          .reduce((sum, i) => sum + Number(i.lineTotal ?? i.effectivePrice * i.quantity), 0)
+          .toFixed(2)
+      )
+      if (scopedSubtotal <= 0) {
+        return {
+          valid: false,
+          code: ERROR_CODES.COUPON_NOT_APPLICABLE,
+          message: 'This coupon only applies to specific products or categories that aren’t in your cart.',
+        }
+      }
+    }
+
+    // min_order_amount — checked against scopedSubtotal, which equals
+    // cartTotal for an unscoped coupon, so this is the exact same check as
+    // before for every coupon that has no category/product scope.
+    if (coupon.minOrderAmount && scopedSubtotal < coupon.minOrderAmount) {
       return {
         valid: false,
         code: ERROR_CODES.COUPON_MIN_ORDER_NOT_MET,
@@ -447,7 +489,7 @@ export class CouponsService {
       }
     }
 
-    return { valid: true }
+    return { valid: true, scopedSubtotal }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -541,25 +583,42 @@ export class CouponsService {
   // ═══════════════════════════════════════════════════════════════════
 
   /**
-   * Validate a coupon code against a cart total (customer-facing)
+   * Validate a coupon code against a cart total (customer-facing).
+   *
+   * @param {string} userId
+   * @param {string} code
+   * @param {number} cartTotal
+   * @param {Array<object>} [cartItems] - see validateCouponEligibility's jsdoc; only needed for a scoped coupon.
    */
-  async validate(userId, code, cartTotal) {
+  async validate(userId, code, cartTotal, cartItems = null) {
     const coupon = await this.repo.findByCode(code)
 
-    const eligibility = await this.validateCouponEligibility(coupon, userId, cartTotal)
+    const eligibility = await this.validateCouponEligibility(coupon, userId, cartTotal, cartItems)
     if (!eligibility.valid) {
       return { valid: false, message: eligibility.message, code: eligibility.code }
     }
+    const scopedSubtotal = eligibility.scopedSubtotal ?? cartTotal
 
-    // CASHBACK and FREE_DELIVERY don't reduce the order total at all — they
-    // produce a separate effect (a pending wallet credit / a delivery-fee
-    // waiver) that the caller (orders.service.js) applies elsewhere, so
-    // `discount` stays 0 for both.
+    // grantsFreeDelivery is an independent flag any discount type can carry
+    // (088_coupon_free_delivery_toggle.sql) — ORed with the legacy
+    // discountType==='FREE_DELIVERY' path so existing coupons of that type
+    // keep behaving exactly as before, while a PERCENTAGE/FLAT/CASHBACK
+    // coupon can now ALSO waive delivery instead of being forced to choose
+    // one or the other. Whichever is true, it's the caller's
+    // (orders.service.js) job to actually force-waive the fee — that
+    // plumbing already exists and doesn't change here.
+    const freeDelivery = coupon.discountType === 'FREE_DELIVERY' || !!coupon.grantsFreeDelivery
+
+    // CASHBACK and (legacy) FREE_DELIVERY don't reduce the order total at
+    // all — they produce a separate effect (a pending wallet credit / a
+    // delivery-fee waiver) that the caller (orders.service.js) applies
+    // elsewhere, so `discount` stays 0 for both.
     if (coupon.discountType === 'CASHBACK') {
-      const cashbackAmount = parseFloat(Math.min(coupon.discountValue, cartTotal).toFixed(2))
+      const cashbackAmount = parseFloat(Math.min(coupon.discountValue, scopedSubtotal).toFixed(2))
       return {
         valid: true,
         discount: 0,
+        freeDelivery,
         cashbackAmount,
         cashbackCreditTrigger: coupon.cashbackCreditTrigger || 'ORDER_DELIVERED',
         discountType: coupon.discountType,
@@ -590,10 +649,13 @@ export class CouponsService {
       }
     }
 
-    // Calculate discount
+    // Calculate discount — against scopedSubtotal, which equals cartTotal
+    // for an unscoped coupon (see validateCouponEligibility), so this is
+    // identical to the previous behavior whenever there's no category/
+    // product scope.
     let discount = 0
     if (coupon.discountType === 'PERCENTAGE') {
-      discount = (cartTotal * coupon.discountValue) / 100
+      discount = (scopedSubtotal * coupon.discountValue) / 100
       if (coupon.maxDiscount && discount > coupon.maxDiscount) {
         discount = coupon.maxDiscount
       }
@@ -601,11 +663,12 @@ export class CouponsService {
       discount = coupon.discountValue
     }
 
-    discount = parseFloat(Math.min(discount, cartTotal).toFixed(2))
+    discount = parseFloat(Math.min(discount, scopedSubtotal).toFixed(2))
 
     return {
       valid: true,
       discount,
+      freeDelivery,
       discountType: coupon.discountType,
       discountValue: coupon.discountValue,
       description: coupon.description ?? null,
