@@ -28,6 +28,20 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+// This suite predates the purchase-limits feature and exercises none of its
+// behavior (that's covered separately) — CartService default-constructs a
+// real PurchaseLimitsService when no dep is injected, which would otherwise
+// issue an extra, unmocked `query()` call on every addItem/updateItem/
+// validateCart and break every test's sequential `query.mockResolvedValueOnce`
+// setup. Stubbing it to always report "no rule" (`ok: true`) keeps this file
+// scoped to what it actually tests.
+vi.mock('../../../src/modules/purchase-limits/purchase-limits.service.js', () => ({
+  PurchaseLimitsService: vi.fn().mockImplementation(() => ({
+    evaluate: vi.fn().mockResolvedValue({ ok: true }),
+    evaluateCheckout: vi.fn().mockResolvedValue([]),
+  })),
+}))
+
 import {
   CartService,
   MAX_CART_ITEMS,

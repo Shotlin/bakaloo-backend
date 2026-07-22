@@ -5,6 +5,7 @@ import {
   STOCK_MOVEMENT_TYPES,
   STOCK_MOVEMENT_SOURCES,
 } from '../shop-products/shop-products.repository.js'
+import { PurchaseLimitsService } from '../purchase-limits/purchase-limits.service.js'
 
 /**
  * Order Splitter — groups a multi-shop cart into one order per shop and
@@ -60,6 +61,7 @@ export class OrderSplitterService {
     shopProductsService = null,
     feeSettingsService = null,
     totalsEngine = null,
+    purchaseLimitsService = null,
     fees = {},
   }) {
     if (!ordersRepository) {
@@ -71,6 +73,9 @@ export class OrderSplitterService {
     this.ordersRepo = ordersRepository
     this.shopProductsRepo = shopProductsRepository
     this.shopProductsService = shopProductsService
+    // Admin-configured category/product purchase caps — final,
+    // race-condition-safe re-check, run inside this method's transaction.
+    this.purchaseLimitsService = purchaseLimitsService || new PurchaseLimitsService()
     // Canonical fee engine + config. When provided, per-shop fees are
     // computed dynamically (distance-based delivery + configurable fees).
     // When absent (e.g. legacy unit tests), the static `fees` fallback
@@ -323,6 +328,29 @@ export class OrderSplitterService {
      * Socket.IO server or queue cannot affect transaction semantics.
      */
     const stockTransitions = []
+
+    // ─── 0. Purchase-limit re-check (race-safe, spans every shop) ─────
+    // Distinct from the per-item max_order_qty re-check inside the loop
+    // below: a purchase-limit rule is a platform-wide, per-user cap that
+    // can span multiple products (a CATEGORY rule) and multiple shops, so
+    // it's resolved once here across the WHOLE checkout rather than per
+    // shop group. Acquires an advisory lock per restricted rule so two
+    // concurrent checkouts from the same user can't both slip under the
+    // same cap (see PurchaseLimitsService#evaluateCheckout). Bails before
+    // any shop_products lock/mutation, same as the "failures.length > 0"
+    // bail below, so a breach here never touches stock.
+    const allItemsAcrossShops = Array.from(groups.values()).flat()
+    const purchaseLimitFailures = await this.purchaseLimitsService.evaluateCheckout(
+      userId,
+      allItemsAcrossShops,
+      client
+    )
+    if (purchaseLimitFailures.length > 0) {
+      const err = new Error('One or more items exceed a purchase limit')
+      err.code = 'CHECKOUT_PARTIAL_FAIL'
+      err.failures = purchaseLimitFailures
+      throw err
+    }
 
     // Iterate shops in a stable order so test snapshots stay deterministic
     const shopIds = Array.from(groups.keys()).sort()

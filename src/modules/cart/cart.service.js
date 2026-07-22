@@ -3,6 +3,7 @@ import { query } from '../../config/database.js'
 import { AllocationService } from '../allocation/allocation.service.js'
 import { AllocationRepository } from '../allocation/allocation.repository.js'
 import { AbandonedCartsRepository } from '../abandoned-carts/abandoned-carts.repository.js'
+import { PurchaseLimitsService } from '../purchase-limits/purchase-limits.service.js'
 
 /**
  * Multi-vendor cart service.
@@ -31,6 +32,12 @@ export class CartService {
       new AllocationService(new AllocationRepository())
     this.abandonedCartsRepo =
       deps.abandonedCartsRepository || new AbandonedCartsRepository()
+    // Admin-configured per-category/per-product order + rolling-window
+    // purchase caps (Requirement: purchase-limits feature). Resolves to
+    // { ok: true } with no queries for any product that has no active
+    // rule, so unrestricted categories are never touched by this check.
+    this.purchaseLimitsService =
+      deps.purchaseLimitsService || new PurchaseLimitsService()
     // Optional — only present when constructed from a route handler
     // (cart.routes.js passes { fastify }). The worker builds a plain
     // CartService with no fastify, so recovery-flip socket emits are
@@ -309,6 +316,28 @@ export class CartService {
       }
     }
 
+    // Admin-configured category/product purchase-limit check (separate from
+    // the SKU-level max_order_qty above). Evaluated against the PROJECTED
+    // cart — i.e. including this add — so a category cap counts every
+    // matching product already in the cart, not just this line. Resolves
+    // to { ok: true } immediately for any product with no active rule, so
+    // unrestricted categories never pay the extra query.
+    const projectedItemsForLimit = existingIndex >= 0
+      ? cartItems.map((it, idx) => (idx === existingIndex ? { ...it, quantity: newQty } : it))
+      : [...cartItems, { productId: resolvedProductId, shopId: resolvedShopId, quantity: newQty }]
+    const limitCheck = await this.purchaseLimitsService.evaluate(userId, {
+      productId: resolvedProductId,
+      cartItems: projectedItemsForLimit,
+    })
+    if (!limitCheck.ok) {
+      return {
+        success: false,
+        message: limitCheck.message,
+        code: limitCheck.code,
+        details: { productId: resolvedProductId, shopId: resolvedShopId },
+      }
+    }
+
     const stockQuantity = Number(sp.stock_quantity)
     if (newQty > stockQuantity) {
       return {
@@ -476,6 +505,24 @@ export class CartService {
         message: `Maximum ${maxOrderQty} units of "${sp.name}" allowed per order`,
         code: 'MAX_QTY_EXCEEDED',
         details: { productId: item.productId, shopId: item.shopId, max: maxOrderQty },
+      }
+    }
+
+    // Admin-configured category/product purchase-limit check — see the
+    // matching block in addItem() above for the full rationale. `qty` here
+    // is the absolute new quantity for this line (not a delta), so the
+    // projection simply replaces this line's quantity in place.
+    const projectedItemsForLimit = cartItems.map((it, i) => (i === idx ? { ...it, quantity: qty } : it))
+    const limitCheck = await this.purchaseLimitsService.evaluate(userId, {
+      productId: item.productId,
+      cartItems: projectedItemsForLimit,
+    })
+    if (!limitCheck.ok) {
+      return {
+        success: false,
+        message: limitCheck.message,
+        code: limitCheck.code,
+        details: { productId: item.productId, shopId: item.shopId },
       }
     }
 
@@ -668,6 +715,29 @@ export class CartService {
         continue
       }
 
+      // Admin-configured category/product purchase-limit re-check at
+      // checkout time. Passes the FULL current cart (not a projection —
+      // nothing is being added here, we're validating what's already
+      // there) so a category cap sees every matching line. When a
+      // category is over its cap, every line sharing that category fails
+      // together with the same reason (rather than silently keeping some
+      // and dropping others) — same "strip and let the customer re-add
+      // within the cap" resolution this function already uses for every
+      // other failure reason below.
+      const limitCheck = await this.purchaseLimitsService.evaluate(userId, {
+        productId: item.productId,
+        cartItems,
+      })
+      if (!limitCheck.ok) {
+        failed.push({
+          productId: item.productId,
+          shopId: item.shopId,
+          reason: limitCheck.message,
+          code: limitCheck.code,
+        })
+        continue
+      }
+
       const stockQuantity = Number(sp.stock_quantity)
       if (item.quantity > stockQuantity) {
         failed.push({
@@ -851,6 +921,10 @@ export class CartService {
       productId: sp.product_id,
       shopId: sp.shop_id,
       shopProductId: sp.shop_product_id,
+      // Purchase-limits feature: lets the Flutter cart screen evaluate a
+      // CATEGORY-scoped rule from a cart line alone, without a second
+      // product lookup.
+      categoryId: sp.category_id || null,
       // Phase 3: option/family/badge metadata for Flutter UI
       productFamilyId: sp.product_family_id || null,
       familyName: sp.family_name || null,

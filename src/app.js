@@ -149,6 +149,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/cart-milestones',
   })
 
+  // Purchase Limits — admin-configured per-category/per-product order and
+  // rolling-window purchase caps (anti-abuse, independent of coupons)
+  await app.register(import('./modules/purchase-limits/purchase-limits.routes.js'), {
+    prefix: '/api/v1/purchase-limits',
+  })
+
   // Addresses — fully implemented
   await app.register(import('./modules/addresses/addresses.routes.js'), {
     prefix: '/api/v1/addresses',

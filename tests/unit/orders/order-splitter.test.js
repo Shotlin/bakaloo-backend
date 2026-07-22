@@ -25,6 +25,20 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
+// This suite predates the purchase-limits feature and exercises none of its
+// behavior (that's covered separately) — OrderSplitterService
+// default-constructs a real PurchaseLimitsService when no dep is injected,
+// which would otherwise issue extra, unmocked `client.query()` calls at the
+// start of every createOrders() and shift every test's sequential
+// `client.query.mockResolvedValueOnce` setup by one. Stubbing it to always
+// report "no failures" keeps this file scoped to what it actually tests.
+vi.mock('../../../src/modules/purchase-limits/purchase-limits.service.js', () => ({
+  PurchaseLimitsService: vi.fn().mockImplementation(() => ({
+    evaluate: vi.fn().mockResolvedValue({ ok: true }),
+    evaluateCheckout: vi.fn().mockResolvedValue([]),
+  })),
+}))
+
 import { OrderSplitterService } from '../../../src/modules/orders/order-splitter.service.js'
 
 // ═══════════════════════════════════════════════════════════════════════

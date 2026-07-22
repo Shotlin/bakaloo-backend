@@ -29,6 +29,7 @@ import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.s
 import { CashbackService } from '../cashback/cashback.service.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
 import { PaymentOffersService } from '../payment-offers/payment-offers.service.js'
+import { PurchaseLimitsService } from '../purchase-limits/purchase-limits.service.js'
 import { getStoreStatusService } from '../store-status/store-status.routes.js'
 import { getDeliveryCalendarService } from '../delivery-calendar/delivery-calendar.routes.js'
 
@@ -49,7 +50,16 @@ export class OrdersService {
 
     // Collaborators
     this.cartRepo = options.cartRepository || new CartRepository()
-    this.cartService = options.cartService || new CartService(this.cartRepo)
+    // Admin-configured category/product purchase caps — constructed before
+    // cartService (below) so both it and orderSplitter (further down)
+    // share this exact instance and always agree on the same rules.
+    // Stateless (every call reads the DB fresh), so sharing is purely
+    // about consistency, not correctness.
+    this.purchaseLimitsService =
+      options.purchaseLimitsService || new PurchaseLimitsService()
+    this.cartService =
+      options.cartService ||
+      new CartService(this.cartRepo, { purchaseLimitsService: this.purchaseLimitsService })
     this.abandonedCartsRepo =
       options.abandonedCartsRepository || new AbandonedCartsRepository()
     this.addressRepo = options.addressesRepository || new AddressesRepository()
@@ -99,6 +109,7 @@ export class OrdersService {
         shopProductsService: this.shopProductsService,
         feeSettingsService: this.feeSettingsService,
         totalsEngine: this.totalsEngine,
+        purchaseLimitsService: this.purchaseLimitsService,
         fees: {
           deliveryFee: DELIVERY_FEE,
           platformFee: PLATFORM_FEE,
