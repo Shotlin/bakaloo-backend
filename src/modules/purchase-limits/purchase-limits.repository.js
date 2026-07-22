@@ -7,6 +7,19 @@ const COLUMNS = `
   created_by, updated_by, created_at, updated_at
 `
 
+// Same columns as COLUMNS, qualified with the `r` alias. findAll/findById
+// LEFT JOIN categories/products to pre-join their names — both of those
+// tables also have an `id` column, so an unqualified `id` (or `created_at`,
+// present on all three) is ambiguous to Postgres the moment the join is in
+// scope. INSERT/UPDATE...RETURNING (create/update below) have no `r` alias
+// available, so they keep using the unqualified COLUMNS.
+const COLUMNS_R = `
+  r.id, r.scope, r.shop_id, r.target_type, r.category_id, r.product_id, r.label,
+  r.max_qty_per_order, r.window_enabled, r.window_period, r.window_count,
+  r.max_qty_per_window, r.exempt_order_cap_with_other_items, r.is_active,
+  r.created_by, r.updated_by, r.created_at, r.updated_at
+`
+
 const WINDOW_DAYS_PER_UNIT = { DAY: 1, WEEK: 7, MONTH: 30 }
 
 /**
@@ -30,7 +43,7 @@ export class PurchaseLimitsRepository {
 
   async findAll() {
     const { rows } = await query(
-      `SELECT ${COLUMNS},
+      `SELECT ${COLUMNS_R},
               c.name AS category_name,
               p.name AS product_name
          FROM purchase_limit_rules r
@@ -43,7 +56,7 @@ export class PurchaseLimitsRepository {
 
   async findById(id) {
     const { rows } = await query(
-      `SELECT ${COLUMNS},
+      `SELECT ${COLUMNS_R},
               c.name AS category_name,
               p.name AS product_name
          FROM purchase_limit_rules r
