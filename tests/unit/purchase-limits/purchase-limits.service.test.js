@@ -442,6 +442,12 @@ describe('PurchaseLimitsService.getStatusForUser — powers the Flutter "+" butt
     expect(status.remainingThisOrder).toBeNull()
     expect(status.orderCapLifted).toBe(true)
     expect(status.isAtLimit).toBe(false)
+    // remainingThisOrder is null (lifted) AND remainingInWindow is null (no
+    // window cap on this rule) — remainingToAdd must still come back as a
+    // real, non-null number: the Flutter model's `remainingToAdd` is a
+    // non-nullable int, and (json['remainingToAdd'] as num) throws on null.
+    expect(status.remainingToAdd).not.toBeNull()
+    expect(typeof status.remainingToAdd).toBe('number')
   })
 
   it('never goes negative when the cart already exceeds the cap (e.g. admin just lowered it)', async () => {

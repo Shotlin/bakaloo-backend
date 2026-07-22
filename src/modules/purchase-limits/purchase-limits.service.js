@@ -5,6 +5,12 @@ import { CartRepository } from '../cart/cart.repository.js'
 
 const WINDOW_UNIT_LABEL = { DAY: 'day', WEEK: 'week', MONTH: 'month' }
 
+// "remainingToAdd" for a restricted product whose caps don't currently bind
+// (e.g. the per-order cap was just exempted by exemptOrderCapWithOtherItems,
+// and the rule has no window cap) — far above any real cart quantity, so it
+// never reads as "at limit" while staying a plain non-negative integer.
+const UNCAPPED_FOR_THIS_REQUEST = 999999
+
 function windowLabel(period, count) {
   const n = Number(count) || 1
   const unit = WINDOW_UNIT_LABEL[period] || 'period'
@@ -326,9 +332,19 @@ export class PurchaseLimitsService {
         ? Math.max(rule.maxQtyPerWindow - usedInWindow - cartQtyInScope, 0)
         : null
 
-      const remainingToAdd = [remainingThisOrder, remainingInWindow]
-        .filter((v) => v != null)
-        .reduce((min, v) => (min == null ? v : Math.min(min, v)), null)
+      // remainingThisOrder and remainingInWindow can BOTH be null at once —
+      // a rule with only a per-order cap (no window cap) whose
+      // exemptOrderCapWithOtherItems just kicked in has nothing left to
+      // constrain this add right now. The Flutter client's `remainingToAdd`
+      // is a non-nullable int (see purchase_limit_status_model.dart), so
+      // this can never come back as null even though the rule itself is
+      // still "active" — fall back to a large sentinel meaning "nothing
+      // stopping you this time" rather than breaking the response shape.
+      const remainingToAdd = remainingThisOrder == null && remainingInWindow == null
+        ? UNCAPPED_FOR_THIS_REQUEST
+        : [remainingThisOrder, remainingInWindow]
+            .filter((v) => v != null)
+            .reduce((min, v) => (min == null ? v : Math.min(min, v)), null)
 
       results.push({
         productId,
@@ -342,8 +358,8 @@ export class PurchaseLimitsService {
         maxQtyPerWindow: rule.maxQtyPerWindow,
         usedInWindow: rule.windowEnabled ? usedInWindow : null,
         remainingInWindow,
-        remainingToAdd: remainingToAdd ?? null,
-        isAtLimit: remainingToAdd != null && remainingToAdd <= 0,
+        remainingToAdd,
+        isAtLimit: remainingToAdd <= 0,
         orderCapLifted: !!(rule.exemptOrderCapWithOtherItems && hasOtherItems),
       })
     }
