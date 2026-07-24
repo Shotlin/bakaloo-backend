@@ -1,10 +1,12 @@
 import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { FirstTimeOffersRepository } from './first-time-offers.repository.js'
+import { CouponsRepository } from '../coupons/coupons.repository.js'
 
 export class FirstTimeOffersService {
-  constructor(repository = new FirstTimeOffersRepository()) {
+  constructor(repository = new FirstTimeOffersRepository(), couponsRepo = new CouponsRepository()) {
     this.repo = repository
+    this.couponsRepo = couponsRepo
   }
 
   async listAll() {
@@ -52,10 +54,35 @@ export class FirstTimeOffersService {
     }
   }
 
+  /**
+   * Same gap as cart-milestones.service.js#_validateCouponUnlock: a
+   * COUPON_UNLOCK reward only takes effect via coupon_target_users, which
+   * coupons.service.js#_isTargetEligible only consults when the coupon's
+   * targetType is 'INDIVIDUAL'. Any other targetType makes the "unlock" a
+   * silent no-op.
+   */
+  async _validateCouponUnlock(data) {
+    if (data.rewardType !== 'COUPON_UNLOCK') return null
+    if (!data.unlockCouponId) {
+      return 'unlockCouponId is required when rewardType is COUPON_UNLOCK'
+    }
+    const coupon = await this.couponsRepo.findById(data.unlockCouponId)
+    if (!coupon) return 'Selected coupon was not found'
+    if (coupon.targetType !== 'INDIVIDUAL') {
+      return `"${coupon.code}" must have its Target Audience set to "Individual" to work as a first-time-offer reward — it's currently "${coupon.targetType}", so unlocking it would have no effect on who can use it.`
+    }
+    if (!coupon.isActive) {
+      return `"${coupon.code}" is inactive — activate it before linking it as a first-time-offer reward.`
+    }
+    return null
+  }
+
   async create(data, actor) {
     if (!data.name || !data.rewardType) {
       return { success: false, message: 'name and rewardType are required' }
     }
+    const couponError = await this._validateCouponUnlock(data)
+    if (couponError) return { success: false, message: couponError }
     const offer = await this.repo.create({ ...data, createdBy: actor.userId })
     emitAudit('first_time_offer_created', {
       actor_user_id: actor.userId,
@@ -74,6 +101,9 @@ export class FirstTimeOffersService {
   async update(id, data, actor) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Offer not found' }
+    const merged = { ...existing, ...data }
+    const couponError = await this._validateCouponUnlock(merged)
+    if (couponError) return { success: false, message: couponError }
     const offer = await this.repo.update(id, data)
     emitAudit('first_time_offer_updated', {
       actor_user_id: actor.userId,

@@ -2,14 +2,17 @@ import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { CartMilestonesRepository } from './cart-milestones.repository.js'
 import { CustomerSegmentsRepository } from '../admin/customer-segments/customer-segments.repository.js'
+import { CouponsRepository } from '../coupons/coupons.repository.js'
 
 export class CartMilestonesService {
   constructor(
     repository = new CartMilestonesRepository(),
-    segmentsRepo = new CustomerSegmentsRepository()
+    segmentsRepo = new CustomerSegmentsRepository(),
+    couponsRepo = new CouponsRepository()
   ) {
     this.repo = repository
     this.segmentsRepo = segmentsRepo
+    this.couponsRepo = couponsRepo
   }
 
   async listAll() {
@@ -112,10 +115,40 @@ export class CartMilestonesService {
     }
   }
 
+  /**
+   * A COUPON_UNLOCK reward grants access by inserting the user into
+   * coupon_target_users once they cross the milestone (see
+   * orders.service.js) — but coupons.service.js#_isTargetEligible only
+   * ever consults coupon_target_users for a coupon whose targetType is
+   * 'INDIVIDUAL'. Linking any other targetType makes the "unlock" a silent
+   * no-op: the coupon was either already open to everyone (ALL/SEGMENT) or
+   * permanently unreachable through this milestone (FIRST_TIME, etc — that
+   * targeting rule runs instead and ignores coupon_target_users entirely).
+   * Catch this at save time instead of letting an admin discover it only
+   * when a customer's checkout silently fails to apply the reward.
+   */
+  async _validateCouponUnlock(data) {
+    if (data.rewardType !== 'COUPON_UNLOCK') return null
+    if (!data.unlockCouponId) {
+      return 'unlockCouponId is required when rewardType is COUPON_UNLOCK'
+    }
+    const coupon = await this.couponsRepo.findById(data.unlockCouponId)
+    if (!coupon) return 'Selected coupon was not found'
+    if (coupon.targetType !== 'INDIVIDUAL') {
+      return `"${coupon.code}" must have its Target Audience set to "Individual" to work as a milestone reward — it's currently "${coupon.targetType}", so reaching this milestone would have no effect on who can use it.`
+    }
+    if (!coupon.isActive) {
+      return `"${coupon.code}" is inactive — activate it before linking it as a milestone reward.`
+    }
+    return null
+  }
+
   async create(data, actor) {
     if (!data.name || !data.rewardType || data.minCartAmount == null) {
       return { success: false, message: 'name, rewardType and minCartAmount are required' }
     }
+    const couponError = await this._validateCouponUnlock(data)
+    if (couponError) return { success: false, message: couponError }
     const milestone = await this.repo.create({ ...data, createdBy: actor.userId })
     emitAudit('cart_milestone_created', {
       actor_user_id: actor.userId,
@@ -134,6 +167,9 @@ export class CartMilestonesService {
   async update(id, data, actor) {
     const existing = await this.repo.findById(id)
     if (!existing) return { success: false, message: 'Milestone not found' }
+    const merged = { ...existing, ...data }
+    const couponError = await this._validateCouponUnlock(merged)
+    if (couponError) return { success: false, message: couponError }
     const milestone = await this.repo.update(id, data)
     emitAudit('cart_milestone_updated', {
       actor_user_id: actor.userId,

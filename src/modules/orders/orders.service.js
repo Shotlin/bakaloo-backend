@@ -571,51 +571,73 @@ export class OrdersService {
 
     // 6. Post-commit cleanup + side effects (best-effort; do not fail the
     //    customer if any of these throw).
-    try {
-      // Abandoned-cart conversion: fires the moment order rows exist,
-      // regardless of payment method. Cart-clearing itself is deferred for
-      // ONLINE/WALLET (see below) and for those methods happens later in
-      // payments.service.js / wallet.service.js after payment confirms —
-      // "order created" here is the one method-agnostic point common to
-      // every payment path, so it's hooked here rather than at cart-clear.
-      if (createdOrders.length > 0) {
-        await this.abandonedCartsRepo
-          .markConvertedByUserId(userId, createdOrders[0].id)
-          .catch((err) =>
-            logger.warn({ userId, err: err.message }, 'Abandoned-cart conversion flip failed')
-          )
-      }
+    // Each follow-through step below is independently isolated (its own
+    // try/catch) rather than sharing one try block around all of them. They
+    // used to share one — one early failure (e.g. the abandoned-cart flip)
+    // silently skipped every step after it, including coupon-usage
+    // recording and first-time-offer/milestone/payment-offer reward
+    // granting, while checkout still reported success to the customer with
+    // no trace beyond a single generic warning log. A logging helper keeps
+    // each catch block one line.
+    const logStepFailure = (step, err) =>
+      logger.warn(
+        { err: err.message, userId, orderIds: createdOrders.map((o) => o.id), step },
+        'Post-order follow-through step failed'
+      )
 
-      // For ONLINE and WALLET payments, do NOT clear cart yet — cart is only
-      // cleared after successful payment verification / wallet deduction.
-      // This prevents the "cart disappeared but payment failed" bug.
-      if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+    // Abandoned-cart conversion: fires the moment order rows exist,
+    // regardless of payment method. Cart-clearing itself is deferred for
+    // ONLINE/WALLET (see below) and for those methods happens later in
+    // payments.service.js / wallet.service.js after payment confirms —
+    // "order created" here is the one method-agnostic point common to
+    // every payment path, so it's hooked here rather than at cart-clear.
+    if (createdOrders.length > 0) {
+      await this.abandonedCartsRepo
+        .markConvertedByUserId(userId, createdOrders[0].id)
+        .catch((err) => logStepFailure('abandoned_cart_conversion', err))
+    }
+
+    // For ONLINE and WALLET payments, do NOT clear cart yet — cart is only
+    // cleared after successful payment verification / wallet deduction.
+    // This prevents the "cart disappeared but payment failed" bug.
+    if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+      try {
         await this.cartService.clearCart(userId)
+      } catch (err) {
+        logStepFailure('clear_cart', err)
       }
-      // Coupon usage counts against the customer's per-coupon limit the
-      // instant it's recorded — for ONLINE/WALLET, defer this to actual
-      // payment confirmation (payments.service.js / wallet.service.js call
-      // couponsService.recordUsageForOrder(orderId) there), same reasoning
-      // as the cart-clear deferral just above. Recording it here
-      // unconditionally meant a customer whose wallet/online payment never
-      // completed still had their coupon burned against a limit they never
-      // successfully used it under.
-      if (
-        appliedCouponCode &&
-        createdOrders.length === 1 &&
-        normalizedPaymentMethod !== 'ONLINE' &&
-        normalizedPaymentMethod !== 'WALLET'
-      ) {
+    }
+
+    // Coupon usage counts against the customer's per-coupon limit the
+    // instant it's recorded — for ONLINE/WALLET, defer this to actual
+    // payment confirmation (payments.service.js / wallet.service.js call
+    // couponsService.recordUsageForOrder(orderId) there), same reasoning
+    // as the cart-clear deferral just above. Recording it here
+    // unconditionally meant a customer whose wallet/online payment never
+    // completed still had their coupon burned against a limit they never
+    // successfully used it under.
+    if (
+      appliedCouponCode &&
+      createdOrders.length === 1 &&
+      normalizedPaymentMethod !== 'ONLINE' &&
+      normalizedPaymentMethod !== 'WALLET'
+    ) {
+      try {
         await this.couponsService.recordUsage(
           appliedCouponCode,
           userId,
           createdOrders[0].id,
           { shopId: couponShopId, discountAmount: appliedCouponDiscount }
         )
+      } catch (err) {
+        logStepFailure('coupon_record_usage', err)
       }
-      // CASHBACK-type coupon follow-through: create the PENDING cashback
-      // row, same as a first-time-offer's WALLET_CASHBACK reward.
-      if (appliedCouponCashback && createdOrders.length === 1) {
+    }
+
+    // CASHBACK-type coupon follow-through: create the PENDING cashback
+    // row, same as a first-time-offer's WALLET_CASHBACK reward.
+    if (appliedCouponCashback && createdOrders.length === 1) {
+      try {
         await this.cashbackService.createPending({
           orderId: createdOrders[0].id,
           userId,
@@ -624,13 +646,18 @@ export class OrdersService {
           amount: appliedCouponCashback.amount,
           creditTrigger: appliedCouponCashback.creditTrigger,
         })
+      } catch (err) {
+        logStepFailure('coupon_cashback_pending', err)
       }
-      // First-time offer follow-through: create the PENDING cashback row
-      // (credited later by the matching order-lifecycle hook) or unlock the
-      // reward coupon for this user. Nothing here touches the bill — that
-      // was already applied via appliedCouponDiscount/freeDeliveryOverride
-      // before the order was created.
-      if (firstTimeOffer && firstTimeReward && createdOrders.length === 1) {
+    }
+
+    // First-time offer follow-through: create the PENDING cashback row
+    // (credited later by the matching order-lifecycle hook) or unlock the
+    // reward coupon for this user. Nothing here touches the bill — that
+    // was already applied via appliedCouponDiscount/freeDeliveryOverride
+    // before the order was created.
+    if (firstTimeOffer && firstTimeReward && createdOrders.length === 1) {
+      try {
         if (firstTimeReward.cashbackAmount) {
           await this.cashbackService.createPending({
             orderId: createdOrders[0].id,
@@ -644,9 +671,14 @@ export class OrdersService {
         if (firstTimeReward.unlockCouponId) {
           await this.couponsRepo.addTargetUser(firstTimeReward.unlockCouponId, userId)
         }
+      } catch (err) {
+        logStepFailure('first_time_offer_follow_through', err)
       }
-      // Cart milestone follow-through — same pattern as first-time offers.
-      if (cartMilestone && cartMilestoneReward && createdOrders.length === 1) {
+    }
+
+    // Cart milestone follow-through — same pattern as first-time offers.
+    if (cartMilestone && cartMilestoneReward && createdOrders.length === 1) {
+      try {
         if (cartMilestoneReward.cashbackAmount) {
           await this.cashbackService.createPending({
             orderId: createdOrders[0].id,
@@ -661,11 +693,16 @@ export class OrdersService {
           await this.couponsRepo.addTargetUser(cartMilestoneReward.unlockCouponId, userId)
         }
         await this.cartMilestonesService.recordUsage(cartMilestone.id, userId, createdOrders[0].id)
+      } catch (err) {
+        logStepFailure('cart_milestone_follow_through', err)
       }
-      // Payment offer follow-through — was previously entirely missing;
-      // getPublicOffers() only ever computed a lock/unlock display flag,
-      // nothing here ever credited the cashback a customer actually earned.
-      if (paymentOfferMatch && createdOrders.length === 1) {
+    }
+
+    // Payment offer follow-through — was previously entirely missing;
+    // getPublicOffers() only ever computed a lock/unlock display flag,
+    // nothing here ever credited the cashback a customer actually earned.
+    if (paymentOfferMatch && createdOrders.length === 1) {
+      try {
         await this.cashbackService.createPending({
           orderId: createdOrders[0].id,
           userId,
@@ -675,12 +712,9 @@ export class OrdersService {
           creditTrigger: paymentOfferMatch.creditTrigger,
         })
         await this.paymentOffersService.recordUsage(paymentOfferMatch.offerId, userId, createdOrders[0].id)
+      } catch (err) {
+        logStepFailure('payment_offer_follow_through', err)
       }
-    } catch (err) {
-      logger.warn(
-        { err: err.message, userId, orderIds: createdOrders.map((o) => o.id) },
-        'Post-order cleanup partial failure'
-      )
     }
 
     // Stock-transition side effects (Req 11.1–11.4, 11.6, 11.9). Fired AFTER
