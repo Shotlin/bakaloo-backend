@@ -383,6 +383,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/admin/pincode-mappings',
   })
 
+  // Coverage Map (admin) — per-shop customer coverage: store pin, pincode
+  // boundary shapes, and every covered customer's pin
+  await app.register(import('./modules/coverage-map/coverage-map.routes.js'), {
+    prefix: '/api/v1/admin/coverage-map',
+  })
+
   // Store Status (admin) — manual open/closed override + weekly hours
   const { adminStoreStatusRoutes } = await import('./modules/store-status/store-status.routes.js')
   await app.register(adminStoreStatusRoutes, {
