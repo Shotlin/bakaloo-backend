@@ -395,6 +395,40 @@ export class CouponsRepository {
   }
 
   /**
+   * Human-readable names for a set of category ids — lets the "this coupon
+   * doesn't match your cart" message name the actual category (e.g. "Fresh
+   * Vegetables") instead of a generic "specific products or categories".
+   *
+   * @param {string[]} categoryIds
+   * @returns {Promise<string[]>}
+   */
+  async getCategoryNames(categoryIds) {
+    if (!Array.isArray(categoryIds) || categoryIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM categories WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [categoryIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
+  /**
+   * Human-readable names for a set of product ids — same purpose as
+   * getCategoryNames(), for coupons scoped to specific products instead of
+   * (or in addition to) categories.
+   *
+   * @param {string[]} productIds
+   * @returns {Promise<string[]>}
+   */
+  async getProductNames(productIds) {
+    if (!Array.isArray(productIds) || productIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM products WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [productIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
+  /**
    * Delete a coupon
    */
   async delete(id) {

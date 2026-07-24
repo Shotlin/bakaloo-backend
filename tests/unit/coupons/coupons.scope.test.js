@@ -16,7 +16,7 @@ const PROD_MILK = 'prod-milk'
 const PROD_CHEESE = 'prod-cheese'
 const PROD_TOMATO = 'prod-tomato'
 
-function makeRepoMock(coupon, { matchingIds } = {}) {
+function makeRepoMock(coupon, { matchingIds, categoryNames, productNames } = {}) {
   return {
     findByCode: vi.fn().mockResolvedValue(coupon),
     getUserUsageCount: vi.fn().mockResolvedValue(0),
@@ -24,6 +24,8 @@ function makeRepoMock(coupon, { matchingIds } = {}) {
     isTargetUser: vi.fn().mockResolvedValue(false),
     hasPriorOrder: vi.fn().mockResolvedValue(false),
     resolveMatchingProductIds: vi.fn().mockResolvedValue(matchingIds ?? new Set()),
+    getCategoryNames: vi.fn().mockResolvedValue(categoryNames ?? []),
+    getProductNames: vi.fn().mockResolvedValue(productNames ?? []),
   }
 }
 
@@ -108,18 +110,21 @@ describe('CouponsService.validate — category/product scope (088)', () => {
     expect(result.code).toBe('COUPON_MIN_ORDER_NOT_MET')
   })
 
-  it('rejects with COUPON_NOT_APPLICABLE when nothing in the cart matches the coupon\'s scope at all (e.g. a Dairy coupon on an all-vegetable cart)', async () => {
+  it('rejects with COUPON_NOT_APPLICABLE when nothing in the cart matches the coupon\'s scope at all (e.g. a Dairy coupon on an all-vegetable cart), naming the actual category in the message', async () => {
     const coupon = baseCoupon({
       discountType: 'PERCENTAGE', discountValue: 10,
       applicableCategoryIds: ['cat-dairy'],
     })
-    const repo = makeRepoMock(coupon, { matchingIds: new Set() }) // nothing matches
+    const repo = makeRepoMock(coupon, { matchingIds: new Set(), categoryNames: ['Dairy'] }) // nothing matches
     const service = new CouponsService(repo, makeSegmentsRepoMock())
 
     const result = await service.validate('user-1', 'DAIRY10', 150, cartItems)
 
     expect(result.valid).toBe(false)
     expect(result.code).toBe('COUPON_NOT_APPLICABLE')
+    // Previously a flat "specific products or categories" with no way for
+    // the customer to act on it — now names what actually qualifies.
+    expect(result.message).toContain('Dairy')
   })
 
   it('rejects a scoped coupon with no cart items provided at all, rather than silently discounting the whole order', async () => {
@@ -132,6 +137,20 @@ describe('CouponsService.validate — category/product scope (088)', () => {
     expect(result.valid).toBe(false)
     expect(result.code).toBe('COUPON_NOT_APPLICABLE')
     expect(repo.resolveMatchingProductIds).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the generic message when category/product names can\'t be resolved (e.g. a stale/deleted category id)', async () => {
+    const coupon = baseCoupon({
+      discountType: 'PERCENTAGE', discountValue: 10,
+      applicableCategoryIds: ['cat-deleted'],
+    })
+    const repo = makeRepoMock(coupon, { matchingIds: new Set(), categoryNames: [] })
+    const service = new CouponsService(repo, makeSegmentsRepoMock())
+
+    const result = await service.validate('user-1', 'DAIRY10', 150, cartItems)
+
+    expect(result.valid).toBe(false)
+    expect(result.message).toContain('specific products or categories')
   })
 
   it('product-scoped coupon: discount and minOrderAmount both apply against just that product\'s line total', async () => {

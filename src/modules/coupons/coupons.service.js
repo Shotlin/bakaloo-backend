@@ -456,7 +456,7 @@ export class CouponsService {
         return {
           valid: false,
           code: ERROR_CODES.COUPON_NOT_APPLICABLE,
-          message: 'This coupon only applies to specific products or categories that aren’t in your cart.',
+          message: await this._buildScopeMismatchMessage(coupon),
         }
       }
       const matchingIds = await this.repo.resolveMatchingProductIds(
@@ -473,7 +473,7 @@ export class CouponsService {
         return {
           valid: false,
           code: ERROR_CODES.COUPON_NOT_APPLICABLE,
-          message: 'This coupon only applies to specific products or categories that aren’t in your cart.',
+          message: await this._buildScopeMismatchMessage(coupon),
         }
       }
     }
@@ -490,6 +490,27 @@ export class CouponsService {
     }
 
     return { valid: true, scopedSubtotal }
+  }
+
+  /**
+   * "This coupon only works on X" message naming the coupon's actual
+   * category/product scope, instead of a generic "specific products or
+   * categories" — the customer has no way to act on the generic version
+   * (which categories? which products?), just this one specific-sounding
+   * sentence that never actually says which ones.
+   */
+  async _buildScopeMismatchMessage(coupon) {
+    const [categoryNames, productNames] = await Promise.all([
+      this.repo.getCategoryNames(coupon.applicableCategoryIds || []),
+      this.repo.getProductNames(coupon.applicableProductIds || []),
+    ])
+    const names = [...categoryNames, ...productNames]
+    if (names.length === 0) {
+      return 'This coupon only applies to specific products or categories that aren’t in your cart.'
+    }
+    const shown = names.slice(0, 3).join(', ')
+    const label = names.length > 3 ? `${shown} & more` : shown
+    return `This coupon only works on ${label} — none of your cart items qualify yet.`
   }
 
   // ═══════════════════════════════════════════════════════════════════
