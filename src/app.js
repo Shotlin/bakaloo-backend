@@ -377,6 +377,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/admin/fee-settings',
   })
 
+  // Pincode Mappings (admin) — curated pincode -> city/area/state overrides,
+  // consumed by /api/v1/addresses/validate-pincode
+  await app.register(import('./modules/pincode-mappings/pincode-mappings.routes.js'), {
+    prefix: '/api/v1/admin/pincode-mappings',
+  })
+
   // Store Status (admin) — manual open/closed override + weekly hours
   const { adminStoreStatusRoutes } = await import('./modules/store-status/store-status.routes.js')
   await app.register(adminStoreStatusRoutes, {

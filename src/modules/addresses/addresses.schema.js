@@ -141,6 +141,11 @@ export const validatePincodeSchema = {
             available:    { type: 'boolean' },
             deliveryFee:  { type: 'number' },
             estimatedMin: { type: 'integer' },
+            // Only present when an active pincode_mappings row matches —
+            // see addresses.service.js#validatePincode (migration 089).
+            city:         { type: 'string' },
+            area:         { type: ['string', 'null'] },
+            state:        { type: 'string' },
           },
         },
       },

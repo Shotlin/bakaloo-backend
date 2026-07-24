@@ -3,6 +3,13 @@ import { query } from '../../config/database.js'
 import { env } from '../../config/env.js'
 import { AllocationService } from '../allocation/allocation.service.js'
 import { AllocationRepository } from '../allocation/allocation.repository.js'
+import { PincodeMappingsRepository } from '../pincode-mappings/pincode-mappings.repository.js'
+import { FeeSettingsRepository } from '../fee-settings/fee-settings.repository.js'
+
+// Fallback ETA used only if fee_settings has no GLOBAL row yet or the
+// lookup errors — keeps validate-pincode working exactly as before this
+// became dashboard-configurable (Settings -> Delivery Timer).
+const FALLBACK_ETA_MINUTES = 30
 
 const MAX_ADDRESSES = 10
 
@@ -67,6 +74,11 @@ export class AddressesService {
     // user_shop_allocations for cart/catalog scoping and never blocks
     // anything. Injectable for tests.
     this.allocationRepo = options.allocationRepository || new AllocationRepository()
+    // Admin-curated pincode -> city/area/state overrides (see migration 089)
+    // and the dashboard-configurable delivery ETA (fee_settings.delivery_eta_minutes,
+    // Settings -> Delivery Timer) — both surfaced through validatePincode().
+    this.pincodeMappingsRepo = options.pincodeMappingsRepository || new PincodeMappingsRepository()
+    this.feeSettingsRepo = options.feeSettingsRepository || new FeeSettingsRepository()
   }
 
   /**
@@ -289,10 +301,27 @@ export class AddressesService {
    * Validate pincode for delivery availability.
    * Checks against pincodes in active shops' serviceable_pincodes arrays.
    * Returns available=true also when no shops are configured yet (null set).
+   *
+   * Also attaches an admin-curated city/area/state override when an ACTIVE
+   * pincode_mappings row matches (see migration 089) — the Flutter address
+   * form uses this to auto-fill City instead of trusting the public
+   * reverse-geocoder, which is unreliable for several rural/small-town
+   * pincodes (e.g. parts of Gujarat resolving to the wrong city).
    */
   async validatePincode(pincode) {
+    const [etaMinutes, mapping] = await Promise.all([
+      this._resolveEtaMinutes(),
+      this.pincodeMappingsRepo.findActiveByPincode(pincode).catch((err) => {
+        logger.warn({ err, pincode }, 'Pincode mapping lookup failed — continuing without override')
+        return null
+      }),
+    ])
+    const mappingFields = mapping
+      ? { city: mapping.city, area: mapping.area, state: mapping.state }
+      : {}
+
     if (env.ALLOW_ALL_PINCODES) {
-      return { available: true, deliveryFee: 29, estimatedMin: 30 }
+      return { available: true, deliveryFee: 29, estimatedMin: etaMinutes, ...mappingFields }
     }
 
     const serviceablePincodes = await getServiceablePincodes()
@@ -302,7 +331,26 @@ export class AddressesService {
     return {
       available,
       deliveryFee: available ? 29 : 0,
-      estimatedMin: available ? 30 : 0,
+      estimatedMin: available ? etaMinutes : 0,
+      ...mappingFields,
+    }
+  }
+
+  /**
+   * Reads the admin-configured delivery ETA from fee_settings' GLOBAL row
+   * (dashboard: Settings -> Delivery Timer). Falls back to the previous
+   * hardcoded value if the row is missing or the lookup errors, so this
+   * never becomes a new way for validate-pincode to break.
+   * @private
+   */
+  async _resolveEtaMinutes() {
+    try {
+      const global = await this.feeSettingsRepo.getGlobal()
+      const minutes = Number(global?.delivery_eta_minutes)
+      return Number.isFinite(minutes) && minutes > 0 ? minutes : FALLBACK_ETA_MINUTES
+    } catch (err) {
+      logger.warn({ err }, 'Failed to resolve delivery ETA from fee settings — using fallback')
+      return FALLBACK_ETA_MINUTES
     }
   }
 
