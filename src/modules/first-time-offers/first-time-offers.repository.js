@@ -3,8 +3,9 @@ import { query } from '../../config/database.js'
 const COLUMNS = `
   id, name, min_order_amount, reward_type, reward_value, max_discount,
   unlock_coupon_id, start_at, end_at, is_active, auto_apply,
-  payment_method_scope, cashback_credit_trigger, created_by,
-  created_at, updated_at
+  payment_method_scope, cashback_credit_trigger,
+  applicable_category_ids, applicable_product_ids, grants_free_delivery,
+  created_by, created_at, updated_at
 `
 
 export class FirstTimeOffersRepository {
@@ -21,19 +22,25 @@ export class FirstTimeOffersRepository {
   }
 
   /**
-   * Best-fit active offer for a cart total — the highest min_order_amount
-   * the cart still satisfies (your 3 examples read as a graduated ladder:
-   * ₹299 → free delivery, ₹499 → ₹20 cashback, ₹999 → ₹100 cashback — the
-   * bigger the order, the better the reward the customer unlocks).
+   * Every currently-active, date-valid, payment-scope-compatible offer,
+   * regardless of the cart's total — deliberately NOT filtered by
+   * min_order_amount, unlike the old findBestFitActive(). A category/
+   * product-scoped offer can only be evaluated against the matching slice
+   * of the cart (see resolveMatchingProductIds), which the SQL layer has
+   * no way to compute — so the service does that in JS per-candidate and
+   * needs the full active set, both to pick the best currently-satisfied
+   * offer AND to find the closest not-yet-satisfied one to tease.
+   *
+   * Ordered by min_order_amount ASC (cheapest-to-unlock first) — purely a
+   * convenience for the service's tie-break scans, not load-bearing.
    */
-  async findBestFitActive(cartTotal, { onlinePayment } = {}) {
+  async findAllActiveCandidates({ onlinePayment } = {}) {
     const clauses = [
       'is_active = true',
       '(start_at IS NULL OR start_at <= NOW())',
       '(end_at IS NULL OR end_at >= NOW())',
-      'min_order_amount <= $1',
     ]
-    const params = [cartTotal]
+    const params = []
     if (onlinePayment === false) {
       // COD checkout — exclude offers scoped to online payment only.
       clauses.push(`payment_method_scope != 'ONLINE_ONLY'`)
@@ -41,11 +48,10 @@ export class FirstTimeOffersRepository {
     const { rows } = await query(
       `SELECT ${COLUMNS} FROM first_time_offers
        WHERE ${clauses.join(' AND ')}
-       ORDER BY min_order_amount DESC
-       LIMIT 1`,
+       ORDER BY min_order_amount ASC`,
       params
     )
-    return rows[0] ? this._format(rows[0]) : null
+    return rows.map((row) => this._format(row))
   }
 
   /**
@@ -77,8 +83,10 @@ export class FirstTimeOffersRepository {
       `INSERT INTO first_time_offers (
          name, min_order_amount, reward_type, reward_value, max_discount,
          unlock_coupon_id, start_at, end_at, auto_apply,
-         payment_method_scope, cashback_credit_trigger, created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         payment_method_scope, cashback_credit_trigger,
+         applicable_category_ids, applicable_product_ids, grants_free_delivery,
+         created_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING ${COLUMNS}`,
       [
         data.name,
@@ -92,6 +100,9 @@ export class FirstTimeOffersRepository {
         data.autoApply ?? true,
         data.paymentMethodScope ?? 'ALL',
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
+        data.applicableCategoryIds?.length ? data.applicableCategoryIds : null,
+        data.applicableProductIds?.length ? data.applicableProductIds : null,
+        !!data.grantsFreeDelivery,
         data.createdBy ?? null,
       ]
     )
@@ -115,11 +126,15 @@ export class FirstTimeOffersRepository {
       autoApply: 'auto_apply',
       paymentMethodScope: 'payment_method_scope',
       cashbackCreditTrigger: 'cashback_credit_trigger',
+      applicableCategoryIds: 'applicable_category_ids',
+      applicableProductIds: 'applicable_product_ids',
+      grantsFreeDelivery: 'grants_free_delivery',
     }
     for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
       if (data[jsKey] !== undefined) {
+        const isArrayScopeField = jsKey === 'applicableCategoryIds' || jsKey === 'applicableProductIds'
         fields.push(`${dbKey} = $${idx++}`)
-        params.push(data[jsKey])
+        params.push(isArrayScopeField && !data[jsKey]?.length ? null : data[jsKey])
       }
     }
     if (fields.length === 0) return this.findById(id)
@@ -137,6 +152,85 @@ export class FirstTimeOffersRepository {
     return result.rowCount > 0
   }
 
+  /**
+   * Of `cartProductIds`, which ones fall inside an offer's
+   * applicable_category_ids/applicable_product_ids scope. Identical logic
+   * to CouponsRepository#resolveMatchingProductIds — a category id can be
+   * an ordinary/sub-category (products.category_id) or a BUNDLE (matched
+   * via category_products). No scope at all means "matches everything",
+   * the safe default that keeps existing unscoped offers unchanged.
+   *
+   * @param {string[]} cartProductIds
+   * @param {{applicableCategoryIds?: string[]|null, applicableProductIds?: string[]|null}} scope
+   * @returns {Promise<Set<string>>} matching product ids
+   */
+  async resolveMatchingProductIds(cartProductIds, { applicableCategoryIds, applicableProductIds } = {}) {
+    const hasProductScope = Array.isArray(applicableProductIds) && applicableProductIds.length > 0
+    const hasCategoryScope = Array.isArray(applicableCategoryIds) && applicableCategoryIds.length > 0
+
+    if (!hasProductScope && !hasCategoryScope) {
+      return new Set(cartProductIds)
+    }
+    if (cartProductIds.length === 0) {
+      return new Set()
+    }
+
+    const { rows } = await query(
+      `SELECT DISTINCT p.id AS product_id
+         FROM products p
+        WHERE p.id = ANY($1::uuid[])
+          AND (
+               ($2::uuid[] IS NOT NULL AND p.id = ANY($2::uuid[]))
+            OR ($3::uuid[] IS NOT NULL AND (
+                     p.category_id = ANY($3::uuid[])
+                  OR EXISTS (
+                       SELECT 1 FROM category_products cp
+                       WHERE cp.product_id = p.id AND cp.category_id = ANY($3::uuid[])
+                     )
+                ))
+              )`,
+      [
+        cartProductIds,
+        hasProductScope ? applicableProductIds : null,
+        hasCategoryScope ? applicableCategoryIds : null,
+      ]
+    )
+    return new Set(rows.map((r) => r.product_id))
+  }
+
+  /**
+   * Human-readable names for a set of category ids — lets the "add X to
+   * unlock this offer" teaser name the actual category/bundle instead of a
+   * generic "specific products". Identical to CouponsRepository's version.
+   *
+   * @param {string[]} categoryIds
+   * @returns {Promise<string[]>}
+   */
+  async getCategoryNames(categoryIds) {
+    if (!Array.isArray(categoryIds) || categoryIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM categories WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [categoryIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
+  /**
+   * Human-readable names for a set of product ids — same purpose as
+   * getCategoryNames(), for offers scoped to specific products.
+   *
+   * @param {string[]} productIds
+   * @returns {Promise<string[]>}
+   */
+  async getProductNames(productIds) {
+    if (!Array.isArray(productIds) || productIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM products WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [productIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
   _format(row) {
     return {
       id: row.id,
@@ -152,6 +246,9 @@ export class FirstTimeOffersRepository {
       autoApply: row.auto_apply,
       paymentMethodScope: row.payment_method_scope,
       cashbackCreditTrigger: row.cashback_credit_trigger,
+      applicableCategoryIds: row.applicable_category_ids,
+      applicableProductIds: row.applicable_product_ids,
+      grantsFreeDelivery: row.grants_free_delivery,
       createdBy: row.created_by,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

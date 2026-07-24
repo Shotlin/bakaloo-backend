@@ -19,38 +19,162 @@ export class FirstTimeOffersService {
 
   /**
    * Resolve the best-fit first-time offer for a checkout, or null if the
-   * user isn't first-time or no offer matches. This is the single source
-   * of truth both the checkout flow and any "eligible offer" preview
+   * user isn't first-time or no offer currently qualifies. This is the
+   * single source of truth both the checkout flow and the cart preview
    * should call — never re-derive first-order status separately.
+   *
+   * @param {string} userId
+   * @param {number} cartTotal
+   * @param {{onlinePayment?: boolean, cartItems?: Array<object>}} [opts] -
+   *   cartItems (single shop's worth) is only needed when an active offer
+   *   has a category/product scope; omit it and every scoped offer simply
+   *   won't be satisfiable (same fail-safe as coupons.service.js).
    */
-  async resolveForCheckout(userId, cartTotal, { onlinePayment } = {}) {
+  async resolveForCheckout(userId, cartTotal, { onlinePayment, cartItems = null } = {}) {
     const hasPriorOrder = await this.repo.hasPriorOrder(userId)
     if (hasPriorOrder) return null
-    return this.repo.findBestFitActive(cartTotal, { onlinePayment })
+    const { best } = await this._evaluateCandidates(cartTotal, cartItems, { onlinePayment })
+    return best
+  }
+
+  /**
+   * The closest not-yet-satisfied active offer, for a positive "add X to
+   * unlock this offer" nudge on the cart screen — e.g. a customer whose
+   * cart is all dairy gets told exactly which category to add to unlock a
+   * Fresh Vegetables-scoped offer, instead of the offer just silently never
+   * appearing anywhere. Returns null when the user isn't first-time, when
+   * an offer is already satisfied (resolveForCheckout handles that — a
+   * "you got X" and "add Y to get Z" message at the same time would be a
+   * confusing double message), or when there's simply nothing active to
+   * work toward.
+   */
+  async previewUpcoming(userId, cartTotal, { onlinePayment, cartItems = null } = {}) {
+    const hasPriorOrder = await this.repo.hasPriorOrder(userId)
+    if (hasPriorOrder) return null
+    const { best, closest } = await this._evaluateCandidates(cartTotal, cartItems, { onlinePayment })
+    if (best) return null
+    return closest
+  }
+
+  /**
+   * Evaluates every active/date/payment-valid offer against the cart,
+   * splitting them into the best currently-satisfied one (highest
+   * min_order_amount whose scoped subtotal clears it — the same "bigger
+   * order, better reward" tie-break the old SQL-only version used) and the
+   * closest not-yet-satisfied one (smallest gap between min_order_amount
+   * and what the cart currently contributes toward it).
+   */
+  async _evaluateCandidates(cartTotal, cartItems, { onlinePayment } = {}) {
+    const candidates = await this.repo.findAllActiveCandidates({ onlinePayment })
+    let best = null
+    let closest = null
+    let closestGap = Infinity
+
+    for (const offer of candidates) {
+      const hasScope = (offer.applicableCategoryIds?.length > 0) || (offer.applicableProductIds?.length > 0)
+      let scopedSubtotal = cartTotal
+      if (hasScope) {
+        const items = cartItems || []
+        const matchingIds = await this.repo.resolveMatchingProductIds(
+          items.map((i) => i.productId),
+          { applicableCategoryIds: offer.applicableCategoryIds, applicableProductIds: offer.applicableProductIds }
+        )
+        scopedSubtotal = parseFloat(
+          items
+            .filter((i) => matchingIds.has(i.productId))
+            .reduce((sum, i) => sum + Number(i.lineTotal ?? i.effectivePrice * i.quantity), 0)
+            .toFixed(2)
+        )
+      }
+
+      if (scopedSubtotal >= offer.minOrderAmount) {
+        if (!best || offer.minOrderAmount > best.minOrderAmount) {
+          best = { ...offer, scopedSubtotal }
+        }
+        continue
+      }
+
+      const gap = parseFloat((offer.minOrderAmount - scopedSubtotal).toFixed(2))
+      if (gap < closestGap) {
+        closestGap = gap
+        closest = { ...offer, scopedSubtotal, amountToUnlock: gap, hasScope }
+      }
+    }
+
+    return { best, closest }
   }
 
   /**
    * Translate an offer + cart total into a concrete reward effect.
-   * Mirrors the coupon discount calculation (Math.min cap, maxDiscount cap)
-   * for consistency between the two reward systems.
+   * Mirrors the coupon discount calculation (Math.min cap, maxDiscount cap,
+   * scopedSubtotal in place of the raw cart total when the offer has a
+   * category/product scope) for consistency between the two systems.
    */
   computeReward(offer, cartTotal) {
+    const amount = offer.scopedSubtotal ?? cartTotal
+    // grantsFreeDelivery is independent of rewardType (090_first_time_offer_
+    // scope_and_free_delivery.sql) — ORed with the legacy rewardType ===
+    // 'FREE_DELIVERY' path so existing offers of that type keep behaving
+    // exactly as before, while e.g. a WALLET_CASHBACK offer can now ALSO
+    // waive delivery instead of being forced to choose one or the other.
+    const freeDelivery = offer.rewardType === 'FREE_DELIVERY' || !!offer.grantsFreeDelivery
     switch (offer.rewardType) {
       case 'FREE_DELIVERY':
-        return { freeDelivery: true }
+        return { freeDelivery }
       case 'FLAT_DISCOUNT':
-        return { discount: Math.min(offer.rewardValue || 0, cartTotal) }
+        return { discount: Math.min(offer.rewardValue || 0, amount), freeDelivery }
       case 'PERCENTAGE_DISCOUNT': {
-        let discount = (cartTotal * (offer.rewardValue || 0)) / 100
+        let discount = (amount * (offer.rewardValue || 0)) / 100
         if (offer.maxDiscount) discount = Math.min(discount, offer.maxDiscount)
-        return { discount: Math.min(discount, cartTotal) }
+        return { discount: Math.min(discount, amount), freeDelivery }
       }
       case 'WALLET_CASHBACK':
-        return { cashbackAmount: offer.rewardValue || 0 }
+        return { cashbackAmount: offer.rewardValue || 0, freeDelivery }
       case 'COUPON_UNLOCK':
-        return { unlockCouponId: offer.unlockCouponId }
+        return { unlockCouponId: offer.unlockCouponId, freeDelivery }
       default:
-        return {}
+        return { freeDelivery }
+    }
+  }
+
+  /**
+   * "Add X to unlock this offer" copy for the cart-screen teaser — names
+   * the actual category/products a scoped offer needs (mirrors
+   * CouponsService#_buildScopeMismatchMessage, positively framed), or the
+   * plain rupee shortfall for an unscoped offer.
+   */
+  async describeUpcoming(offer) {
+    const rewardLabel = this._rewardLabel(offer)
+    if (!offer.hasScope) {
+      return `Add ₹${offer.amountToUnlock} more to unlock ${rewardLabel}!`
+    }
+    const [categoryNames, productNames] = await Promise.all([
+      this.repo.getCategoryNames(offer.applicableCategoryIds || []),
+      this.repo.getProductNames(offer.applicableProductIds || []),
+    ])
+    const names = [...categoryNames, ...productNames]
+    if (names.length === 0) {
+      return `Add ₹${offer.amountToUnlock} more of the right products to unlock ${rewardLabel}!`
+    }
+    const shown = names.slice(0, 3).join(', ')
+    const label = names.length > 3 ? `${shown} & more` : shown
+    return `Add ₹${offer.amountToUnlock} of ${label} to unlock ${rewardLabel}!`
+  }
+
+  _rewardLabel(offer) {
+    switch (offer.rewardType) {
+      case 'FREE_DELIVERY':
+        return 'Free Delivery'
+      case 'FLAT_DISCOUNT':
+        return `₹${offer.rewardValue} off`
+      case 'PERCENTAGE_DISCOUNT':
+        return `${offer.rewardValue}% off`
+      case 'WALLET_CASHBACK':
+        return `₹${offer.rewardValue} cashback`
+      case 'COUPON_UNLOCK':
+        return 'a special coupon'
+      default:
+        return offer.name
     }
   }
 

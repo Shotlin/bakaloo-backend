@@ -84,7 +84,7 @@ describe('BillSummaryService — first-time offer auto-applies in the cart previ
 
     const result = await svc.getBillSummary('user-1')
 
-    expect(firstTimeOffersService.resolveForCheckout).toHaveBeenCalledWith('user-1', 52)
+    expect(firstTimeOffersService.resolveForCheckout).toHaveBeenCalledWith('user-1', 52, { cartItems: undefined })
     expect(result.firstTimeOffer).toMatchObject({
       id: 'offer-1',
       name: 'Get Rs 51 Veg @ Rs.1',

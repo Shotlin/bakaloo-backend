@@ -393,6 +393,7 @@ export class OrdersService {
       const onlinePayment = normalizedPaymentMethod === 'ONLINE'
       const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(userId, subtotal, {
         onlinePayment,
+        cartItems: groupedByShop.get(Array.from(groupedByShop.keys())[0]),
       })
       if (resolvedOffer?.autoApply) {
         const reward = this.firstTimeOffersService.computeReward(resolvedOffer, subtotal)

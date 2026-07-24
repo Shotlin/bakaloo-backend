@@ -87,11 +87,13 @@ export class BillSummaryService {
     let firstTimeOfferDiscount = 0
     let firstTimeOfferFreeDelivery = false
     let firstTimeOfferMeta = null
+    let firstTimeOfferTeaser = null
     if (shopGroups.length === 1) {
       try {
         const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(
           userId,
-          itemTotalDiscounted
+          itemTotalDiscounted,
+          { cartItems: shopGroups[0].items }
         )
         if (resolvedOffer?.autoApply) {
           const reward = this.firstTimeOffersService.computeReward(resolvedOffer, itemTotalDiscounted)
@@ -102,6 +104,26 @@ export class BillSummaryService {
               id: resolvedOffer.id,
               name: resolvedOffer.name,
               rewardType: resolvedOffer.rewardType,
+            }
+          }
+        } else {
+          // Nothing currently qualifies (or the best fit isn't auto-apply) —
+          // see if there's a nearby offer worth teasing instead, e.g. "Add
+          // Fresh Vegetables worth ₹150 more to unlock Free Delivery!" A
+          // customer whose cart just doesn't match any offer's scope would
+          // otherwise never learn these offers exist at all.
+          const upcoming = await this.firstTimeOffersService.previewUpcoming(
+            userId,
+            itemTotalDiscounted,
+            { cartItems: shopGroups[0].items }
+          )
+          if (upcoming) {
+            firstTimeOfferTeaser = {
+              id: upcoming.id,
+              name: upcoming.name,
+              rewardType: upcoming.rewardType,
+              amountToUnlock: upcoming.amountToUnlock,
+              message: await this.firstTimeOffersService.describeUpcoming(upcoming),
             }
           }
         }
@@ -356,6 +378,10 @@ export class BillSummaryService {
             freeDelivery: firstTimeOfferFreeDelivery,
           }
         : null,
+      // Positive nudge shown instead of firstTimeOffer when nothing
+      // currently qualifies but a nearby offer exists — see the resolve
+      // block above. Always null whenever firstTimeOffer is non-null.
+      firstTimeOfferTeaser,
       // Whether the "Quick Delivery" opt-in is available at all right now —
       // independent of the fees[] line, which only appears once the
       // customer has actually selected it (see quickDeliverySelected param).
@@ -645,6 +671,7 @@ export class BillSummaryService {
       cartMilestone: { unlocked: null, next: null, ladder: [] },
       quickDelivery: { enabled: false, amount: 0, label: 'Quick delivery fee', etaMinutes: 0 },
       firstTimeOffer: null,
+      firstTimeOfferTeaser: null,
     }
   }
 
