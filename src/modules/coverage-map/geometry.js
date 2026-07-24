@@ -1,22 +1,8 @@
 // Small, dependency-free geometry helpers for the coverage map's per-pincode
-// boundary shapes. Coordinates are plain {lat, lng} degrees; hull/area math
-// treats them as a flat plane, which is accurate enough at city scale (the
-// distances involved — a few km — make the earth's curvature negligible).
+// boundary circles. Coordinates are plain {lat, lng} degrees; math treats
+// them as a flat plane, which is accurate enough at city scale.
 
 const KM_PER_DEGREE_LAT = 111
-
-export function dedupePoints(points) {
-  const seen = new Set()
-  const out = []
-  for (const p of points) {
-    const key = `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      out.push(p)
-    }
-  }
-  return out
-}
 
 export function centroid(points) {
   const lat = points.reduce((s, p) => s + p.lat, 0) / points.length
@@ -44,48 +30,7 @@ export function maxDistanceKm(center, points) {
   return max
 }
 
-/** Shoelace formula — used only to detect a degenerate (near-zero-area, collinear) hull. */
-export function signedArea(points) {
-  let sum = 0
-  for (let i = 0; i < points.length; i++) {
-    const a = points[i]
-    const b = points[(i + 1) % points.length]
-    sum += a.lat * b.lng - b.lat * a.lng
-  }
-  return sum / 2
-}
-
-/** Andrew's monotone chain convex hull. Returns [] for fewer than 3 points. */
-export function convexHull(points) {
-  if (points.length < 3) return []
-
-  const pts = [...points].sort((a, b) => a.lat - b.lat || a.lng - b.lng)
-  const cross = (o, a, b) =>
-    (a.lat - o.lat) * (b.lng - o.lng) - (a.lng - o.lng) * (b.lat - o.lat)
-
-  const lower = []
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
-      lower.pop()
-    }
-    lower.push(p)
-  }
-
-  const upper = []
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i]
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
-      upper.pop()
-    }
-    upper.push(p)
-  }
-
-  upper.pop()
-  lower.pop()
-  return lower.concat(upper)
-}
-
-/** Approximate lat/lng circle around a center point, for pincode groups too small for a real hull. */
+/** Approximate lat/lng circle around a center point. */
 export function circlePolygon(center, radiusKm, segments = 28) {
   const points = []
   const latRad = (center.lat * Math.PI) / 180

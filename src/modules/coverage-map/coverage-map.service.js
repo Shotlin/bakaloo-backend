@@ -1,9 +1,14 @@
 import { CoverageMapRepository } from './coverage-map.repository.js'
-import { convexHull, circlePolygon, centroid, maxDistanceKm, signedArea, dedupePoints } from './geometry.js'
+import { circlePolygon, centroid, maxDistanceKm } from './geometry.js'
 
-// Smallest boundary drawn for a pincode with too few points for a real hull
-// (a single customer, or a couple of customers right on top of each other).
+// Every pincode's boundary is a circle around its customers' centroid —
+// never a hull connecting individual customers. A hull looked fine for
+// tightly-clustered points, but the moment one pincode had even a couple
+// of far-flung/bad-data addresses it drew a huge, meaningless triangle
+// spanning half the map. Radius is clamped so a pincode's shape always
+// reads as "a local area", not a shape stretched across states.
 const MIN_BOUNDARY_RADIUS_KM = 0.35
+const MAX_BOUNDARY_RADIUS_KM = 3
 
 export class CoverageMapService {
   constructor(repository = new CoverageMapRepository()) {
@@ -59,6 +64,7 @@ export class CoverageMapService {
           lat: c.lat,
           lng: c.lng,
           pincode: c.pincode,
+          hasActiveOrder: c.hasActiveOrder,
         })),
         boundaries,
         totalCustomers: customers.length,
@@ -71,22 +77,13 @@ export class CoverageMapService {
     return trimmed ? trimmed[0].toUpperCase() : '?'
   }
 
-  /** Real hull for 3+ distinct points; a circle around the centroid otherwise. */
+  /** A circle around the group's centroid, radius clamped to [MIN, MAX]. */
   _boundaryFor(group) {
-    const unique = dedupePoints(group)
-
-    if (unique.length >= 3) {
-      const hull = convexHull(unique)
-      if (hull.length >= 3 && Math.abs(signedArea(hull)) > 1e-10) {
-        return hull.map((p) => [p.lat, p.lng])
-      }
-    }
-
-    const center = centroid(unique)
-    const radiusKm =
-      unique.length <= 1
-        ? MIN_BOUNDARY_RADIUS_KM
-        : Math.max(MIN_BOUNDARY_RADIUS_KM, maxDistanceKm(center, unique) * 1.15)
+    const center = centroid(group)
+    const radiusKm = Math.min(
+      MAX_BOUNDARY_RADIUS_KM,
+      Math.max(MIN_BOUNDARY_RADIUS_KM, maxDistanceKm(center, group) * 1.15)
+    )
     return circlePolygon(center, radiusKm).map((p) => [p.lat, p.lng])
   }
 }

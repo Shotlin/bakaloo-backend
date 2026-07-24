@@ -36,6 +36,7 @@ const coverageResponse = {
               lat: { type: 'number' },
               lng: { type: 'number' },
               pincode: { type: ['string', 'null'] },
+              hasActiveOrder: { type: 'boolean' },
             },
           },
         },

@@ -4,6 +4,10 @@ import { AllocationRepository } from '../allocation/allocation.repository.js'
 
 const PAGE_LIMIT = 1000
 
+// Orders in any of these states still have a delivery outstanding — used to
+// flag a covered customer as "has an active order" on the coverage map.
+const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'PACKED', 'OUT_FOR_DELIVERY']
+
 export class CoverageMapRepository {
   constructor(deps = {}) {
     this.shopsRepo = deps.shopsRepository || new ShopsRepository()
@@ -44,12 +48,19 @@ export class CoverageMapRepository {
     ])
     const nameById = new Map(users.map((u) => [u.id, u.name]))
 
+    const { rows: activeOrderRows } = await query(
+      `SELECT DISTINCT user_id FROM orders WHERE user_id = ANY($1::uuid[]) AND status = ANY($2::order_status[])`,
+      [userIds, ACTIVE_ORDER_STATUSES]
+    )
+    const hasActiveOrder = new Set(activeOrderRows.map((r) => r.user_id))
+
     return withCoords.map((p) => ({
       userId: p.user_id,
       name: nameById.get(p.user_id) || null,
       lat: p.lat,
       lng: p.lng,
       pincode: p.pincode,
+      hasActiveOrder: hasActiveOrder.has(p.user_id),
     }))
   }
 }
