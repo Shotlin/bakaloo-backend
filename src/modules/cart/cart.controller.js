@@ -4,10 +4,11 @@ import { success, error } from '../../utils/apiResponse.js'
  * Cart controller — thin HTTP layer
  */
 export class CartController {
-  constructor(service, billSummaryService = null, repository = null) {
+  constructor(service, billSummaryService = null, repository = null, productsService = null) {
     this.service = service
     this.billSummaryService = billSummaryService
     this.repo = repository
+    this.productsService = productsService
   }
 
   /** GET / */
@@ -22,6 +23,22 @@ export class CartController {
       quickDeliverySelected: Boolean(request.query?.quickDeliverySelected),
     })
     return reply.code(200).send(success(summary, 'Bill summary fetched'))
+  }
+
+  /** GET /quick-add — "Quick Add" rail suggestions based on cart contents */
+  async getQuickAdd(request, reply) {
+    const limit = Math.min(Math.max(Number(request.query?.limit) || 12, 1), 20)
+    const cart = await this.service.getCart(request.user.id)
+    const categoryIds = [...new Set(cart.items.map((item) => item.categoryId).filter(Boolean))]
+    const excludeProductIds = cart.items.map((item) => item.productId)
+
+    const products = await this.productsService.getQuickAdd(
+      categoryIds,
+      excludeProductIds,
+      limit,
+      { userId: request.user.id }
+    )
+    return reply.code(200).send(success(products, 'Quick add suggestions'))
   }
 
   /** POST /items */

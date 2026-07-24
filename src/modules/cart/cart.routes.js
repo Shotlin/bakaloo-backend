@@ -3,6 +3,8 @@ import { CartService } from './cart.service.js'
 import { CartRepository } from './cart.repository.js'
 import { BillSummaryService } from './bill-summary.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
+import { ProductsService } from '../products/products.service.js'
+import { ProductsRepository } from '../products/products.repository.js'
 import {
   getCartSchema,
   addItemSchema,
@@ -11,6 +13,7 @@ import {
   clearCartSchema,
   validateCartSchema,
   getCartSummarySchema,
+  getQuickAddSchema,
   updateTipSchema,
   updateDeliveryInstructionsSchema,
 } from './cart.schema.js'
@@ -29,7 +32,8 @@ export default async function cartRoutes(fastify) {
     cartRepository: repository,
     paymentSettingsService,
   })
-  const controller = new CartController(service, billSummaryService, repository)
+  const productsService = new ProductsService(new ProductsRepository())
+  const controller = new CartController(service, billSummaryService, repository, productsService)
 
   // All cart routes require auth
   fastify.addHook('preHandler', fastify.authenticate)
@@ -43,6 +47,11 @@ export default async function cartRoutes(fastify) {
   fastify.get('/summary', {
     schema: getCartSummarySchema,
   }, controller.getSummary.bind(controller))
+
+  // GET /quick-add — "Quick Add" rail suggestions based on cart contents
+  fastify.get('/quick-add', {
+    schema: getQuickAddSchema,
+  }, controller.getQuickAdd.bind(controller))
 
   // POST /items — Add item to cart
   fastify.post('/items', {

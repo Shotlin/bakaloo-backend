@@ -936,6 +936,104 @@ export class ProductsRepository {
   }
 
   /**
+   * Popular products (by total_sold) across a set of categories — the
+   * "same category as the cart" tier of the cart's Quick Add rail. Mirrors
+   * findRelated()'s visibility/price handling but takes multiple category
+   * ids and an arbitrary exclude list instead of excluding a single
+   * product id.
+   *
+   * @param {string[]} categoryIds
+   * @param {string[]} excludeProductIds
+   * @param {number} limit
+   * @param {string[]|null} [allocatedShopIds]
+   */
+  async findPopularByCategories(categoryIds, excludeProductIds, limit, allocatedShopIds = null) {
+    if (!Array.isArray(categoryIds) || categoryIds.length === 0 || limit <= 0) return []
+
+    const params = [categoryIds]
+    let excludeSql = ''
+    if (Array.isArray(excludeProductIds) && excludeProductIds.length > 0) {
+      params.push(excludeProductIds)
+      excludeSql = `AND p.id != ALL($${params.length}::uuid[])`
+    }
+    const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    params.push(limit)
+    const limitIdx = shopPrice.nextIdx
+
+    const { rows } = await query(
+      `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
+              ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url, p.brand, p.total_sold,
+              p.avg_rating, p.rating_count, p.net_quantity,
+              p.product_family_id, p.option_label, p.option_sort_order,
+              p.is_default_option, p.food_type, p.origin_tag,
+              p.custom_badges, p.display_delivery_minutes,
+              pf.name AS family_name
+         FROM products p
+         LEFT JOIN product_families pf ON pf.id = p.product_family_id
+         ${shopPrice.joinSql}
+        WHERE p.is_active = true
+          AND ${shopPrice.stockExpr} > 0
+          AND p.category_id = ANY($1::uuid[])
+          ${excludeSql}
+          ${visibility.sql}
+        ORDER BY p.total_sold DESC
+        LIMIT $${limitIdx}`,
+      params
+    )
+    return rows
+  }
+
+  /**
+   * Random sample from the overall popular pool (top 100 by total_sold),
+   * excluding given ids — the "surprise" tier of the cart's Quick Add rail,
+   * and also the fallback used to top up any other tier that falls short.
+   *
+   * @param {string[]} excludeProductIds
+   * @param {number} limit
+   * @param {string[]|null} [allocatedShopIds]
+   */
+  async findPopularRandom(excludeProductIds, limit, allocatedShopIds = null) {
+    if (limit <= 0) return []
+
+    const params = []
+    let excludeSql = ''
+    if (Array.isArray(excludeProductIds) && excludeProductIds.length > 0) {
+      params.push(excludeProductIds)
+      excludeSql = `AND p.id != ALL($${params.length}::uuid[])`
+    }
+    const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    params.push(limit)
+    const limitIdx = shopPrice.nextIdx
+
+    const { rows } = await query(
+      `SELECT * FROM (
+         SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
+                ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url, p.brand, p.total_sold,
+                p.avg_rating, p.rating_count, p.net_quantity,
+                p.product_family_id, p.option_label, p.option_sort_order,
+                p.is_default_option, p.food_type, p.origin_tag,
+                p.custom_badges, p.display_delivery_minutes,
+                pf.name AS family_name
+           FROM products p
+           LEFT JOIN product_families pf ON pf.id = p.product_family_id
+           ${shopPrice.joinSql}
+          WHERE p.is_active = true
+            AND ${shopPrice.stockExpr} > 0
+            ${excludeSql}
+            ${visibility.sql}
+          ORDER BY p.total_sold DESC
+          LIMIT 100
+       ) popular
+       ORDER BY RANDOM()
+       LIMIT $${limitIdx}`,
+      params
+    )
+    return rows
+  }
+
+  /**
    * Find all purchasable options for a product's family.
    *
    * @param {string} productId

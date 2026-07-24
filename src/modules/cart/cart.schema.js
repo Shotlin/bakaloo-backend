@@ -176,6 +176,27 @@ export const validateCartSchema = {
   },
 }
 
+export const getQuickAddSchema = {
+  tags: ['Cart'],
+  summary: 'Get "Quick Add" product suggestions based on cart contents',
+  querystring: {
+    type: 'object',
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 20, default: 12 },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: { type: 'array' },
+      },
+    },
+  },
+}
+
 export const getCartSummarySchema = {
   tags: ['Cart'],
   summary: 'Get full bill summary with fees, savings, and delivery estimate',

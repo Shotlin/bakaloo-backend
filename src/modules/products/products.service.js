@@ -466,6 +466,103 @@ export class ProductsService {
   }
 
   /**
+   * "Quick Add" recommendations for the cart screen — one ranked list
+   * blending three pools so the rail stays full and relevant regardless of
+   * how varied the cart is:
+   *   - ~60% popular items from the SAME categories already in the cart
+   *   - ~30% popular items from categories admin-configured to pair with
+   *     those (migration 080 category_suggestion_rules — same cache the
+   *     product-detail "Pair it with" rail uses)
+   *   - the remainder: a random sample from the overall popular pool
+   *
+   * Buckets are filled in that priority order and each one's shortfall
+   * rolls into the random pool at the end, so the list still reaches
+   * `limit` even for a niche cart with few same/related-category
+   * candidates — it just leans more "random popular" in that case.
+   *
+   * @param {string[]} cartCategoryIds - Distinct category ids present in the cart.
+   * @param {string[]} excludeProductIds - Product ids already in the cart.
+   * @param {number} [limit=12]
+   * @param {{ userId?: string }|null} [customerContext]
+   */
+  async getQuickAdd(cartCategoryIds, excludeProductIds, limit = 12, customerContext = null) {
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
+      return []
+    }
+
+    const categoryIds = [...new Set((cartCategoryIds || []).filter(Boolean))]
+    const excluded = new Set((excludeProductIds || []).filter(Boolean))
+    const picked = []
+
+    if (categoryIds.length > 0) {
+      const sameCategoryLimit = Math.round(limit * 0.6)
+      const sameCategory = await this.repo.findPopularByCategories(
+        categoryIds,
+        [...excluded],
+        sameCategoryLimit,
+        allocatedShopIds
+      )
+      for (const product of sameCategory) {
+        picked.push(product)
+        excluded.add(product.id)
+      }
+
+      const relatedCategoryIds = [
+        ...new Set(
+          (
+            await Promise.all(
+              categoryIds.map((id) => this._getCachedSuggestionCategoryIds(id))
+            )
+          ).flat()
+        ),
+      ].filter((id) => !categoryIds.includes(id))
+
+      if (relatedCategoryIds.length > 0) {
+        const relatedLimit = Math.round(limit * 0.3)
+        const relatedCategory = await this.repo.findPopularByCategories(
+          relatedCategoryIds,
+          [...excluded],
+          relatedLimit,
+          allocatedShopIds
+        )
+        for (const product of relatedCategory) {
+          picked.push(product)
+          excluded.add(product.id)
+        }
+      }
+    }
+
+    const stillNeeded = limit - picked.length
+    if (stillNeeded > 0) {
+      const randomPicks = await this.repo.findPopularRandom(
+        [...excluded],
+        stillNeeded,
+        allocatedShopIds
+      )
+      picked.push(...randomPicks)
+    }
+
+    return this._normalizeProducts(picked.slice(0, limit))
+  }
+
+  /**
+   * Cached admin-configured "pairs with" target category ids for a single
+   * category (migration 080 category_suggestion_rules). Same cache key/TTL
+   * as getPairWith() above since both read the same admin-configured rule
+   * and product-suggestions.service.js invalidates this one key on save.
+   */
+  async _getCachedSuggestionCategoryIds(categoryId) {
+    const cacheKey = `products:pairwith-categories:v1:${categoryId}`
+    let ids = await cacheGet(cacheKey)
+    if (ids == null) {
+      ids = await this.repo.getSuggestionTargetCategoryIds(categoryId)
+      await cacheSet(cacheKey, ids, CACHE_TTL_SUGGESTION_CATEGORIES)
+    }
+    return ids
+  }
+
+  /**
    * Get all purchasable options for a product's family (cached 15 min)
    *
    * @param {string} productId
