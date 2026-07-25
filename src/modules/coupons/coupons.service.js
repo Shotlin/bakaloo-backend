@@ -648,6 +648,14 @@ export class CouponsService {
         terms: coupon.terms ?? null,
         minOrderAmount: coupon.minOrderAmount || 0,
         maxDiscount: coupon.maxDiscount || null,
+        // Scope (null/empty on both = applies to the whole cart). Surfaced
+        // so the client can locally re-check "is this coupon still
+        // applicable?" whenever the cart changes (an item the coupon was
+        // scoped to gets removed) without another round trip — see
+        // checkout_provider.dart#_syncCart. Already loaded on `coupon`,
+        // costs nothing extra to include here.
+        applicableCategoryIds: coupon.applicableCategoryIds || null,
+        applicableProductIds: coupon.applicableProductIds || null,
         code: coupon.code,
         couponId: _isValidUUID(coupon.id) ? coupon.id : null,
         isDemo: !!coupon.isDemo,
@@ -664,6 +672,8 @@ export class CouponsService {
         terms: coupon.terms ?? null,
         minOrderAmount: coupon.minOrderAmount || 0,
         maxDiscount: coupon.maxDiscount || null,
+        applicableCategoryIds: coupon.applicableCategoryIds || null,
+        applicableProductIds: coupon.applicableProductIds || null,
         code: coupon.code,
         couponId: _isValidUUID(coupon.id) ? coupon.id : null,
         isDemo: !!coupon.isDemo,
@@ -696,6 +706,8 @@ export class CouponsService {
       terms: coupon.terms ?? null,
       minOrderAmount: coupon.minOrderAmount || 0,
       maxDiscount: coupon.maxDiscount || null,
+      applicableCategoryIds: coupon.applicableCategoryIds || null,
+      applicableProductIds: coupon.applicableProductIds || null,
       code: coupon.code,
       // Only return couponId if it looks like a real UUID — demo coupons
       // have string IDs like 'demo-coupon-bakaloo50' that would crash

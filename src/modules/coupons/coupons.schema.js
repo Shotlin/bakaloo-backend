@@ -68,6 +68,9 @@ export const validateCouponSchema = {
             terms:                 { type: ['string', 'null'] },
             minOrderAmount:        { type: 'number' },
             maxDiscount:           { type: ['number', 'null'] },
+            // null/empty on both = coupon applies to the whole cart.
+            applicableCategoryIds: { type: ['array', 'null'], items: { type: 'string' } },
+            applicableProductIds:  { type: ['array', 'null'], items: { type: 'string' } },
             code:                  { type: 'string' },
             couponId:              { type: ['string', 'null'] },
             isDemo:                { type: 'boolean' },
