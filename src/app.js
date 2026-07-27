@@ -208,6 +208,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/store',
   })
 
+  // App Version (public) — force/soft update check, no auth (runs before login)
+  const { publicAppVersionRoutes } = await import('./modules/app-version/app-version.routes.js')
+  await app.register(publicAppVersionRoutes, {
+    prefix: '/api/v1/app',
+  })
+
   // Shops — multi-vendor system
   await app.register(import('./modules/shops/shops.routes.js'), {
     prefix: '/api/v1/shops',
@@ -393,6 +399,12 @@ export const buildApp = async () => {
   const { adminStoreStatusRoutes } = await import('./modules/store-status/store-status.routes.js')
   await app.register(adminStoreStatusRoutes, {
     prefix: '/api/v1/admin/store-status',
+  })
+
+  // App Version (admin) — set min/latest supported build per platform
+  const { adminAppVersionRoutes } = await import('./modules/app-version/app-version.routes.js')
+  await app.register(adminAppVersionRoutes, {
+    prefix: '/api/v1/admin/app-versions',
   })
 
   // Delivery Calendar (admin) — weekly template + per-date overrides
