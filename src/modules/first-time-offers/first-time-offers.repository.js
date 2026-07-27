@@ -55,31 +55,36 @@ export class FirstTimeOffersRepository {
   }
 
   /**
-   * True once userId has a real order in flight — same first-order check
-   * used by FIRST_TIME coupon/cart-milestone targeting (coupons.
-   * repository.js, cart-milestones.repository.js).
+   * True once userId has placed a real order — same first-order check used
+   * by FIRST_TIME coupon/cart-milestone targeting (coupons.repository.js,
+   * cart-milestones.repository.js).
    *
-   * Excludes CANCELLED (never actually happened — a legitimately
-   * cancelled/failed order shouldn't permanently cost a genuine first-time
-   * customer their offer) and PENDING (an order can sit PENDING forever
-   * after a failed online payment that never formally transitions to
-   * CANCELLED — same reasoning). Every other status counts, including
-   * CONFIRMED/PREPARING/PACKED/OUT_FOR_DELIVERY, not just DELIVERED.
+   * A first-time reward is consumed the moment the order is PLACED, not
+   * once it's delivered — same as coupons (recordUsage runs at order
+   * creation/payment confirmation, never waits for delivery) — so this
+   * counts EVERY status except CANCELLED, including PENDING. Placing a
+   * second order while the first is still sitting PENDING must not look
+   * "first-time" again just because nothing has been confirmed yet.
    *
-   * Regression fixed here: this used to check `delivered_at IS NOT NULL`
-   * instead, which correctly solved the stuck-PENDING problem above but
-   * reopened a worse one — nothing stopped a customer from placing several
-   * orders back-to-back (or over several days) before the first one ever
-   * reached DELIVERED, each one still looking "first-time" and getting the
-   * discount again. Reported: the same ₹51 first-time discount applied on
-   * three separate real orders for one customer. Gating on "has progressed
-   * past PENDING" instead of "has been delivered" closes that window while
-   * keeping the original stuck-payment protection intact.
+   * This does not reopen the old stuck-payment problem: an abandoned
+   * ONLINE payment doesn't stay PENDING forever — payment-expiry.worker.js
+   * auto-cancels it (and restores stock) within its 15-minute payment
+   * window, at which point it's CANCELLED and correctly stops counting.
+   * COD orders skip PENDING entirely (order-splitter.service.js creates
+   * them straight into CONFIRMED), so there's no equivalent window there.
+   *
+   * Regression history: this checked `delivered_at IS NOT NULL` for a
+   * while, which avoided the stuck-payment problem but reopened a worse
+   * one — a customer could place several orders back-to-back (or over
+   * several days) before the first one ever reached DELIVERED, each one
+   * still looking "first-time" and getting the reward again. Reported: the
+   * same ₹51 first-time discount applied on three separate real orders for
+   * one customer.
    */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND status NOT IN ('CANCELLED', 'PENDING')
+         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
        ) AS has_prior`,
       [userId]
     )

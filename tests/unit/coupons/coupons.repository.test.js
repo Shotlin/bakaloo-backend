@@ -20,11 +20,13 @@ import { CouponsRepository } from '../../../src/modules/coupons/coupons.reposito
  * the first one ever reached DELIVERED, each still counting as
  * "first-time" (reported: the same first-time discount applied on three
  * separate real orders for one customer). It must now exclude only
- * CANCELLED and PENDING, so any order that's actually progressed
- * (CONFIRMED and beyond) counts.
+ * CANCELLED — including PENDING, since a coupon is consumed the moment an
+ * order is placed, not once delivered — relying on payment-expiry.
+ * worker.js to auto-cancel any order genuinely abandoned mid-payment
+ * instead of excluding PENDING here.
  */
-describe('CouponsRepository.hasPriorOrder — gated on real progress, not just delivery', () => {
-  it('excludes only CANCELLED and PENDING, and never references delivered_at', async () => {
+describe('CouponsRepository.hasPriorOrder — gated on placement, not delivery', () => {
+  it('excludes only CANCELLED, counts PENDING, and never references delivered_at', async () => {
     queryMock.mockClear()
     const repo = new CouponsRepository()
 
@@ -32,7 +34,8 @@ describe('CouponsRepository.hasPriorOrder — gated on real progress, not just d
 
     expect(queryMock).toHaveBeenCalledTimes(1)
     const [sql, params] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/status\s+NOT\s+IN\s*\(\s*'CANCELLED'\s*,\s*'PENDING'\s*\)/i)
+    expect(sql).toMatch(/status\s*!=\s*'CANCELLED'/i)
+    expect(sql).not.toMatch(/PENDING/i)
     expect(sql).not.toMatch(/delivered_at/i)
     expect(params).toEqual(['user-1'])
   })

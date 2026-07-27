@@ -30,18 +30,21 @@ export class CartMilestonesRepository {
   }
 
   /**
-   * True once userId has a real order in flight (any status except
-   * CANCELLED/PENDING) — same check used by FIRST_TIME coupon targeting
-   * (coupons.repository.js) and first-time-offers.repository.js. See
-   * those for the full rationale, including the delivered_at-based
-   * regression this replaced (it let a customer place several orders
-   * before the first one ever reached DELIVERED, each still counting as
-   * "first-time").
+   * True once userId has placed a real order (any status except
+   * CANCELLED — including PENDING, since a reward is consumed the moment
+   * an order is placed, not once delivered) — same check used by
+   * FIRST_TIME coupon targeting (coupons.repository.js) and
+   * first-time-offers.repository.js. See those for the full rationale,
+   * including why PENDING doesn't reopen the old stuck-payment problem
+   * (payment-expiry.worker.js auto-cancels an abandoned online payment
+   * within 15 minutes) and the delivered_at-based regression this
+   * replaced (it let a customer place several orders before the first one
+   * ever reached DELIVERED, each still counting as "first-time").
    */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND status NOT IN ('CANCELLED', 'PENDING')
+         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
        ) AS has_prior`,
       [userId]
     )
