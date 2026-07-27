@@ -856,6 +856,94 @@ describe('CartService.validateCart', () => {
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════
+// CartService.getCart — out-of-stock lines stay visible, but priced at ₹0
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Regression: a line could go out of stock (or get manually delisted)
+// after being added to the cart — e.g. another customer buying the last
+// unit first. getCart() used to have no stock/availability check at all
+// (only validateCart(), called at order-placement time, caught it) — so
+// the cart screen showed it completely normally, charged its price, and
+// the customer only found out at a failed checkout attempt with no idea
+// which item was the problem. getCart() must now: keep the line visible
+// (so the app can show "out of stock"), but exclude it from subtotal/
+// totalMrp/shopGroups (nothing about it is actually payable/deliverable).
+
+describe('CartService.getCart — out-of-stock lines', () => {
+  it('keeps an insufficient-stock line in items but excludes its price from subtotal', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 3 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: 50, stock_quantity: 1 }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID)
+
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0].stockQuantity).toBe(1)
+    expect(result.subtotal).toBe(0)
+    expect(result.totalMrp).toBe(0)
+  })
+
+  it('keeps an is_available=false line in items but excludes its price from subtotal', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: 50, is_available: false }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID)
+
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0].isAvailable).toBe(false)
+    expect(result.subtotal).toBe(0)
+  })
+
+  it('excludes an out-of-stock line from shopGroups entirely (fee/coupon-scope computation must never see it)', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 5 },
+      { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: 50, stock_quantity: 0 }),
+      makeSpRow({ product_id: PROD_2, shop_id: SHOP_A, sp_price: 20, stock_quantity: 10 }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID)
+
+    expect(result.shopGroups).toHaveLength(1)
+    expect(result.shopGroups[0].items).toHaveLength(1)
+    expect(result.shopGroups[0].items[0].productId).toBe(PROD_2)
+    expect(result.shopGroups[0].subtotal).toBe(20)
+    // The out-of-stock line is still visible at the top level for display.
+    expect(result.items.map((i) => i.productId).sort()).toEqual([PROD_1, PROD_2].sort())
+  })
+
+  it('an all-available cart is unaffected (subtotal includes every line, as before)', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: 25, stock_quantity: 10 }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID)
+
+    expect(result.subtotal).toBe(50)
+    expect(result.shopGroups[0].subtotal).toBe(50)
+  })
+})
 
 // ═══════════════════════════════════════════════════════════════════════
 // Phase 3: shopProductId identity (option popup payload)

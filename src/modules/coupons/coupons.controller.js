@@ -38,11 +38,18 @@ export class CouponsController {
     // through so a scoped coupon at least gets an accurate match instead of
     // being evaluated against nothing.
     const cart = await this.cartService.getCart(request.user.id)
+    // Exclude out-of-stock/delisted lines — cart.items includes them (for
+    // the cart screen to render an "out of stock" notice) but they can't
+    // actually be purchased, so a scoped coupon must not count their price
+    // toward the matching subtotal.
+    const fulfillableItems = cart.items.filter(
+      (i) => i.isAvailable && i.stockQuantity >= i.quantity
+    )
     const result = await this.service.validate(
       request.user.id,
       request.body.code,
       request.body.cartTotal,
-      cart.items
+      fulfillableItems
     )
     if (!result.valid) {
       return reply.code(400).send(error(result.message, result.code || 'INVALID_COUPON'))

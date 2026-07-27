@@ -133,6 +133,20 @@ describe('FirstTimeOffersService — category/product scope (090)', () => {
     expect(offer.scopedSubtotal).toBe(60)
     expect(service.computeReward(offer, 110)).toEqual({ discount: 6, freeDelivery: false }) // 10% of 60, not 110
   })
+
+  it("rejects a scoped offer with minOrderAmount 0 when nothing in the cart matches (0 >= 0 must not count as satisfied) — the exact reported bug: a Vegetables-scoped offer stayed 'applied' after the customer removed the vegetable, leaving only a restricted dairy item", async () => {
+    const repo = makeRepoMock({
+      findAllActiveCandidates: vi.fn().mockResolvedValue([
+        { id: 'offer-veg', minOrderAmount: 0, rewardType: 'FREE_DELIVERY', applicableCategoryIds: ['cat-veg'] },
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()), // only dairy left in cart, no vegetables
+    })
+    const service = new FirstTimeOffersService(repo)
+
+    const offer = await service.resolveForCheckout(USER_ID, 110, { cartItems })
+
+    expect(offer).toBeNull()
+  })
 })
 
 describe('FirstTimeOffersService.previewUpcoming — the positive "add X to unlock" nudge', () => {
@@ -183,6 +197,21 @@ describe('FirstTimeOffersService.previewUpcoming — the positive "add X to unlo
     expect(upcoming.id).toBe('offer-near')
     expect(upcoming.amountToUnlock).toBe(40) // 150 - 110
   })
+
+  it('tees up a zero-minimum scoped offer as the teaser (not as "already applied") when nothing matches yet', async () => {
+    const repo = makeRepoMock({
+      findAllActiveCandidates: vi.fn().mockResolvedValue([
+        { id: 'offer-veg', minOrderAmount: 0, rewardType: 'FREE_DELIVERY', applicableCategoryIds: ['cat-veg'] },
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()),
+    })
+    const service = new FirstTimeOffersService(repo)
+
+    const upcoming = await service.previewUpcoming(USER_ID, 110, { cartItems })
+
+    expect(upcoming.id).toBe('offer-veg')
+    expect(upcoming.amountToUnlock).toBe(0)
+  })
 })
 
 describe('FirstTimeOffersService.describeUpcoming — teaser copy', () => {
@@ -198,6 +227,20 @@ describe('FirstTimeOffersService.describeUpcoming — teaser copy', () => {
     })
 
     expect(message).toBe('Add ₹200 of Fresh Vegetables to unlock Free Delivery!')
+  })
+
+  it('phrases a zero-minimum scoped offer qualitatively instead of "Add ₹0 of X"', async () => {
+    const repo = makeRepoMock({ getCategoryNames: vi.fn().mockResolvedValue(['Fresh Vegetables']) })
+    const service = new FirstTimeOffersService(repo)
+
+    const message = await service.describeUpcoming({
+      rewardType: 'FREE_DELIVERY',
+      applicableCategoryIds: ['cat-veg'],
+      hasScope: true,
+      amountToUnlock: 0,
+    })
+
+    expect(message).toBe('Add Fresh Vegetables to unlock Free Delivery!')
   })
 
   it('falls back to generic copy when the scoped category/product can\'t be resolved', async () => {

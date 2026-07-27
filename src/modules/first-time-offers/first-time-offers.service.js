@@ -87,14 +87,24 @@ export class FirstTimeOffersService {
         )
       }
 
-      if (scopedSubtotal >= offer.minOrderAmount) {
+      // A scoped offer needs at least one matching item actually in the
+      // cart — checked independent of minOrderAmount, which defaults to 0
+      // and would otherwise let "zero matching items" (scopedSubtotal 0)
+      // look "satisfied" by `0 >= 0`. Reported bug: a Vegetables-scoped
+      // offer with no minimum stayed showing as applied after the customer
+      // removed the vegetable and only a restricted (dairy) item remained.
+      const satisfied = hasScope
+        ? scopedSubtotal > 0 && scopedSubtotal >= offer.minOrderAmount
+        : scopedSubtotal >= offer.minOrderAmount
+
+      if (satisfied) {
         if (!best || offer.minOrderAmount > best.minOrderAmount) {
           best = { ...offer, scopedSubtotal }
         }
         continue
       }
 
-      const gap = parseFloat((offer.minOrderAmount - scopedSubtotal).toFixed(2))
+      const gap = Math.max(parseFloat((offer.minOrderAmount - scopedSubtotal).toFixed(2)), 0)
       if (gap < closestGap) {
         closestGap = gap
         closest = { ...offer, scopedSubtotal, amountToUnlock: gap, hasScope }
@@ -148,17 +158,25 @@ export class FirstTimeOffersService {
     if (!offer.hasScope) {
       return `Add ₹${offer.amountToUnlock} more to unlock ${rewardLabel}!`
     }
+    // amountToUnlock can be 0 for a scoped offer with no minimum order
+    // amount — the cart just needs SOME matching item, not a ₹ amount, so
+    // "Add ₹0 of X" would read as nonsense. Phrase it qualitatively instead.
+    const needsAnyMatch = offer.amountToUnlock <= 0
     const [categoryNames, productNames] = await Promise.all([
       this.repo.getCategoryNames(offer.applicableCategoryIds || []),
       this.repo.getProductNames(offer.applicableProductIds || []),
     ])
     const names = [...categoryNames, ...productNames]
     if (names.length === 0) {
-      return `Add ₹${offer.amountToUnlock} more of the right products to unlock ${rewardLabel}!`
+      return needsAnyMatch
+        ? `Add one of the eligible products to unlock ${rewardLabel}!`
+        : `Add ₹${offer.amountToUnlock} more of the right products to unlock ${rewardLabel}!`
     }
     const shown = names.slice(0, 3).join(', ')
     const label = names.length > 3 ? `${shown} & more` : shown
-    return `Add ₹${offer.amountToUnlock} of ${label} to unlock ${rewardLabel}!`
+    return needsAnyMatch
+      ? `Add ${label} to unlock ${rewardLabel}!`
+      : `Add ₹${offer.amountToUnlock} of ${label} to unlock ${rewardLabel}!`
   }
 
   _rewardLabel(offer) {

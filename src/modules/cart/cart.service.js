@@ -835,15 +835,32 @@ export class CartService {
       const effective = this._effectivePrice(sp)
       const listPrice = this._listPrice(sp)
       const lineTotal = parseFloat((effective * item.quantity).toFixed(2))
-      subtotal += lineTotal
-      totalMrp += listPrice * item.quantity
+
+      // A line can go out of stock (or get manually delisted) after it was
+      // added — e.g. another customer buying the last unit first while
+      // this one sits in this cart. validateCart() already blocks it at
+      // order-placement time, but silently charging for it here left the
+      // customer with no idea why, or which item to remove. Excluding it
+      // from the running totals — while still returning the line itself
+      // via _formatLine's isAvailable/stockQuantity fields — lets the cart
+      // screen show it as out-of-stock instead of just failing opaquely
+      // at checkout.
+      const canFulfill = sp.is_available === true && Number(sp.stock_quantity) >= item.quantity
+      if (canFulfill) {
+        subtotal += lineTotal
+        totalMrp += listPrice * item.quantity
+      }
 
       items.push(this._formatLine(sp, item, effective, lineTotal))
     }
 
+    // Only fulfillable items count toward per-shop fee computation and
+    // coupon/first-time-offer scope matching — an out-of-stock line isn't
+    // part of what will actually be charged or delivered.
     const shopGroups = []
     const grouped = new Map()
     for (const item of items) {
+      if (!(item.isAvailable && item.stockQuantity >= item.quantity)) continue
       const arr = grouped.get(item.shopId)
       if (arr) arr.push(item)
       else grouped.set(item.shopId, [item])
