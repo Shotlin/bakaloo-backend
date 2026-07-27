@@ -55,23 +55,31 @@ export class FirstTimeOffersRepository {
   }
 
   /**
-   * True only once userId has an order that was actually DELIVERED — same
-   * first-order check used by FIRST_TIME coupon targeting
-   * (coupons.repository.js). Checks delivered_at rather than status, since
-   * delivered_at is written exactly once (COALESCE-guarded) the moment an
-   * order is marked DELIVERED and is never cleared afterward — so a later
-   * REFUNDED transition still correctly counts as "has ordered before",
-   * while a cancelled order, or one stuck PENDING after a failed payment,
-   * correctly does NOT. A simple `status != 'CANCELLED'` check used to gate
-   * this, which meant any non-cancelled order — including one abandoned
+   * True once userId has a real order in flight — same first-order check
+   * used by FIRST_TIME coupon/cart-milestone targeting (coupons.
+   * repository.js, cart-milestones.repository.js).
+   *
+   * Excludes CANCELLED (never actually happened — a legitimately
+   * cancelled/failed order shouldn't permanently cost a genuine first-time
+   * customer their offer) and PENDING (an order can sit PENDING forever
    * after a failed online payment that never formally transitions to
-   * CANCELLED — silently and permanently killed the customer's first-order
-   * offer even though nothing was ever delivered to them.
+   * CANCELLED — same reasoning). Every other status counts, including
+   * CONFIRMED/PREPARING/PACKED/OUT_FOR_DELIVERY, not just DELIVERED.
+   *
+   * Regression fixed here: this used to check `delivered_at IS NOT NULL`
+   * instead, which correctly solved the stuck-PENDING problem above but
+   * reopened a worse one — nothing stopped a customer from placing several
+   * orders back-to-back (or over several days) before the first one ever
+   * reached DELIVERED, each one still looking "first-time" and getting the
+   * discount again. Reported: the same ₹51 first-time discount applied on
+   * three separate real orders for one customer. Gating on "has progressed
+   * past PENDING" instead of "has been delivered" closes that window while
+   * keeping the original stuck-payment protection intact.
    */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND delivered_at IS NOT NULL
+         SELECT 1 FROM orders WHERE user_id = $1 AND status NOT IN ('CANCELLED', 'PENDING')
        ) AS has_prior`,
       [userId]
     )

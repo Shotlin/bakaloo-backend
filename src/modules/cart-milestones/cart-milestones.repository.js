@@ -30,15 +30,18 @@ export class CartMilestonesRepository {
   }
 
   /**
-   * True only once userId has an order that was actually DELIVERED — same
-   * check used by FIRST_TIME coupon targeting (coupons.repository.js) and
-   * first-time-offers.repository.js. See those for the full rationale on
-   * why this checks delivered_at rather than status.
+   * True once userId has a real order in flight (any status except
+   * CANCELLED/PENDING) — same check used by FIRST_TIME coupon targeting
+   * (coupons.repository.js) and first-time-offers.repository.js. See
+   * those for the full rationale, including the delivered_at-based
+   * regression this replaced (it let a customer place several orders
+   * before the first one ever reached DELIVERED, each still counting as
+   * "first-time").
    */
   async hasPriorOrder(userId) {
     const { rows } = await query(
       `SELECT EXISTS(
-         SELECT 1 FROM orders WHERE user_id = $1 AND delivered_at IS NOT NULL
+         SELECT 1 FROM orders WHERE user_id = $1 AND status NOT IN ('CANCELLED', 'PENDING')
        ) AS has_prior`,
       [userId]
     )

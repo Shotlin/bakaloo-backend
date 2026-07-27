@@ -13,14 +13,16 @@ import { CartMilestonesRepository } from '../../../src/modules/cart-milestones/c
 
 /**
  * Regression coverage for hasPriorOrder() — used by FIRST_TIME cart
- * milestones — gating on `status != 'CANCELLED'`. Any non-cancelled order
- * (including one stuck PENDING forever after a failed online payment that
- * never formally transitions to CANCELLED) permanently killed FIRST_TIME
- * milestone eligibility even though nothing was ever delivered. It must now
- * check delivered_at instead, and must NOT reference order status at all.
+ * milestones. Previously gated on `delivered_at IS NOT NULL`, which
+ * correctly stopped a stuck-PENDING failed-payment order from permanently
+ * costing a genuine first-time customer their eligibility, but reopened a
+ * worse hole: nothing stopped placing several orders back-to-back before
+ * the first one ever reached DELIVERED, each still counting as
+ * "first-time". It must now exclude only CANCELLED and PENDING, so any
+ * order that's actually progressed (CONFIRMED and beyond) counts.
  */
-describe('CartMilestonesRepository.hasPriorOrder — gated on delivery, not status', () => {
-  it('checks delivered_at IS NOT NULL and never references status', async () => {
+describe('CartMilestonesRepository.hasPriorOrder — gated on real progress, not just delivery', () => {
+  it("excludes only CANCELLED and PENDING, and never references delivered_at", async () => {
     queryMock.mockClear()
     const repo = new CartMilestonesRepository()
 
@@ -28,8 +30,8 @@ describe('CartMilestonesRepository.hasPriorOrder — gated on delivery, not stat
 
     expect(queryMock).toHaveBeenCalledTimes(1)
     const [sql, params] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/delivered_at\s+IS\s+NOT\s+NULL/i)
-    expect(sql).not.toMatch(/status/i)
+    expect(sql).toMatch(/status\s+NOT\s+IN\s*\(\s*'CANCELLED'\s*,\s*'PENDING'\s*\)/i)
+    expect(sql).not.toMatch(/delivered_at/i)
     expect(params).toEqual(['user-1'])
   })
 })
