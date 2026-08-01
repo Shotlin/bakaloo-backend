@@ -136,7 +136,7 @@ export const manualOrderSchema = {
 }
 
 export const invoiceSchema = { tags: ['Admin Orders'], summary: 'Download PDF invoice', params: uuidParam }
-export const packingSlipSchema = { tags: ['Admin Orders'], summary: 'Get packing slip data', params: uuidParam }
+export const packingSlipSchema = { tags: ['Admin Orders'], summary: 'Download PDF packing slip', params: uuidParam }
 
 export const exportSchema = {
   tags: ['Admin Orders'],

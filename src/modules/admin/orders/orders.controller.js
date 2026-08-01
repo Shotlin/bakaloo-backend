@@ -106,8 +106,8 @@ export class AdminOrdersController {
 
   async getPackingSlip(request, reply) {
     try {
-      const data = await this.service.getPackingSlip(request.params.id)
-      return reply.send(success(data, 'Packing slip'))
+      const buffer = await this.service.getPackingSlip(request.params.id)
+      return reply.type('application/pdf').header('Content-Disposition', `attachment; filename=packing-slip-${request.params.id}.pdf`).send(buffer)
     } catch (err) {
       return reply.code(err.statusCode || 500).send(error(err.message))
     }

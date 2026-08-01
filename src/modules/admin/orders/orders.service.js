@@ -1,6 +1,6 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
-import { generateInvoicePDF } from '../../../utils/invoiceGenerator.js'
+import { generateInvoicePDF, generatePackingSlipPDF } from '../../../utils/invoiceGenerator.js'
 import { query as dbQuery, getClient } from '../../../config/database.js'
 import { logger } from '../../../config/logger.js'
 import { NotificationsRepository } from '../../notifications/notifications.repository.js'
@@ -297,11 +297,7 @@ export class AdminOrdersService {
 
   async getPackingSlip(orderId) {
     const order = await this.findById(orderId)
-    // Simplified packing slip — just items + customer info (no pricing)
-    return {
-      order_number: order.order_number, customer: order.customer_name,
-      address: order.delivery_address, items: order.items.map(i => ({ name: i.name, quantity: i.quantity, unit: i.unit }))
-    }
+    return generatePackingSlipPDF(order)
   }
 
   async exportCSV(filters) {

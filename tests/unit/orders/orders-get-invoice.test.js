@@ -29,7 +29,13 @@ vi.mock('pdfkit', () => ({
     rect() { return this }
     fillAndStroke() { return this }
     fillColor() { return this }
+    strokeColor() { return this }
     addPage() { return this }
+    registerFont() { return this }
+    image() { return this }
+    widthOfString() { return 10 }
+    heightOfString() { return 10 }
+    get page() { return { width: 595, height: 842 } }
     get y() { return 0 }
     set y(_v) {}
     end() {
