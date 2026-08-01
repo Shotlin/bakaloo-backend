@@ -58,4 +58,10 @@ export class TeamController {
         if (!ok) return reply.code(404).send(error('Member not found', 404))
         return success(null, 'Member removed')
     }
+
+    async resetMemberPassword(request, reply) {
+        const result = await svc.resetMemberPassword(request.params.id, request.user.id, request.ip)
+        if (!result) return reply.code(404).send(error('Member not found', 404))
+        return success(result, 'Password reset')
+    }
 }

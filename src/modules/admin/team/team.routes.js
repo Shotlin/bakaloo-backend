@@ -41,10 +41,11 @@ export async function roleRoutes(fastify) {
 
 /**
  * Team routes — prefix: /team
- * GET  /          — team.view (list members)
- * POST /invite    — team.manage (invite)
- * PATCH /:id      — team.manage (update)
- * DELETE /:id     — team.manage (remove)
+ * GET  /                 — team.view (list members)
+ * POST /invite           — team.manage (invite)
+ * PATCH /:id             — team.manage (update)
+ * DELETE /:id            — team.manage (remove)
+ * POST /:id/reset-password — team.manage (reset to a fresh temp password)
  */
 export async function teamRoutes(fastify) {
     const auth = [fastify.authenticate, fastify.requireAdmin]
@@ -66,4 +67,8 @@ export async function teamRoutes(fastify) {
         schema: removeMemberSchema,
         preHandler: authManage,
     }, ctrl.removeMember.bind(ctrl))
+
+    fastify.post('/:id/reset-password', {
+        preHandler: authManage,
+    }, ctrl.resetMemberPassword.bind(ctrl))
 }

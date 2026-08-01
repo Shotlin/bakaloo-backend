@@ -1,5 +1,6 @@
 import { TeamRepository } from './team.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
+import { generateTempPassword } from '../../../utils/tempPassword.js'
 import bcrypt from 'bcrypt'
 
 const repo = new TeamRepository()
@@ -84,5 +85,27 @@ export class TeamService {
             logAdminActivity(adminId, 'REMOVE_MEMBER', 'user', id, null, null, ip)
         }
         return ok
+    }
+
+    /**
+     * Reset a team member's password to a freshly generated temp password
+     * (never a caller-supplied value — avoids weak human-chosen passwords).
+     * The plaintext is returned exactly once; it is never logged. The member
+     * must change it on next login (force_password_change) and every prior
+     * JWT they held is invalidated immediately (session_version bump).
+     */
+    async resetMemberPassword(id, adminId, ip) {
+        const member = await repo.findMemberById(id)
+        if (!member) return null
+
+        const tempPassword = generateTempPassword()
+        const passwordHash = await bcrypt.hash(tempPassword, 12)
+
+        const ok = await repo.resetPassword(id, passwordHash)
+        if (!ok) return null
+
+        // Never pass the password/hash into the activity log payload.
+        logAdminActivity(adminId, 'RESET_MEMBER_PASSWORD', 'user', id, null, null, ip)
+        return { temp_password: tempPassword }
     }
 }

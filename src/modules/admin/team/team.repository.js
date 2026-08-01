@@ -137,4 +137,23 @@ export class TeamRepository {
         const { rows: [user] } = await query('SELECT id FROM users WHERE email = $1', [email])
         return user || null
     }
+
+    /**
+     * Set a new password hash for a team member, force a password change on
+     * their next login, and bump session_version so every previously issued
+     * JWT for this user is invalidated immediately (mirrors shop-staff's
+     * `resetPasswordTx` — same `users` table, same three-column contract).
+     */
+    async resetPassword(id, passwordHash) {
+        const { rowCount } = await query(
+            `UPDATE users
+                SET password_hash = $1,
+                    force_password_change = true,
+                    session_version = session_version + 1,
+                    updated_at = NOW()
+              WHERE id = $2 AND role = 'ADMIN'`,
+            [passwordHash, id]
+        )
+        return rowCount > 0
+    }
 }
