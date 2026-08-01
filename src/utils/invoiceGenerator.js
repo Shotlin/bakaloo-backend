@@ -2,9 +2,19 @@ import PDFDocument from 'pdfkit'
 import { STORE_INFO } from '../config/storeInfo.js'
 
 const TERMINAL_BANNER_STATUS = new Set(['CANCELLED', 'REFUNDED'])
-const PAGE_LEFT = 50
-const PAGE_RIGHT = 545
+
+// POS thermal roll size (80mm) rather than A4 — this renders as a receipt,
+// not a printed page. Height isn't fixed: every generate call renders once
+// against a throwaway tall document purely to measure how much vertical
+// space the content needs, then renders again for real at that exact
+// height, so the PDF is always trimmed to its content (no trailing
+// whitespace, no pagination).
+const RECEIPT_WIDTH = 227
+const RECEIPT_MARGIN = 10
+const PAGE_LEFT = RECEIPT_MARGIN
+const PAGE_RIGHT = RECEIPT_WIDTH - RECEIPT_MARGIN
 const PAGE_WIDTH = PAGE_RIGHT - PAGE_LEFT
+
 // PDFKit's standard 14 fonts can't render ₹ — any text with a rupee amount
 // must use this embedded font instead (see STORE_INFO.currencyFontPath).
 const CURRENCY_FONT = 'currency'
@@ -57,76 +67,98 @@ function formatAddress(address) {
 }
 
 /**
+ * The "pack size" shoppers see under a product name (e.g. "500 g", "1 kg",
+ * "6 pieces") — admin-authored free text on the product, snapshotted onto
+ * the order item as `net_quantity` (see ProductForm's "Pack Size" field).
+ * `unit` is a coarser base-measure classification (kg/g/piece/...) used
+ * for catalog filtering, not what a picker needs on a packing slip, so it's
+ * only a last-resort fallback here.
+ */
+function itemPackSize(item) {
+  return item.net_quantity || item.netQuantity || item.unit || ''
+}
+
+/**
+ * Right-aligned currency amount, drawn independently of the text cursor
+ * (`lineBreak: false`) so it can share a row with a left-aligned fragment
+ * drawn at the same y. Returns nothing — callers advance doc.y themselves.
+ */
+function drawAmount(doc, amount, y, { size = 8, bold = false } = {}) {
+  const sign = amount < 0 ? '-' : ''
+  doc.font(CURRENCY_FONT).fontSize(bold ? size + 1 : size)
+  doc.text(`${sign}₹${Math.abs(amount).toFixed(2)}`, PAGE_LEFT, y, {
+    width: PAGE_WIDTH, align: 'right', lineBreak: false,
+  })
+}
+
+/**
  * Store logo + registration details, shared by the invoice and the packing
  * slip so both documents carry identical branding.
  */
 function drawStoreHeader(doc, title) {
-  const logoWidth = 170
+  const logoWidth = 140
   try {
-    doc.image(STORE_INFO.logoPath, (doc.page.width - logoWidth) / 2, doc.y, { width: logoWidth })
-    doc.y += logoWidth / 2.71 + 10
+    doc.image(STORE_INFO.logoPath, (RECEIPT_WIDTH - logoWidth) / 2, doc.y, { width: logoWidth })
+    doc.y += logoWidth / 2.71 + 8
   } catch {
     // Missing/unreadable logo file must never break invoice generation.
-    doc.fontSize(20).font('Helvetica-Bold').text(STORE_INFO.name, { align: 'center' })
+    doc.fontSize(16).font('Helvetica-Bold').text(STORE_INFO.name, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
     doc.moveDown(0.3)
   }
 
-  doc.font('Helvetica-Bold').fontSize(9).text(`GST No: ${STORE_INFO.gstNo}`, { align: 'center' })
-  doc.moveDown(0.3)
+  doc.font('Helvetica-Bold').fontSize(8).text(`GST No: ${STORE_INFO.gstNo}`, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+  doc.moveDown(0.25)
 
-  doc.font('Helvetica').fontSize(9)
-  for (const line of STORE_INFO.addressLines) {
-    doc.text(line, { align: 'center' })
-  }
-  doc.text(STORE_INFO.phone, { align: 'center' })
-  doc.moveDown(0.5)
+  doc.font('Helvetica').fontSize(7.5)
+  doc.text(STORE_INFO.addressLines.join(' '), PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+  doc.text(STORE_INFO.phone, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+  doc.moveDown(0.4)
 
   if (title) {
-    doc.font('Helvetica-Bold').fontSize(13).text(title, { align: 'center' })
-    doc.moveDown(0.4)
+    doc.font('Helvetica-Bold').fontSize(11).text(title, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+    doc.moveDown(0.3)
   }
 
   doc.moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke()
-  doc.moveDown(0.8)
+  doc.moveDown(0.6)
 }
 
 /**
- * Two-column "Customer Details" block — name/phone/address on the left,
- * order id/date/delivery time on the right. Address height is measured so
- * multi-line addresses never overlap the section that follows.
+ * One "Label: value" line, wrapped to `PAGE_WIDTH` and height-measured so a
+ * long value (e.g. an address) never overlaps the line drawn after it.
+ */
+function detailRow(doc, label, value) {
+  const y = doc.y
+  const labelText = `${label}: `
+  doc.font('Helvetica-Bold').fontSize(8).text(labelText, PAGE_LEFT, y, { lineBreak: false })
+  const labelWidth = doc.widthOfString(labelText)
+  const valueWidth = PAGE_WIDTH - labelWidth
+  const valueText = value || '-'
+
+  doc.font('Helvetica').fontSize(8)
+  const height = doc.heightOfString(valueText, { width: valueWidth })
+  doc.text(valueText, PAGE_LEFT + labelWidth, y, { width: valueWidth })
+
+  doc.y = y + Math.max(height, 10) + 3
+}
+
+/**
+ * Single-column "Customer Details" block — narrow receipt width has no room
+ * for the two-column layout an A4 invoice would use.
  */
 function drawCustomerDetails(doc, order, address) {
-  const rowTop = doc.y
-  doc.font('Helvetica-Bold').fontSize(11).text('Customer Details', PAGE_LEFT, rowTop)
+  doc.font('Helvetica-Bold').fontSize(10).text('Customer Details', PAGE_LEFT, doc.y)
+  doc.moveDown(0.4)
 
-  const infoTop = rowTop + 20
-  const addressText = formatAddress(address) || '-'
-
-  doc.font('Helvetica-Bold').fontSize(9)
-  doc.text('Name', PAGE_LEFT, infoTop)
-  doc.text('Phone', PAGE_LEFT, infoTop + 16)
-  doc.text('Address', PAGE_LEFT, infoTop + 32)
-
-  doc.font('Helvetica').fontSize(9)
-  doc.text(order.customer_name || order.customerName || '-', PAGE_LEFT + 60, infoTop, { width: 190 })
-  doc.text(order.customer_phone || order.customerPhone || '-', PAGE_LEFT + 60, infoTop + 16)
-  const addressHeight = doc.heightOfString(addressText, { width: 190 })
-  doc.text(addressText, PAGE_LEFT + 60, infoTop + 32, { width: 190 })
-
-  const rightX = 340
-  doc.font('Helvetica-Bold').fontSize(9)
-  doc.text('Order ID', rightX, infoTop)
-  doc.text('Order Date', rightX, infoTop + 16)
-  doc.text('Delivery Time', rightX, infoTop + 32)
-
-  doc.font('Helvetica').fontSize(9)
-  doc.text(order.order_number || order.orderNumber || '-', rightX + 85, infoTop, { width: 120 })
-  doc.text(formatOrderDate(order.created_at || order.createdAt), rightX + 85, infoTop + 16)
+  detailRow(doc, 'Name', order.customer_name || order.customerName)
+  detailRow(doc, 'Phone', order.customer_phone || order.customerPhone)
+  detailRow(doc, 'Address', formatAddress(address))
+  detailRow(doc, 'Order ID', order.order_number || order.orderNumber)
+  detailRow(doc, 'Order Date', formatOrderDate(order.created_at || order.createdAt))
   const deliveredAt = order.delivered_at || order.deliveredAt
-  doc.text(deliveredAt ? formatDeliveryTime(deliveredAt) : '-', rightX + 85, infoTop + 32)
+  detailRow(doc, 'Delivery Time', deliveredAt ? formatDeliveryTime(deliveredAt) : '-')
 
-  const leftBlockEnd = infoTop + 32 + Math.max(addressHeight, 12)
-  doc.y = Math.max(leftBlockEnd, infoTop + 48) + 12
+  doc.moveDown(0.3)
 }
 
 function drawTerminalBanner(doc, order) {
@@ -138,83 +170,90 @@ function drawTerminalBanner(doc, order) {
     : null
 
   const bannerTop = doc.y
-  const bannerHeight = transition || refundAmount ? 54 : 30
-  doc.rect(PAGE_LEFT, bannerTop, PAGE_WIDTH, bannerHeight).fillAndStroke('#FEF2F2', bannerColor)
+  const innerLeft = PAGE_LEFT + 8
+  const innerWidth = PAGE_WIDTH - 16
 
-  doc.fillColor(bannerColor).font('Helvetica-Bold').fontSize(13)
-    .text(isRefunded ? 'ORDER REFUNDED' : 'ORDER CANCELLED', PAGE_LEFT + 10, bannerTop + 7)
+  // Measure first (heightOfString only, no drawing) so the box can be
+  // painted before the text — otherwise fillAndStroke, drawn after, would
+  // paint over whatever text came first.
+  let contentHeight = 8 + 15
+  let noteHeight = 0
+  if (transition?.changed_at) contentHeight += 12
+  if (transition?.note) {
+    doc.font('Helvetica').fontSize(7.5)
+    noteHeight = doc.heightOfString(`Reason: ${transition.note}`, { width: innerWidth })
+    contentHeight += noteHeight + 2
+  }
+  if (refundAmount) contentHeight += 12
+  contentHeight += 6
 
-  doc.font('Helvetica').fontSize(9)
-  let bannerLine = bannerTop + 26
+  doc.rect(PAGE_LEFT, bannerTop, PAGE_WIDTH, contentHeight).fillAndStroke('#FEF2F2', bannerColor)
+
+  let y = bannerTop + 8
+  doc.fillColor(bannerColor).font('Helvetica-Bold').fontSize(10)
+    .text(isRefunded ? 'ORDER REFUNDED' : 'ORDER CANCELLED', innerLeft, y, { width: innerWidth })
+  y += 15
+
+  doc.font('Helvetica').fontSize(7.5)
   if (transition?.changed_at) {
     const label = isRefunded ? 'Refunded on' : 'Cancelled on'
-    doc.text(`${label} ${formatOrderDate(transition.changed_at)}`, PAGE_LEFT + 10, bannerLine)
-    bannerLine += 14
+    doc.text(`${label} ${formatOrderDate(transition.changed_at)}`, innerLeft, y, { width: innerWidth })
+    y += 12
   }
   if (transition?.note) {
-    doc.text(`Reason: ${transition.note}`, PAGE_LEFT + 10, bannerLine, { width: 420 })
+    doc.text(`Reason: ${transition.note}`, innerLeft, y, { width: innerWidth })
+    y += noteHeight + 2
   }
   if (refundAmount) {
-    doc.font(CURRENCY_FONT).text(`Refund amount: ₹${refundAmount.toFixed(2)}`, 350, bannerTop + 26)
+    doc.font(CURRENCY_FONT).text(`Refund amount: ₹${refundAmount.toFixed(2)}`, innerLeft, y, { width: innerWidth })
+    y += 12
   }
 
   // Reset both fill and stroke — .fillAndStroke() above leaves the banner's
-  // red/amber as the active stroke color, which would otherwise bleed into
-  // every table line and box border drawn after a cancelled/refunded order.
+  // red/amber as the active color, which would otherwise bleed into every
+  // table line and box border drawn after a cancelled/refunded order.
   doc.fillColor('black').strokeColor('black')
-  doc.y = bannerTop + bannerHeight + 14
+  doc.y = bannerTop + contentHeight + 10
 }
 
 /**
- * Items table. `withPrice: true` renders the invoice's Item/Qty/Price (₹)
- * columns; `withPrice: false` renders the packing slip's Item/Qty/Unit
- * columns (no pricing, by design — packing slips are a picking aid).
+ * Items list, POS-receipt style: each item gets two lines — the name (with
+ * its pack size, e.g. "Onion (Kanda) (1 kg)") on its own full-width line so
+ * long names simply wrap, then "qty x unit price ... line total" underneath.
  */
-function drawItemsTable(doc, items, { withPrice }) {
-  const tableTop = doc.y
-  const colX = withPrice
-    ? { item: PAGE_LEFT, qty: 300, price: 460 }
-    : { item: PAGE_LEFT, qty: 370, unit: 450 }
-
-  doc.font('Helvetica-Bold').fontSize(10)
-  doc.text('Item', colX.item, tableTop)
-  doc.text('Qty', colX.qty, tableTop)
-  if (withPrice) {
-    doc.font(CURRENCY_FONT).fontSize(10).text('Price (₹)', colX.price, tableTop, { width: 85, align: 'right' })
-  } else {
-    doc.text('Unit', colX.unit, tableTop)
-  }
-
-  doc.moveTo(PAGE_LEFT, tableTop + 15).lineTo(PAGE_RIGHT, tableTop + 15).stroke()
-
-  let y = tableTop + 24
-  doc.font('Helvetica').fontSize(9)
+function drawItemsTable(doc, items) {
+  doc.font('Helvetica-Bold').fontSize(9).text('Items', PAGE_LEFT, doc.y)
+  doc.moveDown(0.2)
+  doc.moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke()
+  doc.moveDown(0.35)
 
   for (const item of items) {
     const name = item.name || item.productName || 'Product'
+    const packSize = itemPackSize(item)
+    const label = packSize ? `${name} (${packSize})` : name
     const qty = item.quantity || item.qty || 0
+    const price = parseFloat(item.price || 0)
+    const total = parseFloat(item.total ?? qty * price)
 
-    if (y > 700) {
-      doc.addPage()
-      y = 50
-    }
+    doc.font('Helvetica-Bold').fontSize(8.5)
+    doc.text(label, PAGE_LEFT, doc.y, { width: PAGE_WIDTH })
+    doc.moveDown(0.1)
 
-    doc.text(name, colX.item, y, { width: withPrice ? 230 : 300 })
-    doc.text(String(qty), colX.qty, y)
+    const rowY = doc.y
+    const qtyText = `${qty} x `
+    doc.font('Helvetica').fontSize(8)
+    doc.text(qtyText, PAGE_LEFT, rowY, { lineBreak: false })
+    const qtyTextWidth = doc.widthOfString(qtyText) // measure before switching fonts below
+    doc.font(CURRENCY_FONT).fontSize(8)
+    doc.text(`₹${price.toFixed(2)}`, PAGE_LEFT + qtyTextWidth, rowY, { lineBreak: false })
+    drawAmount(doc, total, rowY)
 
-    if (withPrice) {
-      const price = parseFloat(item.price || 0)
-      const total = parseFloat(item.total ?? qty * price)
-      doc.text(total.toFixed(2), colX.price, y, { width: 85, align: 'right' })
-    } else {
-      doc.text(item.unit || '-', colX.unit, y)
-    }
-
-    y += 20
+    doc.y = rowY + 12
+    doc.moveDown(0.3)
   }
 
-  doc.moveTo(PAGE_LEFT, y + 4).lineTo(PAGE_RIGHT, y + 4).stroke()
-  doc.y = y + 16
+  doc.moveTo(PAGE_LEFT, doc.y).lineTo(PAGE_RIGHT, doc.y).stroke()
+  doc.moveDown(0.5)
 }
 
 function drawTotals(doc, order) {
@@ -226,18 +265,13 @@ function drawTotals(doc, order) {
   const total = parseFloat(order.total_amount || order.totalAmount || 0)
   const savings = parseFloat(order.savings_total || order.savingsTotal || 0)
 
-  const labelX = 350
-  const valueX = 460
-  let y = doc.y
-
   const printLine = (label, value, bold = false) => {
-    const size = bold ? 12 : 10
-    const sign = value < 0 ? '-' : ''
+    const y = doc.y
+    const size = bold ? 9.5 : 8
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(size)
-    doc.text(label, labelX, y)
-    doc.font(CURRENCY_FONT).fontSize(size)
-    doc.text(`${sign}₹${Math.abs(value).toFixed(2)}`, valueX, y, { width: 85, align: 'right' })
-    y += bold ? 20 : 17
+    doc.text(label, PAGE_LEFT, y, { lineBreak: false })
+    drawAmount(doc, value, y, { size, bold })
+    doc.y = y + (bold ? 16 : 13)
   }
 
   printLine('Subtotal', subtotal)
@@ -246,30 +280,31 @@ function drawTotals(doc, order) {
   if (tax > 0) printLine('Tax', tax)
   if (discount > 0) printLine('Discount', -discount)
 
-  doc.moveTo(labelX, y + 2).lineTo(PAGE_RIGHT, y + 2).stroke()
-  y += 12
+  doc.moveTo(PAGE_LEFT, doc.y + 2).lineTo(PAGE_RIGHT, doc.y + 2).stroke()
+  doc.y += 10
 
   printLine('Total', total, true)
-  y += 4
+  doc.moveDown(0.3)
 
-  doc.font('Helvetica').fontSize(9)
-  doc.text('Payment Method:', labelX, y)
-  doc.text(order.payment_method || order.paymentMethod || '-', valueX - 40, y, { width: 125, align: 'right' })
-  y += 22
+  doc.font('Helvetica').fontSize(8)
+  doc.text('Payment Method', PAGE_LEFT, doc.y, { lineBreak: false })
+  doc.text(order.payment_method || order.paymentMethod || '-', PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'right', lineBreak: false })
+  doc.moveDown(0.9)
 
   if (savings > 0) {
-    doc.rect(PAGE_LEFT, y, PAGE_WIDTH, 24).stroke()
+    const y = doc.y
+    doc.rect(PAGE_LEFT, y, PAGE_WIDTH, 22).stroke()
 
     // Mixed-font sentence (₹ needs CURRENCY_FONT, the rest stays Helvetica) —
     // pdfkit can't mix fonts within one text() call, so each fragment is
     // measured and positioned manually to read as one centered line.
-    const before = 'Customer saved '
+    const before = 'Saved '
     const amount = `₹${savings.toFixed(2)}`
     const after = ' on this order'
-    doc.font('Helvetica-Bold').fontSize(9)
+    doc.font('Helvetica-Bold').fontSize(8)
     const beforeWidth = doc.widthOfString(before)
     const afterWidth = doc.widthOfString(after)
-    doc.font(CURRENCY_FONT).fontSize(9)
+    doc.font(CURRENCY_FONT).fontSize(8)
     const amountWidth = doc.widthOfString(amount)
 
     let x = PAGE_LEFT + (PAGE_WIDTH - beforeWidth - amountWidth - afterWidth) / 2
@@ -280,26 +315,76 @@ function drawTotals(doc, order) {
     x += amountWidth
     doc.font('Helvetica-Bold').text(after, x, textY, { lineBreak: false })
 
-    y += 34
+    doc.y = y + 30
   }
-
-  doc.y = y
 }
 
 function drawFooter(doc) {
   // Explicit x/width rather than a flowing text() call — a preceding section
-  // can leave doc.x parked mid-page (e.g. after the items table's last
-  // column), which would otherwise narrow the "centered" width and wrap
-  // this one-line sentence across two lines.
-  doc.y += 20
-  doc.font('Helvetica-Oblique').fontSize(10)
+  // can leave doc.x parked mid-page, which would otherwise narrow the
+  // "centered" width and wrap this one-line sentence across two lines.
+  doc.y += 10
+  doc.font('Helvetica-Oblique').fontSize(8.5)
     .text(`— Thank you for shopping with ${STORE_INFO.name}! —`, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
-  doc.font('Helvetica').fontSize(8)
-    .text('We hope to serve you again soon.', PAGE_LEFT, doc.y + 16, { width: PAGE_WIDTH, align: 'center' })
+  doc.moveDown(0.5)
+  doc.font('Helvetica').fontSize(7.5)
+    .text('We hope to serve you again soon.', PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+}
+
+function renderReceipt(doc, order, address, items, { title }) {
+  doc.registerFont(CURRENCY_FONT, STORE_INFO.currencyFontPath)
+
+  drawStoreHeader(doc, title)
+  drawCustomerDetails(doc, order, address)
+
+  if (TERMINAL_BANNER_STATUS.has(order.status)) {
+    drawTerminalBanner(doc, order)
+  } else {
+    doc.moveDown(0.3)
+  }
+
+  drawItemsTable(doc, items)
+  drawTotals(doc, order)
+  drawFooter(doc)
+
+  return doc.y
 }
 
 /**
- * Generate a PDF invoice buffer for an order
+ * PDFKit fixes a page's height at creation time, so trimming a receipt PDF
+ * to its content means rendering once to learn the final y position. This
+ * throwaway document (tall enough for any realistic order) is never piped
+ * anywhere — it exists purely so `renderReceipt`'s real drawing/measuring
+ * calls (heightOfString, image, text wrapping, ...) tell us exactly how
+ * tall the real page needs to be.
+ */
+function measureReceiptHeight(order, address, items, opts) {
+  const measurer = new PDFDocument({ size: [RECEIPT_WIDTH, 5000], margin: RECEIPT_MARGIN })
+  measurer.on('error', () => {})
+  const finalY = renderReceipt(measurer, order, address, items, opts)
+  measurer.end()
+  return Math.ceil(finalY) + RECEIPT_MARGIN
+}
+
+function generateReceiptPDF(order, opts) {
+  return new Promise((resolve, reject) => {
+    const { address, items } = parseOrderShape(order)
+    const height = measureReceiptHeight(order, address, items, opts)
+
+    const doc = new PDFDocument({ size: [RECEIPT_WIDTH, height], margin: RECEIPT_MARGIN })
+    const chunks = []
+
+    doc.on('data', chunk => chunks.push(chunk))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+
+    renderReceipt(doc, order, address, items, opts)
+    doc.end()
+  })
+}
+
+/**
+ * Generate a PDF invoice buffer for an order, sized as an 80mm POS receipt.
  * @param {Object} order - Order object with items, delivery_address, etc.
  *   Optional `order.timeline` (order_status_history rows) and
  *   `order.payment` (latest payments row) enrich the CANCELLED/REFUNDED
@@ -309,59 +394,17 @@ function drawFooter(doc) {
  * @returns {Promise<Buffer>} PDF buffer
  */
 export function generateInvoicePDF(order) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 })
-    const chunks = []
-
-    doc.on('data', chunk => chunks.push(chunk))
-    doc.on('end', () => resolve(Buffer.concat(chunks)))
-    doc.on('error', reject)
-
-    doc.registerFont(CURRENCY_FONT, STORE_INFO.currencyFontPath)
-
-    const { address, items } = parseOrderShape(order)
-
-    drawStoreHeader(doc)
-    drawCustomerDetails(doc, order, address)
-
-    if (TERMINAL_BANNER_STATUS.has(order.status)) {
-      drawTerminalBanner(doc, order)
-    } else {
-      doc.moveDown(0.6)
-    }
-
-    drawItemsTable(doc, items, { withPrice: true })
-    drawTotals(doc, order)
-    drawFooter(doc)
-
-    doc.end()
-  })
+  return generateReceiptPDF(order, { title: null })
 }
 
 /**
- * Generate a PDF packing slip buffer for an order — items + quantities only,
- * no pricing (a picking/packing aid, not a bill), but branded identically to
- * the invoice (same logo/GST/address header and footer).
+ * Generate a PDF packing slip buffer for an order — same branding, customer
+ * details, itemized pricing and totals as the invoice (per business request,
+ * the slip that ships with the order should be a complete receipt too), just
+ * labelled "PACKING SLIP" instead of carrying no title.
  * @param {Object} order
  * @returns {Promise<Buffer>} PDF buffer
  */
 export function generatePackingSlipPDF(order) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 })
-    const chunks = []
-
-    doc.on('data', chunk => chunks.push(chunk))
-    doc.on('end', () => resolve(Buffer.concat(chunks)))
-    doc.on('error', reject)
-
-    const { address, items } = parseOrderShape(order)
-
-    drawStoreHeader(doc, 'PACKING SLIP')
-    drawCustomerDetails(doc, order, address)
-    doc.moveDown(0.6)
-    drawItemsTable(doc, items, { withPrice: false })
-    drawFooter(doc)
-
-    doc.end()
-  })
+  return generateReceiptPDF(order, { title: 'PACKING SLIP' })
 }
