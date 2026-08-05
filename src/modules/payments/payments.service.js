@@ -139,6 +139,16 @@ export class PaymentsService {
       return { success: false, message: 'Unauthorized' }
     }
 
+    // Idempotency guard: the webhook or the payment-expiry reconciliation
+    // check (both call completeVerifiedPayment()) can win the race and
+    // already mark this PAID before this client call lands — e.g. the app
+    // was slow to call /verify after the Razorpay checkout closed. Re-running
+    // the block below would re-send the "order placed" notification and
+    // re-run every other side effect a second time.
+    if (payment.status === 'PAID') {
+      return { success: true, payment }
+    }
+
     // HMAC-SHA256 verification
     const expectedSignature = crypto
       .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
@@ -156,27 +166,76 @@ export class PaymentsService {
       return { success: false, message: 'Payment verification failed' }
     }
 
+    const result = await this.completeVerifiedPayment(razorpayOrderId, {
+      razorpayPaymentId,
+      razorpaySignature,
+      source: 'PAYMENT_VERIFY',
+    })
+
+    if (!result.success) {
+      return result
+    }
+
+    logger.info(
+      { paymentId: payment.id, razorpayPaymentId, orderId: payment.orderId },
+      'Payment verified successfully'
+    )
+
+    return { success: true, payment: result.payment }
+  }
+
+  /**
+   * Safety net for order payments — completes a PENDING payment once we
+   * have independent confirmation (not necessarily from the client) that
+   * Razorpay actually captured it. Callers:
+   *   - verifyPayment() above, the normal client-side confirmation
+   *   - the Razorpay webhook (payment.captured), when configured
+   *   - the payment-expiry worker, which polls Razorpay directly before
+   *     ever cancelling a PENDING order — so a customer whose verifyPayment()
+   *     call never landed (app killed, network drop, UPI app-switch didn't
+   *     return cleanly) never gets their already-paid order auto-cancelled
+   *     from under them. Mirrors WalletService.completeVerifiedTopUp for
+   *     the exact same class of bug.
+   *
+   * Idempotent: only acts on a payment still PENDING. Already-PAID (another
+   * caller won the race) or FAILED/EXPIRED rows are left alone.
+   */
+  async completeVerifiedPayment(razorpayOrderId, { razorpayPaymentId, razorpaySignature, method, source = 'RECONCILIATION' } = {}) {
+    const payment = await this.repo.findByRazorpayOrderId(razorpayOrderId)
+    if (!payment) {
+      return { success: false, message: 'Payment record not found' }
+    }
+
+    if (payment.status === 'PAID') {
+      return { success: true, skipped: true, payment }
+    }
+
+    if (payment.status !== 'PENDING') {
+      return { success: true, skipped: true, reason: payment.status, payment }
+    }
+
     // Update payment record
     const updated = await this.repo.updatePayment(payment.id, {
       razorpayPaymentId,
       razorpaySignature,
       status: 'PAID',
+      method,
     })
 
     // Update order payment status
     await this.ordersRepo.updateStatus(payment.orderId, 'CONFIRMED', {
       paymentStatus: 'PAID',
     })
-    await this._queueAutoAssign(payment.orderId, 'PAYMENT_VERIFY')
+    await this._queueAutoAssign(payment.orderId, source)
 
     // Credit any cashback whose trigger is PAYMENT_SUCCESS or
     // ORDER_CONFIRMED — this call also confirms the order, so both
     // triggers are satisfied at the same moment. Fire-and-forget.
     this.cashbackService.evaluateAndCredit(payment.orderId, 'PAYMENT_SUCCESS').catch((err) => {
-      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment verify)')
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment finalize)')
     })
     this.cashbackService.evaluateAndCredit(payment.orderId, 'ORDER_CONFIRMED').catch((err) => {
-      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment verify)')
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (payment finalize)')
     })
 
     // NOW clear the cart and send "Order placed" notification — only after
@@ -187,10 +246,10 @@ export class PaymentsService {
     try {
       const { CartRepository } = await import('../cart/cart.repository.js')
       const cartRepo = new CartRepository()
-      await cartRepo.clearCart(userId)
-      await cartRepo.clearExtras(userId)
+      await cartRepo.clearCart(payment.userId)
+      await cartRepo.clearExtras(payment.userId)
     } catch (err) {
-      logger.warn({ err: err.message, userId }, 'Cart clear after payment verify failed (non-critical)')
+      logger.warn({ err: err.message, userId: payment.userId }, 'Cart clear after payment finalize failed (non-critical)')
     }
 
     // Same "only after payment is confirmed" reasoning as the cart clear
@@ -201,18 +260,18 @@ export class PaymentsService {
       const { CouponsRepository } = await import('../coupons/coupons.repository.js')
       await new CouponsService(new CouponsRepository()).recordUsageForOrder(payment.orderId)
     } catch (err) {
-      logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording after payment verify failed (non-critical)')
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording after payment finalize failed (non-critical)')
     }
 
     // Send order placed notification after confirmed payment
     try {
-      const order = await this.ordersRepo.findByIdAndUser(payment.orderId, userId)
+      const order = await this.ordersRepo.findByIdAndUser(payment.orderId, payment.userId)
       if (order) {
         const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
         const { NotificationsService } = await import('../notifications/notifications.service.js')
         const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
         const notifService = new NotificationsService(new NotificationsRepository(), null)
-        await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
+        await notifService.sendNotification(payment.userId, buildCustomerOrderEventNotification({
           orderId: order.id,
           orderNumber: order.orderNumber || order.order_number,
           timelineType: 'ORDER_PLACED',
@@ -229,12 +288,12 @@ export class PaymentsService {
         })
       }
     } catch (err) {
-      logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment verify failed (non-critical)')
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment finalize failed (non-critical)')
     }
 
     logger.info(
-      { paymentId: payment.id, razorpayPaymentId, orderId: payment.orderId },
-      'Payment verified successfully'
+      { paymentId: payment.id, razorpayPaymentId, orderId: payment.orderId, source },
+      'Payment finalized'
     )
 
     return { success: true, payment: updated }
@@ -272,36 +331,23 @@ export class PaymentsService {
 
         if (rzpOrderId) {
           const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
-          if (payment && payment.status !== 'PAID') {
-            await this.repo.updatePayment(payment.id, {
+          if (payment) {
+            // completeVerifiedPayment() carries the full finalize sequence
+            // (cart clear, coupon usage, "order placed" notification,
+            // dashboard emit) — previously this webhook branch only flipped
+            // the PAID/CONFIRMED status and skipped all of that, so a
+            // customer whose client-side verifyPayment() call never landed
+            // still had a paid order but a non-empty cart and no
+            // confirmation notification, even after the webhook "fixed" it.
+            const result = await this.completeVerifiedPayment(rzpOrderId, {
               razorpayPaymentId: rzpPaymentId,
-              status: 'PAID',
               method: payload.payment?.entity?.method,
+              source: 'PAYMENT_WEBHOOK',
             })
-            await this.ordersRepo.updateStatus(payment.orderId, 'CONFIRMED', {
-              paymentStatus: 'PAID',
-            })
-            await this._queueAutoAssign(payment.orderId, 'PAYMENT_WEBHOOK')
-            this.cashbackService.evaluateAndCredit(payment.orderId, 'PAYMENT_SUCCESS').catch((err) => {
-              logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
-            })
-            this.cashbackService.evaluateAndCredit(payment.orderId, 'ORDER_CONFIRMED').catch((err) => {
-              logger.warn({ err: err.message, orderId: payment.orderId }, 'Cashback evaluation failed (webhook)')
-            })
-            // Same reasoning as verifyPayment() — this webhook is the
-            // fallback confirmation path when the client's own verify call
-            // never landed, so it needs the same coupon-usage recording.
-            // The unique index on coupon_usages(coupon_id, user_id,
-            // order_id) plus recordUsage()'s 23505 handling makes this
-            // safe to run even if verifyPayment() already recorded it.
-            import('../coupons/coupons.service.js').then(async ({ CouponsService }) => {
-              const { CouponsRepository } = await import('../coupons/coupons.repository.js')
-              return new CouponsService(new CouponsRepository()).recordUsageForOrder(payment.orderId)
-            }).catch((err) => {
-              logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording failed (webhook)')
-            })
-            logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
-          } else if (!payment) {
+            if (result.success && !result.skipped) {
+              logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
+            }
+          } else {
             // Not a checkout order payment — check whether it's a wallet
             // top-up instead (a completely separate Razorpay order created
             // directly by WalletService, not the orders/payments module).
