@@ -58,10 +58,12 @@ export class AdminOrdersRepository {
   async findById(orderId) {
     const { rows } = await query(
       `SELECT o.*, u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
-              ru.name AS rider_name, ru.phone AS rider_phone
+              ru.name AS rider_name, ru.phone AS rider_phone,
+              sh.name AS shop_name, sh.lat AS shop_lat, sh.lng AS shop_lng
        FROM orders o
        LEFT JOIN users u ON u.id = o.user_id
        LEFT JOIN users ru ON ru.id = o.rider_id
+       LEFT JOIN shops sh ON sh.id = o.shop_id
        WHERE o.id = $1`,
       [orderId]
     )

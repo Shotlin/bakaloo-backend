@@ -26,6 +26,50 @@ const ALLOWED_TRANSITIONS = {
   REFUNDED: [],
 }
 
+/**
+ * Resolve a genuine road-route distance for the admin order-detail view —
+ * never a straight-line (haversine) distance mislabeled as a road route.
+ *
+ * Checks, in priority order, for an actual stored Google route on the order:
+ *   1. A directly stored route distance in metres
+ *   2. The sum of stored Google Directions route legs
+ *
+ * Deliberately does NOT fall back to `delivery_assignments.distance_km`
+ * (surfaced elsewhere as "Distance: X km") — that field is computed via
+ * `haversineDistanceKm()` in workers/processors.js for rider auto-assignment
+ * ranking, not a road route, so using it here would violate the "never show
+ * straight-line distance as road distance" requirement this field exists to
+ * satisfy. No polyline-decoding tier either: this schema has no column that
+ * ever stores an encoded Google route polyline, so that tier would be dead
+ * code — add it if/when a polyline is actually persisted somewhere.
+ *
+ * Returns `{ distanceKm: null, source: null }` when no real route data
+ * exists — the frontend renders that as "Road distance unavailable".
+ */
+function resolveRoadRouteDistance(order) {
+  const directMeters = Number(
+    order.route_distance_meters ?? order.google_route_distance_meters ?? null
+  )
+  if (Number.isFinite(directMeters) && directMeters > 0) {
+    return { distanceKm: roundRouteKm(directMeters / 1000), source: 'stored_route_meters' }
+  }
+
+  const legs = order.route_legs || order.google_directions?.routes?.[0]?.legs
+  if (Array.isArray(legs) && legs.length > 0) {
+    const totalMeters = legs.reduce((sum, leg) => sum + (Number(leg?.distance?.value) || 0), 0)
+    if (totalMeters > 0) {
+      return { distanceKm: roundRouteKm(totalMeters / 1000), source: 'route_legs_sum' }
+    }
+  }
+
+  return { distanceKm: null, source: null }
+}
+
+// One decimal place at any distance — "6.8 km" and "14.2 km" alike.
+function roundRouteKm(km) {
+  return Math.round(km * 10) / 10
+}
+
 export class AdminOrdersService {
   constructor(repository, fastify) {
     this.repository = repository
@@ -131,7 +175,26 @@ export class AdminOrdersService {
       this.repository.getOrderDelivery(orderId),
     ])
     if (!order) throw { statusCode: 404, message: 'Order not found' }
-    return { ...order, items, timeline, payment, delivery }
+
+    const hasShopCoords = order.shop_lat != null && order.shop_lng != null
+    const store = order.shop_id
+      ? {
+          id: order.shop_id,
+          name: order.shop_name || null,
+          lat: hasShopCoords ? Number(order.shop_lat) : null,
+          lng: hasShopCoords ? Number(order.shop_lng) : null,
+        }
+      : null
+
+    return {
+      ...order,
+      items,
+      timeline,
+      payment,
+      delivery,
+      store,
+      delivery_route: resolveRoadRouteDistance(order),
+    }
   }
 
   async getOrderNotes(orderId) {
