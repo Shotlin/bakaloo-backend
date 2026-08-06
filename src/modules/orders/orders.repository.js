@@ -108,6 +108,22 @@ export class OrdersRepository {
   }
 
   /**
+   * Store the real road-route distance (store -> customer) resolved once,
+   * post-commit, right after the order is placed (see
+   * OrderSplitterService#fireRouteDistanceLookup). Never called again for
+   * the same order — the admin dashboard reads these columns directly
+   * instead of recalculating on every view.
+   */
+  async setRouteDistance(orderId, { distanceMeters, source }) {
+    await query(
+      `UPDATE orders
+       SET route_distance_meters = $1, route_source = $2, route_calculated_at = NOW()
+       WHERE id = $3`,
+      [distanceMeters, source, orderId]
+    )
+  }
+
+  /**
    * Update mutable post-checkout extras (tip / handling / late-night /
    * savings / delivery instructions). Used by the multi-vendor checkout
    * flow when a single-shop cart's tip arrives after the per-shop order is

@@ -30,39 +30,47 @@ const ALLOWED_TRANSITIONS = {
  * Resolve a genuine road-route distance for the admin order-detail view —
  * never a straight-line (haversine) distance mislabeled as a road route.
  *
- * Checks, in priority order, for an actual stored Google route on the order:
- *   1. A directly stored route distance in metres
- *   2. The sum of stored Google Directions route legs
+ * Checks, in priority order, for an actual stored route on the order:
+ *   1. `route_distance_meters` — calculated ONCE at order placement via
+ *      OpenRouteService and stored permanently (see
+ *      OrderSplitterService#fireRouteDistanceLookup). This is the normal
+ *      path for every order placed since migration 092.
+ *   2. The sum of stored Google Directions route legs, for forward
+ *      compatibility if a Google-sourced route is ever stored instead.
  *
  * Deliberately does NOT fall back to `delivery_assignments.distance_km`
  * (surfaced elsewhere as "Distance: X km") — that field is computed via
  * `haversineDistanceKm()` in workers/processors.js for rider auto-assignment
  * ranking, not a road route, so using it here would violate the "never show
  * straight-line distance as road distance" requirement this field exists to
- * satisfy. No polyline-decoding tier either: this schema has no column that
- * ever stores an encoded Google route polyline, so that tier would be dead
- * code — add it if/when a polyline is actually persisted somewhere.
+ * satisfy. No polyline-decoding tier either: nothing in this schema stores
+ * an encoded route polyline — add it if that ever changes.
  *
- * Returns `{ distanceKm: null, source: null }` when no real route data
+ * Returns `{ distance_km: null, source: null }` when no real route data
  * exists — the frontend renders that as "Road distance unavailable".
+ *
+ * Snake_case keys deliberately, to match every other field this endpoint
+ * returns (customer_name, total_amount, route_distance_meters, ...) — the
+ * dashboard's OrderDeliveryRoute type reads `distance_km`, not `distanceKm`.
  */
 function resolveRoadRouteDistance(order) {
-  const directMeters = Number(
-    order.route_distance_meters ?? order.google_route_distance_meters ?? null
-  )
+  const directMeters = Number(order.route_distance_meters ?? null)
   if (Number.isFinite(directMeters) && directMeters > 0) {
-    return { distanceKm: roundRouteKm(directMeters / 1000), source: 'stored_route_meters' }
+    return {
+      distance_km: roundRouteKm(directMeters / 1000),
+      source: order.route_source || 'stored_route_meters',
+    }
   }
 
   const legs = order.route_legs || order.google_directions?.routes?.[0]?.legs
   if (Array.isArray(legs) && legs.length > 0) {
     const totalMeters = legs.reduce((sum, leg) => sum + (Number(leg?.distance?.value) || 0), 0)
     if (totalMeters > 0) {
-      return { distanceKm: roundRouteKm(totalMeters / 1000), source: 'route_legs_sum' }
+      return { distance_km: roundRouteKm(totalMeters / 1000), source: 'route_legs_sum' }
     }
   }
 
-  return { distanceKm: null, source: null }
+  return { distance_km: null, source: null }
 }
 
 // One decimal place at any distance — "6.8 km" and "14.2 km" alike.

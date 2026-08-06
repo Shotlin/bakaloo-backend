@@ -70,6 +70,13 @@ const envSchema = z.object({
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
   RAZORPAY_CURRENCY: z.string().default('INR'),
 
+  // OpenRouteService — free-tier road-routing engine used to calculate a
+  // genuine driving-distance (store -> customer) once at order placement.
+  // Optional: when unset, order.route_distance_meters stays null and the
+  // admin dashboard shows "Road distance unavailable" (never a haversine
+  // fallback). Get a free key at https://openrouteservice.org/dev/#/signup
+  ORS_API_KEY: z.string().optional(),
+
   // Cloudinary
   CLOUDINARY_CLOUD_NAME: z.string().optional(),
   CLOUDINARY_API_KEY: z.string().optional(),

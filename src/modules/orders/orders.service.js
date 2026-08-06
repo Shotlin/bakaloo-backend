@@ -737,6 +737,21 @@ export class OrdersService {
       )
     }
 
+    // Road-route distance (store -> customer), calculated ONCE and stored
+    // permanently on the order. Deliberately NOT awaited — a routing API
+    // call can take several seconds, and it must never delay the
+    // customer's checkout response. Errors are caught inside the helper
+    // itself; this outer catch only guards against something escaping it.
+    const routeLookups = createdOrders.routeLookups || []
+    if (routeLookups.length > 0) {
+      this.orderSplitter.fireRouteDistanceLookup(routeLookups).catch((err) => {
+        logger.warn(
+          { err: err.message, userId, action: 'order_route_distance_fan_out' },
+          'Road-route distance fan-out failed'
+        )
+      })
+    }
+
     // Per-order delivery assignment + notifications (Req 5.8)
     for (const order of createdOrders) {
       logger.info(

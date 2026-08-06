@@ -1,6 +1,7 @@
 import { logger } from '../../config/logger.js'
 import { ORDER_STATUS } from '../../constants/orderStatus.js'
 import { haversineKm } from '../../utils/distance.js'
+import { fetchRoadRouteDistanceMeters } from '../../utils/routing.js'
 import {
   STOCK_MOVEMENT_TYPES,
   STOCK_MOVEMENT_SOURCES,
@@ -328,6 +329,12 @@ export class OrderSplitterService {
      * Socket.IO server or queue cannot affect transaction semantics.
      */
     const stockTransitions = []
+    /**
+     * Captured per-order road-route lookup inputs (store coords + delivery
+     * coords) — resolved and stored on the order AFTER commit by
+     * `fireRouteDistanceLookup`, exactly once, never recalculated after.
+     */
+    const routeLookups = []
 
     // ─── 0. Purchase-limit re-check (race-safe, spans every shop) ─────
     // Distinct from the per-item max_order_qty re-check inside the loop
@@ -540,6 +547,25 @@ export class OrderSplitterService {
         })
       }
 
+      // Capture the road-route lookup inputs for this order — resolved
+      // post-commit, not here, so a slow/failed external HTTP call never
+      // holds the shop_products row locks this transaction is holding.
+      const shopCoordsForRoute = feeContext.shopCoords?.get(shopId)
+      if (
+        Number.isFinite(shopCoordsForRoute?.lat) &&
+        Number.isFinite(shopCoordsForRoute?.lng) &&
+        Number.isFinite(deliveryAddress?.lat) &&
+        Number.isFinite(deliveryAddress?.lng)
+      ) {
+        routeLookups.push({
+          orderId: order.id,
+          originLat: shopCoordsForRoute.lat,
+          originLng: shopCoordsForRoute.lng,
+          destLat: deliveryAddress.lat,
+          destLng: deliveryAddress.lng,
+        })
+      }
+
       createdOrders.push(order)
     }
 
@@ -560,6 +586,12 @@ export class OrderSplitterService {
     // through to `firePostCommitSideEffects` AFTER COMMIT.
     Object.defineProperty(createdOrders, 'stockTransitions', {
       value: stockTransitions,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    })
+    Object.defineProperty(createdOrders, 'routeLookups', {
+      value: routeLookups,
       enumerable: false,
       writable: false,
       configurable: false,
@@ -607,6 +639,38 @@ export class OrderSplitterService {
             action: 'order_stock_transition_side_effects',
           },
           'Order-driven stock transition side effects failed'
+        )
+      }
+    }
+  }
+
+  /**
+   * Resolve and permanently store the real road-route distance for each
+   * newly-placed order, AFTER the caller's transaction has committed.
+   * Calculated exactly once per order — the admin dashboard reads
+   * `orders.route_distance_meters` directly and never recalculates it.
+   *
+   * Best-effort: a slow or failing routing API call must never affect the
+   * checkout response or any other order in the batch. Per-order errors
+   * are caught and logged; the order simply keeps `route_distance_meters`
+   * null, which the admin dashboard renders as "unavailable" — never a
+   * haversine fallback.
+   *
+   * @param {Array<{orderId:string, originLat:number, originLng:number, destLat:number, destLng:number}>} routeLookups
+   */
+  async fireRouteDistanceLookup(routeLookups) {
+    if (!Array.isArray(routeLookups) || routeLookups.length === 0) return
+
+    for (const lookup of routeLookups) {
+      try {
+        const result = await fetchRoadRouteDistanceMeters(lookup)
+        if (result) {
+          await this.ordersRepo.setRouteDistance(lookup.orderId, result)
+        }
+      } catch (err) {
+        logger.warn(
+          { err: err.message, orderId: lookup.orderId, action: 'order_route_distance_lookup' },
+          'Road-route distance lookup failed (non-critical)'
         )
       }
     }
