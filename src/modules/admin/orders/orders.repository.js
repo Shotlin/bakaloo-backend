@@ -242,6 +242,37 @@ export class AdminOrdersRepository {
     }
   }
 
+  /**
+   * Record (or update) which rider was last assigned for this customer's
+   * delivery to this saved address — the sticky-address preference behind
+   * the "suggested rider" hint in the admin order-detail drawer. Called
+   * from every manual assign/reassign, so an admin override just becomes
+   * the new preference going forward.
+   */
+  async upsertAddressRiderPreference(userId, addressId, riderId) {
+    await query(
+      `INSERT INTO customer_address_rider_preferences (user_id, address_id, rider_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, address_id)
+       DO UPDATE SET rider_id = EXCLUDED.rider_id, updated_at = NOW()`,
+      [userId, addressId, riderId]
+    )
+  }
+
+  /** Sticky-address rider preference lookup, with the rider's current name/phone/online status. */
+  async getAddressRiderPreference(userId, addressId) {
+    const { rows } = await query(
+      `SELECT capr.rider_id AS id, u.name, u.phone,
+              COALESCE(rp.is_online, false) AS is_online
+       FROM customer_address_rider_preferences capr
+       JOIN users u ON u.id = capr.rider_id
+       LEFT JOIN rider_profiles rp ON rp.user_id = capr.rider_id
+       WHERE capr.user_id = $1 AND capr.address_id = $2`,
+      [userId, addressId]
+    )
+    return rows[0] || null
+  }
+
   async bulkAssign(assignments) {
     const client = await getClient()
     try {

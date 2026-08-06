@@ -78,6 +78,20 @@ function roundRouteKm(km) {
   return Math.round(km * 10) / 10
 }
 
+/**
+ * `orders.delivery_address` is a JSONB snapshot spread of the `addresses`
+ * row at checkout time (see orders/orders.service.js), so it retains the
+ * original `addresses.id` — the stable key for "same saved address" used
+ * by the sticky rider-preference lookup below. Defensively parses in case
+ * the column ever arrives as a raw JSON string (mirrors
+ * invoiceGenerator.js#parseOrderShape).
+ */
+function extractAddressId(deliveryAddress) {
+  if (!deliveryAddress) return null
+  const address = typeof deliveryAddress === 'string' ? JSON.parse(deliveryAddress) : deliveryAddress
+  return address?.id || null
+}
+
 export class AdminOrdersService {
   constructor(repository, fastify) {
     this.repository = repository
@@ -194,6 +208,17 @@ export class AdminOrdersService {
         }
       : null
 
+    // Sticky-address rider suggestion — only meaningful before a rider is
+    // actually assigned. Pre-fills the admin's "Rider Assignment" dropdown
+    // once the order reaches PACKED; never overrides dispatch.
+    let suggestedRider = null
+    if (!order.rider_id) {
+      const addressId = extractAddressId(order.delivery_address)
+      if (addressId) {
+        suggestedRider = await this.repository.getAddressRiderPreference(order.user_id, addressId)
+      }
+    }
+
     return {
       ...order,
       items,
@@ -202,6 +227,7 @@ export class AdminOrdersService {
       delivery,
       store,
       delivery_route: resolveRoadRouteDistance(order),
+      suggested_rider: suggestedRider,
     }
   }
 
@@ -317,6 +343,13 @@ export class AdminOrdersService {
     if (!order) throw { statusCode: 404, message: 'Order not found' }
 
     const assignment = await this.repository.assignRider(orderId, riderId)
+
+    // Remember this rider for the customer's saved address — every manual
+    // assign/reassign becomes the new sticky suggestion for next time.
+    const addressId = extractAddressId(order.delivery_address)
+    if (addressId) {
+      await this.repository.upsertAddressRiderPreference(order.user_id, addressId, riderId)
+    }
 
     logAdminActivity(adminId, `Assigned rider to order`, 'order', orderId,
       { rider_id: order.rider_id }, { rider_id: riderId }, ip)

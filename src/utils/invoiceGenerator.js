@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit'
+import QRCode from 'qrcode'
 import { STORE_INFO } from '../config/storeInfo.js'
 
 const TERMINAL_BANNER_STATUS = new Set(['CANCELLED', 'REFUNDED'])
@@ -319,6 +320,63 @@ function drawTotals(doc, order) {
   }
 }
 
+/**
+ * Order ID, items, customer, full delivery address + coordinates, and
+ * assigned rider — the fields a rider-app QR-scan flow needs to load and
+ * verify a delivery without re-typing anything. JSON rather than a
+ * delimited string so that flow can decode it directly.
+ */
+function buildQrPayload(order, address, items) {
+  const hasRider = !!(order.rider_id || order.riderId)
+  return JSON.stringify({
+    orderId: order.order_number || order.orderNumber || order.id,
+    items: items.map((item) => ({
+      name: item.name || item.productName || 'Product',
+      qty: item.quantity || item.qty || 0,
+    })),
+    customerName: order.customer_name || order.customerName || null,
+    customerPhone: order.customer_phone || order.customerPhone || null,
+    address: formatAddress(address),
+    lat: address.lat ?? address.latitude ?? null,
+    lng: address.lng ?? address.longitude ?? null,
+    // Omitted (not just null id) when no rider is assigned yet — invoices
+    // are regenerated fresh on every download, so a pre-assignment
+    // download simply carries no rider block rather than a stale one.
+    rider: hasRider
+      ? {
+          id: order.rider_id || order.riderId,
+          name: order.rider_name || order.riderName || null,
+          phone: order.rider_phone || order.riderPhone || null,
+        }
+      : null,
+  })
+}
+
+async function generateQrCodeBuffer(order, address, items) {
+  const payload = buildQrPayload(order, address, items)
+  return QRCode.toBuffer(payload, { width: 120, margin: 1, errorCorrectionLevel: 'M' })
+}
+
+/**
+ * QR block, printed as the last element on the receipt (after totals, before
+ * the thank-you footer). `qrBuffer` is generated once up front by the caller
+ * (QRCode.toBuffer is async; everything else in this file's render pass is
+ * deliberately synchronous for the two-pass height measurement to work) and
+ * threaded through both the measure and real render calls.
+ */
+function drawQRCode(doc, qrBuffer) {
+  if (!qrBuffer) return
+  const qrSize = 90
+  const x = PAGE_LEFT + (PAGE_WIDTH - qrSize) / 2
+  doc.moveDown(0.5)
+  const y = doc.y
+  doc.image(qrBuffer, x, y, { width: qrSize, height: qrSize })
+  doc.y = y + qrSize + 4
+  doc.font('Helvetica').fontSize(7)
+    .text('Scan for delivery details', PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
+  doc.moveDown(0.3)
+}
+
 function drawFooter(doc) {
   // Explicit x/width rather than a flowing text() call — a preceding section
   // can leave doc.x parked mid-page, which would otherwise narrow the
@@ -331,7 +389,7 @@ function drawFooter(doc) {
     .text('We hope to serve you again soon.', PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'center' })
 }
 
-function renderReceipt(doc, order, address, items, { title }) {
+function renderReceipt(doc, order, address, items, { title, qrBuffer }) {
   doc.registerFont(CURRENCY_FONT, STORE_INFO.currencyFontPath)
 
   drawStoreHeader(doc, title)
@@ -345,6 +403,7 @@ function renderReceipt(doc, order, address, items, { title }) {
 
   drawItemsTable(doc, items)
   drawTotals(doc, order)
+  drawQRCode(doc, qrBuffer)
   drawFooter(doc)
 
   return doc.y
@@ -366,10 +425,17 @@ function measureReceiptHeight(order, address, items, opts) {
   return Math.ceil(finalY) + RECEIPT_MARGIN
 }
 
-function generateReceiptPDF(order, opts) {
+async function generateReceiptPDF(order, opts) {
+  const { address, items } = parseOrderShape(order)
+
+  // Generated once, up front — QRCode.toBuffer is async, unlike every other
+  // render step in this file, so it can't happen inside the synchronous
+  // measure/render pair below.
+  const qrBuffer = await generateQrCodeBuffer(order, address, items)
+  const renderOpts = { ...opts, qrBuffer }
+
   return new Promise((resolve, reject) => {
-    const { address, items } = parseOrderShape(order)
-    const height = measureReceiptHeight(order, address, items, opts)
+    const height = measureReceiptHeight(order, address, items, renderOpts)
 
     const doc = new PDFDocument({ size: [RECEIPT_WIDTH, height], margin: RECEIPT_MARGIN })
     const chunks = []
@@ -378,7 +444,7 @@ function generateReceiptPDF(order, opts) {
     doc.on('end', () => resolve(Buffer.concat(chunks)))
     doc.on('error', reject)
 
-    renderReceipt(doc, order, address, items, opts)
+    renderReceipt(doc, order, address, items, renderOpts)
     doc.end()
   })
 }
