@@ -1,4 +1,5 @@
 import { query, getClient, pool } from '../../config/database.js'
+import { revokeOrderPickupTokens } from '../../utils/pickupTokens.js'
 
 /**
  * Shop Orders repository — wraps the existing `orders` table with
@@ -366,6 +367,11 @@ export class ShopOrdersRepository {
         RETURNING ${cols}`,
       params
     )
+
+    if (newStatus === 'CANCELLED' || newStatus === 'DELIVERED') {
+      await revokeOrderPickupTokens(client, orderId, `Order ${newStatus}`)
+    }
+
     return result.rows[0] ? formatRow(result.rows[0]) : null
   }
 
@@ -435,6 +441,7 @@ export class ShopOrdersRepository {
           AND status IN ('ASSIGNED', 'ACCEPTED', 'PICKED_UP', 'IN_TRANSIT')`,
       [orderId]
     )
+    await revokeOrderPickupTokens(client, orderId, 'Reassigned by shop staff')
   }
 
   /**
@@ -449,14 +456,15 @@ export class ShopOrdersRepository {
    * @returns {Promise<{ id: string, order_id: string, rider_id: string,
    *                    status: string, assigned_at: Date }|null>}
    */
-  async insertAssignmentInTx(client, orderId, riderId) {
+  async insertAssignmentInTx(client, orderId, riderId, commissionEnabled = true) {
     const result = await client.query(
       `INSERT INTO delivery_assignments (order_id, rider_id, status, assigned_at, earnings)
-       SELECT $1, $2, 'ASSIGNED', NOW(), COALESCE(NULLIF(o.delivery_fee, 0), 25)
+       SELECT $1, $2, 'ASSIGNED', NOW(),
+              CASE WHEN $3 THEN COALESCE(NULLIF(o.delivery_fee, 0), 25) ELSE 0 END
          FROM orders o
         WHERE o.id = $1
         RETURNING id, order_id, rider_id, status, assigned_at`,
-      [orderId, riderId]
+      [orderId, riderId, commissionEnabled]
     )
     return result.rows[0] || null
   }

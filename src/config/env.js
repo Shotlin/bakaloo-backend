@@ -30,6 +30,9 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRY: z.string().default('15m'),
   JWT_REFRESH_EXPIRY: z.string().default('7d'),
   COOKIE_SECRET: z.string().min(16).optional(),
+  // HMAC secret for signing order_pickup_tokens (QR pickup credentials).
+  // Optional: falls back to JWT_ACCESS_SECRET when unset (see utils/qrToken.js).
+  QR_SIGNING_SECRET: z.string().min(16).optional(),
 
   // PostgreSQL
   DB_HOST: z.string().default('localhost'),

@@ -8,6 +8,8 @@ import { getSocketEmitter } from '../plugins/socket-emitter.js'
 import { cacheDeletePattern } from '../utils/cache.js'
 import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/theme-cache.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
+import { haversineDistanceKm } from '../utils/geo.js'
+import { CommissionSettingsRepository } from '../modules/commission-settings/commission-settings.repository.js'
 
 const DEFAULT_RIDER_EARNING = 25
 // Auto-assign fans out to every online rider sorted by distance with no
@@ -620,7 +622,11 @@ async function handleAutoAssign({ orderId, source = 'SYSTEM' }) {
   const client = await getClient()
   let assignments = []
   let hasOpenAssignedOffers = false
-  const riderEarning = resolveRiderEarning(order.delivery_fee)
+  // Riders are salary-based while rider_commission_enabled is false — this
+  // legacy path (still reachable via the rider-reject requeue flow) must
+  // respect the same flag as the new resolver's finalize step.
+  const commissionEnabled = await new CommissionSettingsRepository().isCommissionEnabled()
+  const riderEarning = commissionEnabled ? resolveRiderEarning(order.delivery_fee) : 0
 
   try {
     await client.query('BEGIN')
@@ -985,9 +991,12 @@ async function sendAssignedOrderPush({ riderId, payload }) {
   const itemCount = Array.isArray(payload.items)
     ? payload.items.reduce((total, item) => total + toNumber(item?.quantity, 0), 0)
     : 0
-  const body = itemCount > 0
-    ? `${itemCount} items • Earn ₹${toNumber(payload.riderEarning, DEFAULT_RIDER_EARNING).toFixed(0)}`
-    : `Earn ₹${toNumber(payload.riderEarning, DEFAULT_RIDER_EARNING).toFixed(0)} on this order`
+  // riderEarning is 0 whenever rider_commission_enabled is false — show a
+  // neutral message rather than "Earn ₹0".
+  const earning = toNumber(payload.riderEarning, 0)
+  const body = earning > 0
+    ? (itemCount > 0 ? `${itemCount} items • Earn ₹${earning.toFixed(0)}` : `Earn ₹${earning.toFixed(0)} on this order`)
+    : (itemCount > 0 ? `${itemCount} items assigned to you` : 'A new order has been assigned to you')
   const pushData = buildAssignedPushData(payload)
 
   await Promise.allSettled(
@@ -1129,12 +1138,3 @@ function resolveRiderEarning(value, fallback = DEFAULT_RIDER_EARNING) {
   return DEFAULT_RIDER_EARNING
 }
 
-function haversineDistanceKm(lat1, lng1, lat2, lng2) {
-  const R = 6371
-  const dLat = ((lat2 - lat1) * Math.PI) / 180
-  const dLng = ((lng2 - lng1) * Math.PI) / 180
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2)
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-}

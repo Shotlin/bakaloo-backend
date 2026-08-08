@@ -1,4 +1,5 @@
 import { query, getClient } from '../../../config/database.js'
+import { revokeOrderPickupTokens } from '../../../utils/pickupTokens.js'
 
 export class AdminOrdersRepository {
   async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate, deliveryType }) {
@@ -59,12 +60,27 @@ export class AdminOrdersRepository {
     const { rows } = await query(
       `SELECT o.*, u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
               ru.name AS rider_name, ru.phone AS rider_phone,
-              sh.name AS shop_name, sh.lat AS shop_lat, sh.lng AS shop_lng
+              sh.name AS shop_name, sh.lat AS shop_lat, sh.lng AS shop_lng,
+              aseg.name AS area_segment_name
        FROM orders o
        LEFT JOIN users u ON u.id = o.user_id
        LEFT JOIN users ru ON ru.id = o.rider_id
        LEFT JOIN shops sh ON sh.id = o.shop_id
+       LEFT JOIN area_segments aseg ON aseg.id = o.area_segment_id
        WHERE o.id = $1`,
+      [orderId]
+    )
+    return rows[0] || null
+  }
+
+  /** Most recent QR pickup token for the order — surfaced as "QR status" on the admin order card. */
+  async getOrderPickupToken(orderId) {
+    const { rows } = await query(
+      `SELECT id, status, version, issued_at, verified_at, consumed_at, revoked_at
+       FROM order_pickup_tokens
+       WHERE order_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [orderId]
     )
     return rows[0] || null
@@ -172,6 +188,12 @@ export class AdminOrdersRepository {
          VALUES ($1, $2, $3, $4, $5)`,
         [orderId, order.status, newStatus, adminId, note || null]
       )
+
+      // A QR pickup token must stop working once its order is cancelled or
+      // delivered — nothing left to scan it for.
+      if (newStatus === 'CANCELLED' || newStatus === 'DELIVERED') {
+        await revokeOrderPickupTokens(client, orderId, `Order ${newStatus}`)
+      }
 
       await client.query('COMMIT')
       return order.status // return old status for activity log

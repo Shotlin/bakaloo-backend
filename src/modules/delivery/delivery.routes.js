@@ -31,8 +31,16 @@ export default async function deliveryRoutes(fastify) {
   const service = new DeliveryService(repository, fastify)
   const controller = new DeliveryController(service)
 
-  // All routes require authentication
+  // All routes require authentication AND the rider role — previously
+  // authentication-only, relying entirely on data-scoping by
+  // request.user.id (every query already filters WHERE rider_id =
+  // request.user.id, so this wasn't a data leak, but any authenticated
+  // non-rider account could hit these endpoints and get empty results
+  // instead of a clear 403). Both role strings are valid riders — RIDER
+  // was added in migration 016 as an alias for the legacy DELIVERY value,
+  // and both must keep working.
   fastify.addHook('preHandler', fastify.authenticate)
+  fastify.addHook('preHandler', fastify.authorize(['RIDER', 'DELIVERY']))
 
   // GET /profile — Rider profile
   fastify.get('/profile', {

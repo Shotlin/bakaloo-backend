@@ -3,6 +3,7 @@ import { ERROR_CODES } from '../../constants/errors.js'
 import { emitInTx as emitAuditInTx } from '../../utils/audit-log.js'
 import { ShopProductsRepository } from '../shop-products/shop-products.repository.js'
 import { ShopProductsService } from '../shop-products/shop-products.service.js'
+import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
 
 /**
  * Shop Orders service — wraps the existing order workflow with
@@ -80,6 +81,7 @@ export class ShopOrdersService {
     this.repo = repository
     this.fastify = options.fastify || null
     this.shopProductsRepo = options.shopProductsRepo || new ShopProductsRepository()
+    this.commissionSettingsRepo = options.commissionSettingsRepo || new CommissionSettingsRepository()
   }
 
   // ─── R22 AC#3, AC#4 — Listing ───────────────────────────────────
@@ -248,10 +250,12 @@ export class ShopOrdersService {
       // Mirrors admin/orders pattern so the rider's existing accept-flow
       // works without modification.
       await this.repo.cancelOpenAssignmentsInTx(client, orderId)
+      const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()
       const assignment = await this.repo.insertAssignmentInTx(
         client,
         orderId,
-        riderId
+        riderId,
+        commissionEnabled
       )
       const updated = await this.repo.setRiderInTx(client, orderId, riderId)
 

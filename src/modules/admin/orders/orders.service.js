@@ -8,9 +8,11 @@ import { NotificationsService } from '../../notifications/notifications.service.
 import { buildCustomerOrderEventNotification } from '../../notifications/customer-order-event.helper.js'
 import { ShopProductsRepository } from '../../shop-products/shop-products.repository.js'
 import { ShopProductsService } from '../../shop-products/shop-products.service.js'
+import { extractAddressId } from '../../../utils/deliveryAddress.js'
+import { RiderAssignmentResolverService } from '../../rider-assignment/rider-assignment-resolver.service.js'
+import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignment.repository.js'
 import ExcelJS from 'exceljs'
 
-const ASSIGNABLE_ORDER_STATUSES = new Set(['CONFIRMED', 'PREPARING', 'PACKED'])
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
   process.env.NODE_ENV !== 'production'
@@ -78,19 +80,6 @@ function roundRouteKm(km) {
   return Math.round(km * 10) / 10
 }
 
-/**
- * `orders.delivery_address` is a JSONB snapshot spread of the `addresses`
- * row at checkout time (see orders/orders.service.js), so it retains the
- * original `addresses.id` — the stable key for "same saved address" used
- * by the sticky rider-preference lookup below. Defensively parses in case
- * the column ever arrives as a raw JSON string (mirrors
- * invoiceGenerator.js#parseOrderShape).
- */
-function extractAddressId(deliveryAddress) {
-  if (!deliveryAddress) return null
-  const address = typeof deliveryAddress === 'string' ? JSON.parse(deliveryAddress) : deliveryAddress
-  return address?.id || null
-}
 
 export class AdminOrdersService {
   constructor(repository, fastify) {
@@ -100,6 +89,8 @@ export class AdminOrdersService {
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
     this.shopProductsRepo = new ShopProductsRepository()
+    this.riderAssignmentResolver = new RiderAssignmentResolverService(fastify)
+    this.riderAssignmentLogRepo = new RiderAssignmentRepository()
   }
 
   /**
@@ -189,12 +180,14 @@ export class AdminOrdersService {
   }
 
   async findById(orderId) {
-    const [order, items, timeline, payment, delivery] = await Promise.all([
+    const [order, items, timeline, payment, delivery, pickupToken, assignmentHistory] = await Promise.all([
       this.repository.findById(orderId),
       this.repository.getOrderItems(orderId),
       this.repository.getOrderTimeline(orderId),
       this.repository.getOrderPayment(orderId),
       this.repository.getOrderDelivery(orderId),
+      this.repository.getOrderPickupToken(orderId),
+      this.riderAssignmentLogRepo.getAssignmentHistory(orderId),
     ])
     if (!order) throw { statusCode: 404, message: 'Order not found' }
 
@@ -228,6 +221,15 @@ export class AdminOrdersService {
       store,
       delivery_route: resolveRoadRouteDistance(order),
       suggested_rider: suggestedRider,
+      // "Assignment method / area segment / QR / pickup status" admin-card
+      // fields (item 14) — pickup_status mirrors delivery.status since
+      // delivery_assignments already tracks ASSIGNED/ACCEPTED/PICKED_UP/...;
+      // route/batch position stays null until the multi-order batch model
+      // exists (a later phase).
+      pickup_token_status: pickupToken?.status ?? null,
+      pickup_status: delivery?.status ?? null,
+      notification_sent_at: delivery?.notification_sent_at ?? null,
+      assignment_history: assignmentHistory,
     }
   }
 
@@ -270,13 +272,17 @@ export class AdminOrdersService {
 
     this._emitOrderStatus(order, newStatus)
 
-    // AUTO-ASSIGN RIDER when order is CONFIRMED and no rider assigned yet
-    if (ASSIGNABLE_ORDER_STATUSES.has(newStatus) && !order.rider_id) {
+    // Finalize rider assignment when the order becomes dispatch-ready
+    // (PACKED) — the new modular resolver (manual > area segment > general
+    // auto) runs here instead of the old CONFIRMED/PREPARING/PACKED
+    // proximity fan-out. _queueAutoAssign/handleAutoAssign remain in the
+    // codebase but are no longer invoked from this path.
+    if (newStatus === 'PACKED' && !order.rider_id) {
       try {
-        await this._queueAutoAssign(orderId, `ADMIN_STATUS_${newStatus}`)
+        await this.riderAssignmentResolver.resolveAndFinalize(orderId, { trigger: `STATUS_${newStatus}` })
       } catch (err) {
         // Don't fail the status update — admin can still manually assign
-        console.error('Auto-assign failed (non-blocking):', err.message)
+        console.error('Rider assignment resolver failed (non-blocking):', err.message)
       }
     }
 
@@ -342,10 +348,23 @@ export class AdminOrdersService {
     const order = await this.repository.findById(orderId)
     if (!order) throw { statusCode: 404, message: 'Order not found' }
 
-    const assignment = await this.repository.assignRider(orderId, riderId)
+    // Manual admin assignment — tier 1, always wins, routed through the
+    // same resolver/finalize path as area-segment and auto assignment so
+    // there's exactly one place that creates delivery_assignments rows,
+    // mints QR pickup tokens, and sends the rider notification.
+    const result = await this.riderAssignmentResolver.resolveAndFinalize(orderId, {
+      manualRiderId: riderId,
+      actorAdminId: adminId,
+      trigger: 'ADMIN_ASSIGN',
+    })
+    if (!result.success) {
+      throw { statusCode: 400, message: `Could not assign rider: ${result.reason}` }
+    }
 
     // Remember this rider for the customer's saved address — every manual
     // assign/reassign becomes the new sticky suggestion for next time.
+    // Independent of (and unaffected by) the area-segment feature, which
+    // is a hard admin-configured assignment rather than a UI hint.
     const addressId = extractAddressId(order.delivery_address)
     if (addressId) {
       await this.repository.upsertAddressRiderPreference(order.user_id, addressId, riderId)
@@ -354,32 +373,30 @@ export class AdminOrdersService {
     logAdminActivity(adminId, `Assigned rider to order`, 'order', orderId,
       { rider_id: order.rider_id }, { rider_id: riderId }, ip)
 
-    await notificationQueue.add('rider-assigned', {
-      orderId, riderId, orderNumber: order.order_number,
-    })
-
-    this._emitAssignedOrder(order, riderId)
-
     return { orderId, riderId }
   }
 
   async bulkAssign(assignments, adminId, ip) {
     if (assignments.length > 50) throw { statusCode: 400, message: 'Max 50 assignments at once' }
-    const results = await this.repository.bulkAssign(assignments)
+
+    const results = []
+    for (const { orderId, riderId } of assignments) {
+      const result = await this.riderAssignmentResolver.resolveAndFinalize(orderId, {
+        manualRiderId: riderId,
+        actorAdminId: adminId,
+        trigger: 'ADMIN_BULK_ASSIGN',
+      })
+      results.push({
+        assignmentId: result.assignmentId ?? null,
+        orderId,
+        riderId,
+        status: result.success ? 'assigned' : 'failed',
+        reason: result.success ? undefined : result.reason,
+      })
+    }
+
     logAdminActivity(adminId, `Bulk assigned ${assignments.length} orders`, 'order', null, null,
       { count: assignments.length }, ip)
-
-    for (const result of results) {
-      await notificationQueue.add('rider-assigned', {
-        orderId: result.orderId,
-        riderId: result.riderId,
-      })
-
-      const order = await this.repository.findById(result.orderId)
-      if (order) {
-        this._emitAssignedOrder(order, result.riderId)
-      }
-    }
 
     return results
   }
@@ -388,8 +405,12 @@ export class AdminOrdersService {
     const order = await this.repository.createManualOrder({ ...data, adminId })
     logAdminActivity(adminId, `Created manual order ${order.order_number}`, 'order', order.id,
       null, { order_number: order.order_number, total: order.total_amount }, ip)
-    if (!order.rider_id && ASSIGNABLE_ORDER_STATUSES.has(order.status)) {
-      await this._queueAutoAssign(order.id, 'ADMIN_MANUAL_ORDER')
+    // Rider assignment resolves at PACKED, same as every other order — a
+    // manual order is created CONFIRMED, so this only fires if it was
+    // somehow created already-PACKED; the normal path resolves later via
+    // updateStatus().
+    if (!order.rider_id && order.status === 'PACKED') {
+      await this.riderAssignmentResolver.resolveAndFinalize(order.id, { trigger: 'ADMIN_MANUAL_ORDER' })
     }
     return order
   }

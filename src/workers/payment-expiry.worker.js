@@ -25,6 +25,7 @@ import { logger } from '../config/logger.js'
 import { razorpay } from '../config/razorpay.js'
 import { PaymentsRepository } from '../modules/payments/payments.repository.js'
 import { PaymentsService } from '../modules/payments/payments.service.js'
+import { revokeOrderPickupTokens } from '../utils/pickupTokens.js'
 
 let _intervalHandle = null
 const POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
@@ -244,6 +245,11 @@ async function _cancelExpiredOrder(row) {
          AND payment_status = 'PENDING'`,
       [row.orderId]
     )
+
+    // A PENDING order never has a pickup token yet (those only mint once
+    // the order reaches PACKED), so this is a no-op in practice — included
+    // for defense-in-depth consistency with every other CANCELLED path.
+    await revokeOrderPickupTokens(client, row.orderId, 'Payment window expired')
 
     await client.query('COMMIT')
 

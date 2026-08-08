@@ -6,6 +6,8 @@ import { NotificationsService } from '../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../notifications/customer-order-event.helper.js'
 import { UploadsService } from '../uploads/uploads.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
+import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
+import { verifyPickupSignature } from '../../utils/qrToken.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -23,6 +25,7 @@ export class DeliveryService {
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
     this.cashbackService = new CashbackService()
+    this.commissionSettingsRepo = new CommissionSettingsRepository()
   }
 
   // ─── RIDER PROFILE ──────────────────────────────────
@@ -597,8 +600,9 @@ export class DeliveryService {
       reason: allowDemoDelivery ? 'DEMO_MODE' : null,
     })
 
+    const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()
     const result = await this.repository.markDelivered(
-      assignmentId, orderId, cleanProof || null
+      assignmentId, orderId, cleanProof || null, commissionEnabled
     )
     if (!result) {
       const snapshot = await this.repository.getOrderAssignmentSnapshot(orderId, riderId)

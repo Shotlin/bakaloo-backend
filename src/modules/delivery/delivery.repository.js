@@ -1,10 +1,11 @@
 import { query, getClient } from '../../config/database.js'
 import { redis } from '../../config/redis.js'
 import { logger } from '../../config/logger.js'
+import { revokeOrderPickupTokens } from '../../utils/pickupTokens.js'
 
 const RIDER_LOCATION_PREFIX = 'rider:location:'
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED']
-const OPEN_ASSIGNMENT_STATUSES = ['ASSIGNED', 'ACCEPTED', 'PICKED_UP', 'IN_TRANSIT']
+export const OPEN_ASSIGNMENT_STATUSES = ['ASSIGNED', 'ACCEPTED', 'PICKED_UP', 'IN_TRANSIT']
 
 /**
  * Delivery repository — database access for delivery operations
@@ -147,6 +148,89 @@ export class DeliveryRepository {
       [orderId, riderId, OPEN_ASSIGNMENT_STATUSES]
     )
     return rows[0] || null
+  }
+
+  // ─── QR PICKUP VERIFICATION ─────────────────────────
+
+  async findPickupTokenByValue(token) {
+    const { rows } = await query(`SELECT * FROM order_pickup_tokens WHERE token = $1`, [token])
+    return rows[0] || null
+  }
+
+  async getAssignmentById(assignmentId) {
+    const { rows } = await query(`SELECT * FROM delivery_assignments WHERE id = $1`, [assignmentId])
+    return rows[0] || null
+  }
+
+  /** Lazily flips a stale ACTIVE token to EXPIRED so admin-facing status stays accurate. Returns true if it was (or already is) expired. */
+  async expireTokenIfPast(tokenId) {
+    const { rows } = await query(
+      `UPDATE order_pickup_tokens
+       SET status = 'EXPIRED'
+       WHERE id = $1 AND status = 'ACTIVE' AND expires_at IS NOT NULL AND expires_at < NOW()
+       RETURNING id`,
+      [tokenId]
+    )
+    return rows.length > 0
+  }
+
+  /** Atomic claim — WHERE status='ACTIVE' makes concurrent scans of the same token race-safe; only one caller ever gets rows back. */
+  async claimPickupTokenAsVerified(tokenId, riderId) {
+    const { rows } = await query(
+      `UPDATE order_pickup_tokens
+       SET status = 'VERIFIED', verified_at = NOW(), verified_by_rider_id = $2
+       WHERE id = $1 AND status = 'ACTIVE'
+       RETURNING id`,
+      [tokenId, riderId]
+    )
+    return rows.length > 0
+  }
+
+  /** Called from markPickedUp — the VERIFIED token becomes CONSUMED once the rider physically confirms collection. */
+  async consumeVerifiedTokenInTx(client, assignmentId) {
+    await client.query(
+      `UPDATE order_pickup_tokens
+       SET status = 'CONSUMED', consumed_at = NOW()
+       WHERE delivery_assignment_id = $1 AND status = 'VERIFIED'`,
+      [assignmentId]
+    )
+  }
+
+  async logScanAttempt({ tokenId, orderId, riderId, result, failureReason, deviceInfo, ipAddress }) {
+    await query(
+      `INSERT INTO qr_scan_logs (token_id, order_id, rider_id, result, failure_reason, device_info, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        tokenId ?? null, orderId ?? null, riderId ?? null, result, failureReason ?? null,
+        deviceInfo ? JSON.stringify(deviceInfo) : null, ipAddress ?? null,
+      ]
+    )
+  }
+
+  /**
+   * Price-free pickup checklist — deliberately selects only name/quantity/
+   * unit/image/pack-size/variant. No price/total/tax/discount column is
+   * ever touched here, so there's nothing financial to accidentally leak
+   * through this response, by construction rather than by hiding fields.
+   */
+  async getPickupChecklist(orderId) {
+    const { rows: [order] } = await query(
+      `SELECT o.order_number, o.delivery_address, o.delivery_notes, o.delivery_instructions,
+              u.name AS customer_name, u.phone AS customer_phone
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.user_id
+       WHERE o.id = $1`,
+      [orderId]
+    )
+    const { rows: items } = await query(
+      `SELECT oi.name, oi.quantity, oi.unit, p.thumbnail_url, p.net_quantity, p.option_label
+       FROM order_items oi
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = $1
+       ORDER BY oi.created_at`,
+      [orderId]
+    )
+    return { order, items }
   }
 
   async getOrderAssignmentSnapshot(orderId, riderId) {
@@ -340,6 +424,8 @@ export class DeliveryRepository {
         [orderId, order?.status || assignment.status, riderId, `Delivery cancelled by rider: ${reason}`]
       )
 
+      await revokeOrderPickupTokens(client, orderId, 'Order CANCELLED')
+
       await client.query('COMMIT')
       return assignment
     } catch (err) {
@@ -412,6 +498,11 @@ export class DeliveryRepository {
         [orderId, assignment.rider_id, 'Your order is out for delivery']
       )
 
+      // Item 7: physically confirming pickup consumes the QR credential —
+      // no further verify-scan call can succeed for this order afterward,
+      // which is what actually prevents a second rider from collecting it.
+      await this.consumeVerifiedTokenInTx(client, assignmentId)
+
       await client.query('COMMIT')
       return assignment
     } catch (err) {
@@ -422,7 +513,7 @@ export class DeliveryRepository {
     }
   }
 
-  async markDelivered(assignmentId, orderId, proofPhotoUrl) {
+  async markDelivered(assignmentId, orderId, proofPhotoUrl, commissionEnabled = true) {
     const client = await getClient()
     try {
       await client.query('BEGIN')
@@ -482,6 +573,8 @@ export class DeliveryRepository {
         [orderId, order?.status || 'OUT_FOR_DELIVERY', assignment.rider_id, 'Order delivered successfully']
       )
 
+      await revokeOrderPickupTokens(client, orderId, 'Order DELIVERED')
+
       await client.query(
         `UPDATE rider_profiles
          SET total_deliveries = total_deliveries + 1, updated_at = NOW()
@@ -496,80 +589,64 @@ export class DeliveryRepository {
          WHERE o.id = $1`,
         [orderId]
       )
-      const configuredDeliveryFee = Number(orderFeeRow?.delivery_fee || 0)
-      const fallbackDeliveryFee = configuredDeliveryFee > 0
-        ? configuredDeliveryFee
-        : 25
-      const assignmentEarning = Number(assignment.earnings || 0)
-      const baseFee = assignmentEarning > 0
-        ? assignmentEarning
-        : fallbackDeliveryFee
-      const distanceBonus = 0
-      const performanceBonus = 0
-      const tipAmount = Number(assignment.tip_amount || 0)
-      const totalPayout = baseFee + distanceBonus + performanceBonus + tipAmount
+      let baseFee = 0
+      let distanceBonus = 0
+      let performanceBonus = 0
+      let tipAmount = 0
+      let totalPayout = 0
+      let totalToday = 0
 
-      if (assignmentEarning !== totalPayout) {
-        await client.query(
-          `UPDATE delivery_assignments
-           SET earnings = $2, updated_at = NOW()
-           WHERE id = $1`,
-          [assignmentId, totalPayout]
-        )
-        assignment = {
-          ...assignment,
-          earnings: totalPayout,
+      // Riders are salary-based while rider_commission_enabled is false —
+      // skip every earnings write entirely (no delivery_assignments.earnings
+      // update, no rider_earnings row) rather than writing zeros, so it's
+      // unambiguous in the data which deliveries were ever commission-eligible.
+      // Historical rider_earnings rows from before the flag was disabled are
+      // untouched either way.
+      if (commissionEnabled) {
+        const configuredDeliveryFee = Number(orderFeeRow?.delivery_fee || 0)
+        const fallbackDeliveryFee = configuredDeliveryFee > 0
+          ? configuredDeliveryFee
+          : 25
+        const assignmentEarning = Number(assignment.earnings || 0)
+        baseFee = assignmentEarning > 0 ? assignmentEarning : fallbackDeliveryFee
+        tipAmount = Number(assignment.tip_amount || 0)
+        totalPayout = baseFee + distanceBonus + performanceBonus + tipAmount
+
+        if (assignmentEarning !== totalPayout) {
+          await client.query(
+            `UPDATE delivery_assignments SET earnings = $2, updated_at = NOW() WHERE id = $1`,
+            [assignmentId, totalPayout]
+          )
+          assignment = { ...assignment, earnings: totalPayout }
         }
-      }
-      const { rows: updatedEarningRows } = await client.query(
-        `UPDATE rider_earnings
-         SET rider_id = $2,
-             amount = $3,
-             base_fee = $4,
-             distance_bonus = $5,
-             performance_bonus = $6,
-             tip_amount = $7,
-             type = 'delivery',
-             description = 'Delivery earning',
-             updated_at = NOW()
-         WHERE order_id = $1
-         RETURNING id`,
-        [
-          orderId,
-          assignment.rider_id,
-          totalPayout,
-          baseFee,
-          distanceBonus,
-          performanceBonus,
-          tipAmount,
-        ]
-      )
-      if (updatedEarningRows.length === 0) {
-        await client.query(
-          `INSERT INTO rider_earnings (
-             rider_id, order_id, amount, base_fee, distance_bonus,
-             performance_bonus, tip_amount, type, description, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'delivery', 'Delivery earning', NOW())`,
-          [
-            assignment.rider_id,
-            orderId,
-            totalPayout,
-            baseFee,
-            distanceBonus,
-            performanceBonus,
-            tipAmount,
-          ]
+        const { rows: updatedEarningRows } = await client.query(
+          `UPDATE rider_earnings
+           SET rider_id = $2, amount = $3, base_fee = $4, distance_bonus = $5,
+               performance_bonus = $6, tip_amount = $7, type = 'delivery',
+               description = 'Delivery earning', updated_at = NOW()
+           WHERE order_id = $1
+           RETURNING id`,
+          [orderId, assignment.rider_id, totalPayout, baseFee, distanceBonus, performanceBonus, tipAmount]
         )
-      }
+        if (updatedEarningRows.length === 0) {
+          await client.query(
+            `INSERT INTO rider_earnings (
+               rider_id, order_id, amount, base_fee, distance_bonus,
+               performance_bonus, tip_amount, type, description, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'delivery', 'Delivery earning', NOW())`,
+            [assignment.rider_id, orderId, totalPayout, baseFee, distanceBonus, performanceBonus, tipAmount]
+          )
+        }
 
-      const { rows: [todayRow] } = await client.query(
-        `SELECT COALESCE(SUM(amount), 0) AS total_today
-         FROM rider_earnings
-         WHERE rider_id = $1
-           AND created_at::date = CURRENT_DATE`,
-        [assignment.rider_id]
-      )
+        const { rows: [todayRow] } = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS total_today
+           FROM rider_earnings
+           WHERE rider_id = $1 AND created_at::date = CURRENT_DATE`,
+          [assignment.rider_id]
+        )
+        totalToday = Number(todayRow?.total_today || totalPayout)
+      }
 
       const completionSummary = {
         orderId,
@@ -580,7 +657,8 @@ export class DeliveryRepository {
         distanceBonus,
         performanceBonus,
         tipAmount,
-        totalToday: Number(todayRow?.total_today || totalPayout),
+        totalToday,
+        commissionEnabled,
       }
 
       await client.query('COMMIT')

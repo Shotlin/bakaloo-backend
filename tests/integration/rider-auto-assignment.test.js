@@ -155,7 +155,9 @@ describe('Task 23.5 — Rider auto-assignment uses shop coordinates', () => {
             last_active_at: new Date().toISOString(),
           }],
         })
-        // 4. FCM tokens for push notification
+        // 4. rider_commission_enabled flag check (CommissionSettingsRepository)
+        .mockResolvedValueOnce({ rows: [{ value: true }] })
+        // 5. FCM tokens for push notification
         .mockResolvedValueOnce({ rows: [] })
 
       // Transaction client mocks
@@ -194,9 +196,12 @@ describe('Task 23.5 — Rider auto-assignment uses shop coordinates', () => {
       )
       expect(shopQuery).toBeDefined()
 
-      // Verify NO query to app_settings for store_lat/store_lng
+      // Verify NO query to app_settings for store_lat/store_lng specifically
+      // — the regression this test guards against. app_settings is queried
+      // for unrelated keys elsewhere now (e.g. rider_commission_enabled),
+      // which is fine; only a coordinate lookup here would be the bug.
       const settingsQuery = mockQuery.mock.calls.find(
-        (call) => call[0].includes('app_settings')
+        (call) => call[0].includes('app_settings') && call[0].includes('store_lat')
       )
       expect(settingsQuery).toBeUndefined()
     })
@@ -224,6 +229,7 @@ describe('Task 23.5 — Rider auto-assignment uses shop coordinates', () => {
           rows: [makeShopRow(SHOP_ID_WITH_COORDS, { pickup_lat: shopLat, pickup_lng: shopLng })],
         })
         .mockResolvedValueOnce({ rows: [farRider, nearRider] })
+        .mockResolvedValueOnce({ rows: [{ value: true }] }) // rider_commission_enabled flag check
         .mockResolvedValueOnce({ rows: [] }) // FCM tokens rider-near
         .mockResolvedValueOnce({ rows: [] }) // FCM tokens rider-far
 
