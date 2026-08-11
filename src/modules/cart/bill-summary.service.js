@@ -52,8 +52,16 @@ export class BillSummaryService {
    * @param {string|null} [addressId] - optional selected address; defaults to the user's default address
    */
   async getBillSummary(userId, addressId = null, { quickDeliverySelected = false } = {}) {
-    const cart = await this.cartService.getCart(userId)
-    const paymentConfig = await this.paymentSettingsService.getConfig()
+    // getCart and getConfig are independent of each other — run together
+    // rather than one-after-another. This endpoint is on a latency-sensitive
+    // path: the Flutter app refetches it every time the customer navigates
+    // from Cart into Checkout, and briefly shows an incomplete local
+    // estimate while waiting, so shaving round trips here directly shrinks
+    // how often that fallback is visible.
+    const [cart, paymentConfig] = await Promise.all([
+      this.cartService.getCart(userId),
+      this.paymentSettingsService.getConfig(),
+    ])
     if (!cart.items || cart.items.length === 0) {
       return this._emptyBill(paymentConfig)
     }
@@ -63,18 +71,22 @@ export class BillSummaryService {
     const mrpDiscount = this._round(Math.max(0, itemTotalOriginal - itemTotalDiscounted))
     const tipAmount = this._toNumber(cart.tipAmount)
 
-    // Resolve delivery coordinates + per-shop distances.
-    const address = await this._resolveAddress(userId, addressId)
     const shopGroups = cart.shopGroups || []
     const shopIds = shopGroups.map((g) => g.shopId)
-    const shopMeta = await this._getShopMeta(shopIds)
 
-    // Compute a per-shop breakdown via the engine and aggregate. Delivery and
-    // each fee are charged per shop (matching order splitting); the aggregate
-    // is what the customer pays in total.
-    const { config } = await this.feeSettingsService.resolveForShop(
-      shopGroups.length === 1 ? shopGroups[0].shopId : null
-    )
+    // Delivery coordinates, shop lat/lng, and the aggregate fee config are
+    // all independent lookups (none depends on another's result) — run them
+    // together. For a single-shop cart (the common case) this resolved
+    // config IS the shop's own config, reused below instead of querying the
+    // identical row a second time inside the per-shop loop.
+    const [address, shopMeta, resolvedShopConfig] = await Promise.all([
+      this._resolveAddress(userId, addressId),
+      this._getShopMeta(shopIds),
+      this.feeSettingsService.resolveForShop(
+        shopGroups.length === 1 ? shopGroups[0].shopId : null
+      ),
+    ])
+    const { config } = resolvedShopConfig
 
     // First-time offer — auto-applies for eligible first-time customers on
     // single-shop carts, mirroring OrdersService.placeOrder()'s rule
@@ -144,14 +156,27 @@ export class BillSummaryService {
     let primaryStoreName = null
     let amountToUnlock = 0
 
-    for (const group of shopGroups) {
+    // Single-shop carts already resolved this exact shop's config above
+    // (`resolvedShopConfig`) — reuse it instead of querying the identical
+    // row again. Multi-shop carts genuinely need one resolution per shop
+    // (STORE override can differ per shop), so those run in parallel rather
+    // than as N sequential round trips inside the loop below.
+    const perShopConfigs =
+      shopGroups.length === 1
+        ? [resolvedShopConfig]
+        : await Promise.all(
+            shopGroups.map((group) => this.feeSettingsService.resolveForShop(group.shopId))
+          )
+
+    for (let i = 0; i < shopGroups.length; i++) {
+      const group = shopGroups[i]
       const meta = shopMeta.get(group.shopId) || {}
       const distanceKm =
         address && Number.isFinite(meta.lat) && Number.isFinite(meta.lng)
           ? haversineKm(address.lat, address.lng, meta.lat, meta.lng)
           : null
 
-      const shopConfigResolved = await this.feeSettingsService.resolveForShop(group.shopId)
+      const shopConfigResolved = perShopConfigs[i]
       const breakdown = this.totalsEngine.computeBreakdown({
         config: shopConfigResolved.config,
         itemsSubtotal: group.subtotal,
