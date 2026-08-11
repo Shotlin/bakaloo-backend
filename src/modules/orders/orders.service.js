@@ -1051,11 +1051,36 @@ export class OrdersService {
 
     const warnings = []
 
+    // cartService.addItem is delta-based (adds on top of whatever quantity
+    // is already in the cart) — for ONLINE/WALLET orders the cart is
+    // deliberately left populated until payment confirms (see create()'s
+    // cart-clear deferral above), so calling reorder() right after a
+    // cancelled/failed payment used to double every quantity instead of
+    // leaving the still-present cart alone. Reported bug: customer backs
+    // out of the Razorpay sheet, the app's cancel+reorder retry-safety-net
+    // fires, and their cart quantity silently doubles.
+    //
+    // Topping up only the shortfall against the RAW current cart (not the
+    // enriched/filtered one from cartService.getCart, which can silently
+    // drop temporarily out-of-stock lines) makes this call idempotent for
+    // that retry path, while still fully restoring a genuinely emptied
+    // cart — e.g. reordering a past, already-cleared order — to the
+    // ordered quantity rather than more.
+    const existingCart = await this.cartRepo.getCart(userId)
+    const existingQtyByKey = new Map(
+      existingCart.map((item) => [`${item.productId}:${item.shopId}`, item.quantity])
+    )
+
     for (const item of order.items) {
+      const shopId = item.shopId || order.shopId || null
+      const existingQty = existingQtyByKey.get(`${item.productId}:${shopId}`) || 0
+      const topUp = item.quantity - existingQty
+      if (topUp <= 0) continue
+
       const result = await this.cartService.addItem(userId, {
         productId: item.productId,
-        shopId: item.shopId || order.shopId || null,
-        quantity: item.quantity,
+        shopId,
+        quantity: topUp,
       })
       if (!result.success) {
         warnings.push(result.message)
