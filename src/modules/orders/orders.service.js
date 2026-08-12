@@ -1,14 +1,16 @@
 import { getClient } from '../../config/database.js'
-import { query } from '../../config/database.js'
+import { query, pool } from '../../config/database.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { logger } from '../../config/logger.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
+import { getActivePickupToken } from '../../utils/pickupTokens.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../notifications/customer-order-event.helper.js'
+import { FinalizeAssignmentRepository } from '../rider-assignment/finalize-assignment.repository.js'
 
 // Lazy-loaded collaborator instances (avoids circular imports)
 import { CartRepository } from '../cart/cart.repository.js'
@@ -134,6 +136,8 @@ export class OrdersService {
       options.storeStatusService || getStoreStatusService()
     this.deliveryCalendarService =
       options.deliveryCalendarService || getDeliveryCalendarService()
+    this.finalizeAssignmentRepo =
+      options.finalizeAssignmentRepository || new FinalizeAssignmentRepository()
   }
 
   /**
@@ -1028,6 +1032,16 @@ export class OrdersService {
       cancelledReason: reason || 'Cancelled by customer',
     })
 
+    // A rider can already be assigned by the time the order is cancelled
+    // (e.g. admin assigned early on a still-CONFIRMED order) — without
+    // this the assignment silently lingers as ACCEPTED forever and the
+    // rider's app keeps showing a pickup for an order that's gone.
+    this.finalizeAssignmentRepo
+      .cancelOpenAssignment(pool, orderId, reason || 'Order cancelled by customer')
+      .catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Rider assignment cleanup failed after cancel (non-blocking)')
+      })
+
     // Reverse any cashback tied to this order — PENDING rows are simply
     // cancelled, CREDITED rows (e.g. a PAYMENT_SUCCESS-triggered cashback
     // credited before the customer cancelled a still-CONFIRMED order) are
@@ -1173,6 +1187,11 @@ export class OrdersService {
       this.cashbackService.cancelForOrder(orderId).catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (admin cancel)')
       })
+      this.finalizeAssignmentRepo
+        .cancelOpenAssignment(pool, orderId, 'Order cancelled by admin')
+        .catch((err) => {
+          logger.warn({ err: err.message, orderId }, 'Rider assignment cleanup failed after admin cancel (non-blocking)')
+        })
     }
     return { success: true, order: updated }
   }
@@ -1221,7 +1240,11 @@ export class OrdersService {
     // harmless no-op for any other status (generateInvoicePDF only reads it
     // when order.status is terminal-cancelled/refunded).
     const timeline = await this.repo.getStatusHistory(orderId)
-    const buffer = await generateInvoicePDF({ ...order, timeline })
+    const rawToken = await getActivePickupToken(orderId)
+    const pickupToken = rawToken
+      ? { assignmentId: rawToken.delivery_assignment_id, token: rawToken.token, version: rawToken.version }
+      : null
+    const buffer = await generateInvoicePDF({ ...order, timeline, pickup_token: pickupToken })
     return {
       success: true,
       buffer,

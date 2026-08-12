@@ -226,6 +226,10 @@ export class OrderSplitterService {
         feeBreakdown: null,
         quickDeliverySelected: false,
         quickDeliverySurchargeAmount: 0,
+        // GSTR-1: no config resolved on this legacy/no-engine path, so
+        // order_items fall back to their own gstRate (from the product) or
+        // the historical-fallback COALESCE chain at report time.
+        effectiveGlobalGstRate: null,
       }
     }
 
@@ -271,6 +275,13 @@ export class OrderSplitterService {
       feeBreakdown: breakdown,
       quickDeliverySelected,
       quickDeliverySurchargeAmount: breakdown.quickDeliverySurcharge || 0,
+      // GSTR-1 HSN Summary snapshot fallback: the GST rate actually
+      // configured for this shop at order time, used when an item itself
+      // has no per-product gstRate set.
+      effectiveGlobalGstRate:
+        config?.gst_rate !== undefined && config?.gst_rate !== null
+          ? Number(config.gst_rate)
+          : null,
     }
   }
 
@@ -465,6 +476,12 @@ export class OrderSplitterService {
         quantity: item.quantity,
         unit: item.unit || null,
         total: Number(item.lineTotal ?? 0),
+        // GSTR-1 HSN Summary snapshot: the product's own HSN/rate, else the
+        // shop's effective GST rate at order time — stamped now so later
+        // HSN/rate edits on the product don't retroactively change past
+        // reports.
+        hsnCodeSnapshot: item.hsnCode || null,
+        gstRateSnapshot: item.gstRate ?? fees.effectiveGlobalGstRate ?? null,
       }))
 
       const orderNumber = await this.ordersRepo.generateOrderNumber(client)

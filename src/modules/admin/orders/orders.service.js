@@ -1,7 +1,7 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { generateInvoicePDF, generatePackingSlipPDF } from '../../../utils/invoiceGenerator.js'
-import { query as dbQuery, getClient } from '../../../config/database.js'
+import { query as dbQuery, getClient, pool } from '../../../config/database.js'
 import { logger } from '../../../config/logger.js'
 import { NotificationsRepository } from '../../notifications/notifications.repository.js'
 import { NotificationsService } from '../../notifications/notifications.service.js'
@@ -9,8 +9,10 @@ import { buildCustomerOrderEventNotification } from '../../notifications/custome
 import { ShopProductsRepository } from '../../shop-products/shop-products.repository.js'
 import { ShopProductsService } from '../../shop-products/shop-products.service.js'
 import { extractAddressId } from '../../../utils/deliveryAddress.js'
+import { getActivePickupToken } from '../../../utils/pickupTokens.js'
 import { RiderAssignmentResolverService } from '../../rider-assignment/rider-assignment-resolver.service.js'
 import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignment.repository.js'
+import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
 import ExcelJS from 'exceljs'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -91,6 +93,7 @@ export class AdminOrdersService {
     this.shopProductsRepo = new ShopProductsRepository()
     this.riderAssignmentResolver = new RiderAssignmentResolverService(fastify)
     this.riderAssignmentLogRepo = new RiderAssignmentRepository()
+    this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
   }
 
   /**
@@ -286,6 +289,17 @@ export class AdminOrdersService {
       }
     }
 
+    // A rider can already be assigned by the time the order is cancelled —
+    // without this the assignment silently lingers as ACCEPTED forever and
+    // the rider's app keeps showing a pickup for an order that's gone.
+    if (newStatus === 'CANCELLED') {
+      try {
+        await this.finalizeAssignmentRepo.cancelOpenAssignment(pool, orderId, note || 'Order cancelled')
+      } catch (err) {
+        console.error('Rider assignment cleanup failed after cancel (non-blocking):', err.message)
+      }
+    }
+
     return { orderId, oldStatus, newStatus }
   }
 
@@ -416,13 +430,29 @@ export class AdminOrdersService {
   }
 
   async getInvoice(orderId) {
-    const order = await this.findById(orderId)
+    const order = await this._withPickupTokenForInvoice(orderId)
     return generateInvoicePDF(order)
   }
 
   async getPackingSlip(orderId) {
-    const order = await this.findById(orderId)
+    const order = await this._withPickupTokenForInvoice(orderId)
     return generatePackingSlipPDF(order)
+  }
+
+  /**
+   * Attaches the raw active pickup token (if any) so invoiceGenerator can
+   * embed the signed QR. Kept off the plain findById() result so it never
+   * leaks into the admin order-detail JSON response.
+   */
+  async _withPickupTokenForInvoice(orderId) {
+    const order = await this.findById(orderId)
+    const rawToken = await getActivePickupToken(orderId)
+    return {
+      ...order,
+      pickup_token: rawToken
+        ? { assignmentId: rawToken.delivery_assignment_id, token: rawToken.token, version: rawToken.version }
+        : null,
+    }
   }
 
   async exportCSV(filters) {
@@ -565,6 +595,15 @@ export class AdminOrdersService {
 
     // Cancel the order
     const oldStatus = await this.repository.updateStatus(orderId, 'CANCELLED', adminId, reason || 'Cancelled by admin')
+
+    // A rider can already be assigned by the time the order is cancelled —
+    // without this the assignment silently lingers as ACCEPTED forever and
+    // the rider's app keeps showing a pickup for an order that's gone.
+    try {
+      await this.finalizeAssignmentRepo.cancelOpenAssignment(pool, orderId, reason || 'Order cancelled by admin')
+    } catch (err) {
+      console.error('Rider assignment cleanup failed after cancel (non-blocking):', err.message)
+    }
 
     // Previously missing entirely — an admin cancelling an order never gave
     // the deducted stock back, so every admin-cancelled order permanently

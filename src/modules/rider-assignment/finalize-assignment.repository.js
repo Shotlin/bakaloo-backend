@@ -41,11 +41,21 @@ export class FinalizeAssignmentRepository {
     await revokeOrderPickupTokens(client, orderId, reason)
   }
 
+  /**
+   * Created as ACCEPTED, not ASSIGNED — under the firm-assignment model
+   * there is no rider accept/reject step (that offer-fan-out flow is
+   * retired from this path), so a finalized assignment is implicitly
+   * accepted the moment it's created. This matters concretely:
+   * `delivery.repository.js#markPickedUp`'s SQL only transitions a row
+   * whose status is already 'ACCEPTED' — leaving this at 'ASSIGNED' would
+   * make every pickup-confirmation silently no-op for every order
+   * finalized through this resolver.
+   */
   async insertAssignment(client, orderId, riderId, earnings) {
     const { rows } = await client.query(
-      `INSERT INTO delivery_assignments (order_id, rider_id, status, assigned_at, earnings)
-       VALUES ($1, $2, 'ASSIGNED', NOW(), $3)
-       RETURNING id, order_id, rider_id, status, assigned_at`,
+      `INSERT INTO delivery_assignments (order_id, rider_id, status, assigned_at, accepted_at, earnings)
+       VALUES ($1, $2, 'ACCEPTED', NOW(), NOW(), $3)
+       RETURNING id, order_id, rider_id, status, assigned_at, accepted_at`,
       [orderId, riderId, earnings]
     )
     return rows[0]

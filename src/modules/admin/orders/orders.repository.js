@@ -86,6 +86,7 @@ export class AdminOrdersRepository {
     return rows[0] || null
   }
 
+
   async getOrderItems(orderId) {
     const { rows } = await query(
       `SELECT oi.*, p.thumbnail_url, p.net_quantity
@@ -352,7 +353,7 @@ export class AdminOrdersRepository {
       const orderItems = []
       for (const item of items) {
         const { rows: [product] } = await client.query(
-          'SELECT id, name, price, sale_price, stock_quantity, unit FROM products WHERE id = $1 AND is_active = true',
+          'SELECT id, name, price, sale_price, stock_quantity, unit, hsn_code, gst_rate FROM products WHERE id = $1 AND is_active = true',
           [item.productId]
         )
         if (!product) throw { statusCode: 400, message: `Product ${item.productId} not found` }
@@ -368,6 +369,12 @@ export class AdminOrdersRepository {
           quantity: item.quantity,
           unit: product.unit,
           total: parseFloat(total),
+          // GSTR-1 HSN Summary snapshot — no fee-settings resolution on this
+          // manual-order path, so only the product's own HSN/rate is
+          // stamped; the report's read-time COALESCE falls back to the
+          // global rate when this is null.
+          hsn_code_snapshot: product.hsn_code || null,
+          gst_rate_snapshot: product.gst_rate ?? null,
         })
       }
 
@@ -389,9 +396,9 @@ export class AdminOrdersRepository {
       // Insert order items
       for (const oi of orderItems) {
         await client.query(
-          `INSERT INTO order_items (order_id, product_id, name, price, quantity, unit, total)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [order.id, oi.product_id, oi.name, oi.price, oi.quantity, oi.unit, oi.total]
+          `INSERT INTO order_items (order_id, product_id, name, price, quantity, unit, total, hsn_code_snapshot, gst_rate_snapshot)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [order.id, oi.product_id, oi.name, oi.price, oi.quantity, oi.unit, oi.total, oi.hsn_code_snapshot, oi.gst_rate_snapshot]
         )
         // Deduct stock
         await client.query(

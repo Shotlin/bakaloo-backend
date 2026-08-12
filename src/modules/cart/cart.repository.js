@@ -336,6 +336,8 @@ export class CartRepository {
               p.origin_tag,
               p.custom_badges,
               p.display_delivery_minutes,
+              p.hsn_code,
+              p.gst_rate,
               pf.name          AS family_name,
               s.name           AS shop_name,
               s.is_active      AS shop_active

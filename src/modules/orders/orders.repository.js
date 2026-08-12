@@ -88,8 +88,8 @@ export class OrdersRepository {
       await client.query(
         `INSERT INTO order_items
            (order_id, product_id, name, price, quantity, unit, total,
-            shop_product_id, shop_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            shop_product_id, shop_id, hsn_code_snapshot, gst_rate_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           rows[0].id,
           item.productId,
@@ -100,6 +100,8 @@ export class OrdersRepository {
           item.total,
           item.shopProductId || null,
           item.shopId || rows[0].shop_id || null,
+          item.hsnCodeSnapshot || null,
+          item.gstRateSnapshot ?? null,
         ]
       )
     }

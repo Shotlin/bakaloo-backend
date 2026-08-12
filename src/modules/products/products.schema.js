@@ -143,6 +143,12 @@ export const createProductSchema = {
       unit: { type: 'string', enum: ['kg', 'g', 'l', 'ml', 'piece', 'pack', 'dozen', 'box'] },
       sku: { type: 'string', maxLength: 100 },
       barcode: { type: 'string', maxLength: 100 },
+      // GSTR-1 HSN Summary fields — hsnCode/uqc/gstRate are report-only,
+      // don't affect checkout pricing. gstRate is nullable: unset falls
+      // back to the platform's global fee_settings.gst_rate at report time.
+      hsnCode: { type: 'string', maxLength: 8 },
+      uqc: { type: 'string', maxLength: 10 },
+      gstRate: { type: 'number', minimum: 0, maximum: 100 },
       thumbnailUrl: { type: 'string' },
       images: { type: 'array', items: { type: 'string' } },
       tags: { type: 'array', items: { type: 'string' } },
@@ -250,6 +256,10 @@ export const updateProductSchema = {
       unit: { type: 'string', enum: ['kg', 'g', 'l', 'ml', 'piece', 'pack', 'dozen', 'box'] },
       sku: { type: 'string', maxLength: 100 },
       barcode: { type: 'string', maxLength: 100 },
+      // GSTR-1 HSN Summary fields — see createProductSchema for notes.
+      hsnCode: { type: 'string', maxLength: 8 },
+      uqc: { type: 'string', maxLength: 10 },
+      gstRate: { type: 'number', minimum: 0, maximum: 100 },
       thumbnailUrl: { type: 'string' },
       images: { type: 'array', items: { type: 'string' } },
       tags: { type: 'array', items: { type: 'string' } },

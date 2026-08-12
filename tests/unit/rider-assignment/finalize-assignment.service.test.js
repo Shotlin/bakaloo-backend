@@ -175,4 +175,18 @@ describe('FinalizeAssignmentService.finalize', () => {
     expect(result).toEqual({ success: false, reason: 'ORDER_NOT_FOUND' })
     expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK')
   })
+
+  it.each(['CANCELLED', 'DELIVERED', 'REFUNDED'])(
+    'rolls back and returns ORDER_NOT_ACTIVE for a %s order (never hands a rider a dead order)',
+    async (status) => {
+      mockRepo.lockOrder.mockResolvedValue(makeOrderRow({ status }))
+      const service = new FinalizeAssignmentService(makeFastify())
+
+      const result = await service.finalize(ORDER_ID, { riderId: NEW_RIDER_ID, method: 'AUTO' })
+
+      expect(result).toEqual({ success: false, reason: 'ORDER_NOT_ACTIVE' })
+      expect(mockRepo.insertAssignment).not.toHaveBeenCalled()
+      expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK')
+    }
+  )
 })

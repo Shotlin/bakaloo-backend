@@ -974,6 +974,11 @@ export class CartService {
       lineTotal,
       inStock: Number(sp.stock_quantity) > 0,
       isAvailable: sp.is_available === true,
+      // GSTR-1 HSN Summary snapshot fields — carried through order-splitter
+      // into order_items.hsn_code_snapshot/gst_rate_snapshot at order time.
+      hsnCode: sp.hsn_code || null,
+      gstRate:
+        sp.gst_rate !== null && sp.gst_rate !== undefined ? Number(sp.gst_rate) : null,
     }
   }
 

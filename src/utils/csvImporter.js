@@ -10,6 +10,9 @@ import { logger } from '../config/logger.js'
  *   name, description, price, stock_quantity, unit, category_id,
  *   images (pipe-separated URLs), is_featured (true/false)
  *
+ * Optional GSTR-1 columns (all blank-safe, report-only, don't affect
+ * checkout pricing): hsn_code, uqc, gst_rate
+ *
  * Returns { imported, skipped, errors }
  */
 export async function importProductsFromCSV(buffer) {
@@ -79,15 +82,26 @@ export async function importProductsFromCSV(buffer) {
         const isFeatured = String(row.is_featured || '').toLowerCase() === 'true'
         const slug = generateSlug(name)
 
+        const hsnCode = row.hsn_code ? String(row.hsn_code).trim() : null
+        const uqc = row.uqc ? String(row.uqc).trim() : null
+        const gstRate =
+          row.gst_rate !== undefined && row.gst_rate !== '' && !isNaN(parseFloat(row.gst_rate))
+            ? parseFloat(row.gst_rate)
+            : null
+
         await client.query(
           `INSERT INTO products (
             name, slug, description, price, stock_quantity, unit,
-            category_id, images, is_featured, is_active
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true)
+            category_id, images, is_featured, is_active,
+            hsn_code, uqc, gst_rate
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12)
           ON CONFLICT (slug) DO UPDATE SET
             price = EXCLUDED.price,
             stock_quantity = EXCLUDED.stock_quantity,
             description = EXCLUDED.description,
+            hsn_code = COALESCE(EXCLUDED.hsn_code, products.hsn_code),
+            uqc = COALESCE(EXCLUDED.uqc, products.uqc),
+            gst_rate = COALESCE(EXCLUDED.gst_rate, products.gst_rate),
             updated_at = NOW()`,
           [
             name,
@@ -99,6 +113,9 @@ export async function importProductsFromCSV(buffer) {
             row.category_id,
             JSON.stringify(images),
             isFeatured,
+            hsnCode,
+            uqc,
+            gstRate,
           ]
         )
         imported++

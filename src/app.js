@@ -309,6 +309,14 @@ export const buildApp = async () => {
     }
   )
 
+  // Admin GSTR-1 — B2CS + HSN Summary reporting, business-wide GSTIN
+  await app.register(
+    import('./modules/admin/gstr1/gstr1.routes.js'),
+    {
+      prefix: '/api/v1/admin/gstr1',
+    }
+  )
+
   // Bulk Orders — large multi-vendor scheduled-delivery orders
   // (registered after shop-financials; scheduled-orders comes online in 10.2)
   await app.register(import('./modules/bulk-orders/bulk-orders.routes.js'), {

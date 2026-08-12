@@ -7,6 +7,7 @@ import {
   resendOtpSchema,
   cancelDeliverySchema,
   rejectOrderSchema,
+  verifyScanSchema,
   markPickedUpSchema,
   markDeliveredSchema,
   uploadProofSchema,
@@ -91,6 +92,11 @@ export default async function deliveryRoutes(fastify) {
   fastify.patch('/orders/:id/cancel', {
     schema: cancelDeliverySchema,
   }, controller.cancelDelivery.bind(controller))
+
+  // POST /orders/:id/verify-scan — Verify a scanned invoice QR pickup code
+  fastify.post('/orders/:id/verify-scan', {
+    schema: verifyScanSchema,
+  }, controller.verifyScan.bind(controller))
 
   // PATCH /orders/:id/pickup — Mark picked up
   fastify.patch('/orders/:id/pickup', {

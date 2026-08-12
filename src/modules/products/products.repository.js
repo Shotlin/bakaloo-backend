@@ -732,7 +732,8 @@ export class ProductsRepository {
               p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
-              p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
+              p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
+              p.low_stock_threshold, p.max_order_qty,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
               p.certifications, p.nutrition_info,
               p.meta_title, p.meta_description,
@@ -782,7 +783,8 @@ export class ProductsRepository {
               p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
-              p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
+              p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
+              p.low_stock_threshold, p.max_order_qty,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
               p.certifications, p.nutrition_info,
               p.meta_title, p.meta_description,
@@ -1206,8 +1208,9 @@ export class ProductsRepository {
          vendor_name, vendor_address, vendor_fssai, return_policy,
          avg_rating, rating_count, is_authentic,
          product_family_id, option_label, option_sort_order, is_default_option,
-         food_type, origin_tag, custom_badges, display_delivery_minutes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46)
+         food_type, origin_tag, custom_badges, display_delivery_minutes,
+         hsn_code, uqc, gst_rate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
        RETURNING id, name, slug, price, sale_price, stock_quantity, unit,
                  thumbnail_url, category_id, is_featured, is_active, sku, created_at`,
       [
@@ -1235,6 +1238,7 @@ export class ProductsRepository {
         data.foodType || 'NONE', data.originTag || 'NONE',
         JSON.stringify(data.customBadges || []),
         data.displayDeliveryMinutes || null,
+        data.hsnCode || null, data.uqc || null, data.gstRate ?? null,
       ]
     )
 
@@ -1256,6 +1260,7 @@ export class ProductsRepository {
       unit: 'unit', thumbnailUrl: 'thumbnail_url',
       isFeatured: 'is_featured', isActive: 'is_active', slug: 'slug',
       sku: 'sku', barcode: 'barcode',
+      hsnCode: 'hsn_code', uqc: 'uqc', gstRate: 'gst_rate',
       lowStockThreshold: 'low_stock_threshold', maxOrderQty: 'max_order_qty',
       ingredients: 'ingredients', allergenInfo: 'allergen_info',
       shelfLife: 'shelf_life', storageInstructions: 'storage_instructions',

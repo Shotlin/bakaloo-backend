@@ -1,6 +1,7 @@
 import PDFDocument from 'pdfkit'
 import QRCode from 'qrcode'
 import { STORE_INFO } from '../config/storeInfo.js'
+import { signPickupPayload, QR_TOKEN_VERSION } from './qrToken.js'
 
 const TERMINAL_BANNER_STATUS = new Set(['CANCELLED', 'REFUNDED'])
 
@@ -322,38 +323,31 @@ function drawTotals(doc, order) {
 
 /**
  * Order ID, items, customer, full delivery address + coordinates, and
- * assigned rider — the fields a rider-app QR-scan flow needs to load and
- * verify a delivery without re-typing anything. JSON rather than a
- * delimited string so that flow can decode it directly.
+ * assigned rider — a minimal signed reference only. Deliberately does NOT
+ * embed customer name/phone/address/items: that descriptive data is loaded
+ * from the backend only after a rider authenticates AND this QR verifies
+ * (see delivery.service.js#verifyScan), not baked into a QR that ends up
+ * printed on a physical slip anyone could photograph. `order.pickup_token`
+ * is attached by the caller (orders.service.js, both admin and customer)
+ * from the order's current ACTIVE order_pickup_tokens row — absent when
+ * no rider is assigned yet, or once the token's been scanned/revoked/
+ * expired, in which case no QR is drawn at all (see drawQRCode).
  */
-function buildQrPayload(order, address, items) {
-  const hasRider = !!(order.rider_id || order.riderId)
-  return JSON.stringify({
-    orderId: order.order_number || order.orderNumber || order.id,
-    items: items.map((item) => ({
-      name: item.name || item.productName || 'Product',
-      qty: item.quantity || item.qty || 0,
-    })),
-    customerName: order.customer_name || order.customerName || null,
-    customerPhone: order.customer_phone || order.customerPhone || null,
-    address: formatAddress(address),
-    lat: address.lat ?? address.latitude ?? null,
-    lng: address.lng ?? address.longitude ?? null,
-    // Omitted (not just null id) when no rider is assigned yet — invoices
-    // are regenerated fresh on every download, so a pre-assignment
-    // download simply carries no rider block rather than a stale one.
-    rider: hasRider
-      ? {
-          id: order.rider_id || order.riderId,
-          name: order.rider_name || order.riderName || null,
-          phone: order.rider_phone || order.riderPhone || null,
-        }
-      : null,
-  })
+function buildQrPayload(order) {
+  const pt = order.pickup_token
+  if (!pt || !pt.token || !pt.assignmentId) return null
+
+  const orderId = order.id
+  const assignmentId = pt.assignmentId
+  const version = pt.version || QR_TOKEN_VERSION
+  const sig = signPickupPayload({ orderId, assignmentId, token: pt.token, version })
+
+  return JSON.stringify({ orderId, assignmentId, token: pt.token, v: version, sig })
 }
 
-async function generateQrCodeBuffer(order, address, items) {
-  const payload = buildQrPayload(order, address, items)
+async function generateQrCodeBuffer(order) {
+  const payload = buildQrPayload(order)
+  if (!payload) return null
   return QRCode.toBuffer(payload, { width: 120, margin: 1, errorCorrectionLevel: 'M' })
 }
 
@@ -431,7 +425,7 @@ async function generateReceiptPDF(order, opts) {
   // Generated once, up front — QRCode.toBuffer is async, unlike every other
   // render step in this file, so it can't happen inside the synchronous
   // measure/render pair below.
-  const qrBuffer = await generateQrCodeBuffer(order, address, items)
+  const qrBuffer = await generateQrCodeBuffer(order)
   const renderOpts = { ...opts, qrBuffer }
 
   return new Promise((resolve, reject) => {

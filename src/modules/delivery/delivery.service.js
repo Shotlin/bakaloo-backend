@@ -8,6 +8,7 @@ import { UploadsService } from '../uploads/uploads.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
 import { verifyPickupSignature } from '../../utils/qrToken.js'
+import { OPEN_ASSIGNMENT_STATUSES } from './delivery.repository.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -33,7 +34,11 @@ export class DeliveryService {
   async getRiderProfile(riderId) {
     const profile = await this.repository.getRiderProfile(riderId)
     if (!profile) throw new Error('Rider profile not found')
-    return profile
+    // Fetched once at app-start/profile-refresh so the rider app can gate
+    // every earnings display without guessing — riders are salary-based
+    // while this flag is off (see commission-settings.repository.js).
+    const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()
+    return { ...profile, commission_enabled: commissionEnabled }
   }
 
   async toggleOnline(riderId, isOnline) {
@@ -385,6 +390,112 @@ export class DeliveryService {
     })
 
     return result
+  }
+
+  /**
+   * QR pickup verification — every check server-side, in strict order, each
+   * rejection logged to qr_scan_logs with a specific failure_reason before
+   * throwing. Only a successful pass returns the price-free pickup
+   * checklist; sensitive order/customer data is never returned otherwise.
+   */
+  async verifyScan(riderId, orderId, payload, meta = {}) {
+    const { ip = null, userAgent = null, deviceInfo = null } = meta
+    const logContext = { orderId, riderId, deviceInfo, ipAddress: ip }
+
+    const reject = async (failureReason, { statusCode = 403, message, tokenId = null } = {}) => {
+      await this.repository.logScanAttempt({
+        ...logContext, tokenId, result: 'REJECTED', failureReason,
+      })
+      this._logDeliveryAction('verify-scan:rejected', { orderId, riderId, reason: failureReason })
+      throw { statusCode, message: message || failureReason, code: failureReason }
+    }
+
+    if (!payload || payload.orderId !== orderId) {
+      return reject('ORDER_ID_MISMATCH', { message: 'This QR code does not match the scanned order.' })
+    }
+
+    // Wire format uses short field names (v, sig) to keep the QR small;
+    // qrToken.js's helpers use the descriptive names (version, signature).
+    const signatureValid = verifyPickupSignature({
+      orderId: payload.orderId,
+      assignmentId: payload.assignmentId,
+      token: payload.token,
+      version: payload.v,
+      signature: payload.sig,
+    })
+    if (!signatureValid) {
+      return reject('INVALID_SIGNATURE', { message: 'This QR code failed verification and cannot be trusted.' })
+    }
+
+    const token = await this.repository.findPickupTokenByValue(payload.token)
+    if (!token) {
+      return reject('TOKEN_NOT_FOUND', { message: 'This QR code is not recognized.' })
+    }
+
+    let currentStatus = token.status
+    if (currentStatus === 'ACTIVE') {
+      const justExpired = await this.repository.expireTokenIfPast(token.id)
+      if (justExpired) currentStatus = 'EXPIRED'
+    }
+
+    if (currentStatus === 'REVOKED') {
+      return reject('TOKEN_REVOKED', { tokenId: token.id, message: 'This QR code has been revoked and can no longer be used.' })
+    }
+    if (currentStatus === 'EXPIRED') {
+      return reject('TOKEN_EXPIRED', { tokenId: token.id, message: 'This QR code has expired.' })
+    }
+    if (currentStatus === 'CONSUMED') {
+      return reject('ALREADY_PICKED_UP', { tokenId: token.id, message: 'This order has already been picked up.' })
+    }
+    if (currentStatus === 'VERIFIED') {
+      return reject('ALREADY_VERIFIED', { tokenId: token.id, message: 'This order has already been scanned and is ready for pickup confirmation.' })
+    }
+
+    const assignment = await this.repository.getAssignmentById(token.delivery_assignment_id)
+    if (!assignment || assignment.rider_id !== riderId) {
+      return reject('WRONG_RIDER', {
+        tokenId: token.id,
+        message: 'This order is not assigned to your rider account.',
+      })
+    }
+    if (!OPEN_ASSIGNMENT_STATUSES.includes(assignment.status)) {
+      return reject('ASSIGNMENT_NOT_OPEN', { tokenId: token.id, message: 'This delivery is no longer active.' })
+    }
+
+    const order = await this.repository.getOrderAssignmentSnapshot(orderId, riderId)
+    if (order?.order_status === 'CANCELLED' || order?.order_status === 'DELIVERED') {
+      return reject(`ORDER_ALREADY_${order.order_status}`, { tokenId: token.id, message: `This order has already been ${order.order_status.toLowerCase()}.` })
+    }
+
+    const claimed = await this.repository.claimPickupTokenAsVerified(token.id, riderId)
+    if (!claimed) {
+      // Lost a race to a concurrent scan of the same token — item 15's
+      // "concurrent scans cannot assign the same order to multiple riders."
+      return reject('ALREADY_VERIFIED', { tokenId: token.id, message: 'This order has already been scanned and is ready for pickup confirmation.' })
+    }
+
+    await this.repository.logScanAttempt({ ...logContext, tokenId: token.id, result: 'SUCCESS' })
+    this._logDeliveryAction('verify-scan:success', { orderId, riderId, assignmentId: assignment.id })
+
+    const checklist = await this.repository.getPickupChecklist(orderId)
+    const address = checklist.order?.delivery_address || {}
+    return {
+      orderNumber: checklist.order?.order_number ?? null,
+      customerName: checklist.order?.customer_name ?? null,
+      customerPhone: checklist.order?.customer_phone ?? null,
+      deliveryAddress: address,
+      lat: address.lat ?? address.latitude ?? null,
+      lng: address.lng ?? address.longitude ?? null,
+      deliveryNotes: checklist.order?.delivery_notes ?? null,
+      deliveryInstructions: checklist.order?.delivery_instructions ?? null,
+      items: (checklist.items || []).map((item) => ({
+        name: item.name,
+        quantity: item.quantity,
+        unit: item.unit,
+        image: item.thumbnail_url,
+        variant: item.option_label || item.net_quantity || null,
+      })),
+    }
   }
 
   async markPickedUp(riderId, orderId) {

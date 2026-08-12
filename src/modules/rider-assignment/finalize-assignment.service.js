@@ -1,6 +1,7 @@
 import { logger } from '../../config/logger.js'
 import { sendPush } from '../../utils/pushNotification.js'
 import { generatePickupToken, QR_TOKEN_VERSION } from '../../utils/qrToken.js'
+import { ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { FinalizeAssignmentRepository } from './finalize-assignment.repository.js'
 import { RiderAssignmentRepository } from './rider-assignment.repository.js'
 import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
@@ -41,6 +42,16 @@ export class FinalizeAssignmentService {
       if (!order) {
         await client.query('ROLLBACK')
         return { success: false, reason: 'ORDER_NOT_FOUND' }
+      }
+
+      // A cancelled/delivered/refunded order can never gain a rider —
+      // without this, a stale retry or an admin action on an order that
+      // was cancelled after entering the assignment pipeline would still
+      // assign it, handing the rider a pickup for an order that no longer
+      // exists from the customer's side.
+      if (!ACTIVE_ORDER_STATUSES.includes(order.status)) {
+        await client.query('ROLLBACK')
+        return { success: false, reason: 'ORDER_NOT_ACTIVE' }
       }
 
       // Manual always wins — never let a later auto/segment resolve
@@ -105,7 +116,12 @@ export class FinalizeAssignmentService {
     if (!shouldNotify) return
 
     if (this.fastify?.emitOrderAssignedToRider) {
-      this.fastify.emitOrderAssignedToRider(riderId, { orderId, status: 'ASSIGNED' })
+      // 'ACCEPTED', matching what insertAssignment() actually wrote — the
+      // rider app treats this as a signal to refetch its order list
+      // rather than parsing a full order out of this deliberately minimal
+      // payload, so the exact status string mainly matters for anyone
+      // inspecting the raw socket event directly.
+      this.fastify.emitOrderAssignedToRider(riderId, { orderId, status: 'ACCEPTED' })
     }
 
     try {
