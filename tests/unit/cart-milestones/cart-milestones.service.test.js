@@ -189,6 +189,24 @@ describe('CartMilestonesService.computeReward — each reward type (positive)', 
 
   it('COUPON_UNLOCK returns the coupon id', () => {
     const reward = service.computeReward(tier({ rewardType: 'COUPON_UNLOCK', unlockCouponId: 'coupon-9' }), 500)
-    expect(reward).toEqual({ unlockCouponId: 'coupon-9' })
+    expect(reward).toEqual({ unlockCouponId: 'coupon-9', freeDelivery: false })
+  })
+})
+
+describe('CartMilestonesService.computeReward — grantsFreeDelivery toggle (100_cart_milestone_free_delivery_toggle)', () => {
+  const service = new CartMilestonesService(makeRepoMock(), makeSegmentsRepoMock())
+
+  it('is false by default for a CASHBACK milestone (negative)', () => {
+    const reward = service.computeReward(tier({ rewardType: 'CASHBACK', rewardValue: 20 }), 500)
+    expect(reward.freeDelivery).toBe(false)
+  })
+
+  it('carries through independently of rewardType when the toggle is on (positive)', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'CASHBACK', rewardValue: 20, grantsFreeDelivery: true }),
+      500
+    )
+    expect(reward.freeDelivery).toBe(true)
+    expect(reward.cashbackAmount).toBe(20)
   })
 })

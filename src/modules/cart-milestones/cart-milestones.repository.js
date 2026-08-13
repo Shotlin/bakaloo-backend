@@ -4,8 +4,8 @@ const COLUMNS = `
   id, name, min_cart_amount, reward_type, reward_value, max_discount,
   unlock_coupon_id, message_before, message_after, icon_url, is_active,
   applicable_user_type, applicable_segment_id, stackable_with_coupon,
-  priority, cashback_credit_trigger, usage_limit_per_user, created_by,
-  created_at, updated_at
+  priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
+  created_by, created_at, updated_at
 `
 
 export class CartMilestonesRepository {
@@ -57,8 +57,9 @@ export class CartMilestonesRepository {
          name, min_cart_amount, reward_type, reward_value, max_discount,
          unlock_coupon_id, message_before, message_after, icon_url,
          applicable_user_type, applicable_segment_id, stackable_with_coupon,
-         priority, cashback_credit_trigger, usage_limit_per_user, created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
+         created_by
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING ${COLUMNS}`,
       [
         data.name,
@@ -76,6 +77,7 @@ export class CartMilestonesRepository {
         data.priority ?? 0,
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
         data.usageLimitPerUser ?? null,
+        !!data.grantsFreeDelivery,
         data.createdBy ?? null,
       ]
     )
@@ -103,6 +105,7 @@ export class CartMilestonesRepository {
       priority: 'priority',
       cashbackCreditTrigger: 'cashback_credit_trigger',
       usageLimitPerUser: 'usage_limit_per_user',
+      grantsFreeDelivery: 'grants_free_delivery',
     }
     for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
       if (data[jsKey] !== undefined) {
@@ -163,6 +166,7 @@ export class CartMilestonesRepository {
       priority: row.priority,
       cashbackCreditTrigger: row.cashback_credit_trigger,
       usageLimitPerUser: row.usage_limit_per_user,
+      grantsFreeDelivery: row.grants_free_delivery,
       createdBy: row.created_by,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

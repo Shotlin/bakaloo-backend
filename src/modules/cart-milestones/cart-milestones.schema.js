@@ -16,6 +16,7 @@ const milestoneProperties = {
   priority:              { type: 'integer' },
   cashbackCreditTrigger: { type: 'string' },
   usageLimitPerUser:     { type: ['integer', 'null'] },
+  grantsFreeDelivery:    { type: 'boolean' },
   createdAt:             { type: 'string' },
 }
 
@@ -75,6 +76,7 @@ export const createMilestoneSchema = {
       priority:              { type: 'integer', default: 0 },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'], default: 'ORDER_DELIVERED' },
       usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
+      grantsFreeDelivery:    { type: 'boolean', default: false },
     },
   },
   response: { 201: milestoneResponse },
@@ -107,6 +109,7 @@ export const updateMilestoneSchema = {
       priority:              { type: 'integer' },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'] },
       usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
+      grantsFreeDelivery:    { type: 'boolean' },
     },
   },
   response: { 200: milestoneResponse },

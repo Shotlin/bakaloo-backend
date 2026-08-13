@@ -98,20 +98,29 @@ export class CartMilestonesService {
     return progress.unlocked
   }
 
-  /** Mirrors FirstTimeOffersService.computeReward — same shape convention. */
+  /**
+   * Mirrors FirstTimeOffersService.computeReward — same shape convention.
+   *
+   * grantsFreeDelivery is independent of rewardType (100_cart_milestone_
+   * free_delivery_toggle.sql) — same pattern as coupons.grants_free_delivery
+   * and first_time_offers.grants_free_delivery: a CASHBACK or FLAT_DISCOUNT
+   * milestone can ALSO waive delivery instead of being forced to invent a
+   * fake reward value just to get a free-delivery effect.
+   */
   computeReward(milestone, cartTotal) {
+    const freeDelivery = !!milestone.grantsFreeDelivery
     switch (milestone.rewardType) {
       case 'FLAT_DISCOUNT':
-        return { discount: Math.min(milestone.rewardValue || 0, cartTotal) }
+        return { discount: Math.min(milestone.rewardValue || 0, cartTotal), freeDelivery }
       case 'CASHBACK': {
         let amount = milestone.rewardValue || 0
         if (milestone.maxDiscount) amount = Math.min(amount, milestone.maxDiscount)
-        return { cashbackAmount: amount }
+        return { cashbackAmount: amount, freeDelivery }
       }
       case 'COUPON_UNLOCK':
-        return { unlockCouponId: milestone.unlockCouponId }
+        return { unlockCouponId: milestone.unlockCouponId, freeDelivery }
       default:
-        return {}
+        return { freeDelivery }
     }
   }
 

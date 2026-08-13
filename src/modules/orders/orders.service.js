@@ -441,6 +441,10 @@ export class OrdersService {
             appliedCouponDiscount += reward.discount
             couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
           }
+          if (reward.freeDelivery) {
+            freeDeliveryOverride = true
+            freeDeliveryShopId = freeDeliveryShopId || Array.from(groupedByShop.keys())[0]
+          }
         }
       }
     }
