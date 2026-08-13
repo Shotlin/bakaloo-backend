@@ -13,6 +13,7 @@ import { getActivePickupToken } from '../../../utils/pickupTokens.js'
 import { RiderAssignmentResolverService } from '../../rider-assignment/rider-assignment-resolver.service.js'
 import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignment.repository.js'
 import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
+import { CashbackService } from '../../cashback/cashback.service.js'
 import ExcelJS from 'exceljs'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -94,6 +95,7 @@ export class AdminOrdersService {
     this.riderAssignmentResolver = new RiderAssignmentResolverService(fastify)
     this.riderAssignmentLogRepo = new RiderAssignmentRepository()
     this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
+    this.cashbackService = new CashbackService()
   }
 
   /**
@@ -298,6 +300,20 @@ export class AdminOrdersService {
       } catch (err) {
         console.error('Rider assignment cleanup failed after cancel (non-blocking):', err.message)
       }
+      this.cashbackService.cancelForOrder(orderId).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (admin status update)')
+      })
+    }
+
+    // Every other order-status path that reaches DELIVERED (rider app,
+    // legacy orders.service.js adminUpdateStatus) credits any PENDING
+    // cashback whose trigger is ORDER_DELIVERED — this dashboard-driven
+    // transition was the one path that never did, so cashback silently
+    // never landed for orders marked delivered from here.
+    if (newStatus === 'DELIVERED') {
+      this.cashbackService.evaluateAndCredit(orderId, 'ORDER_DELIVERED').catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (admin status update)')
+      })
     }
 
     return { orderId, oldStatus, newStatus }
@@ -604,6 +620,10 @@ export class AdminOrdersService {
     } catch (err) {
       console.error('Rider assignment cleanup failed after cancel (non-blocking):', err.message)
     }
+
+    this.cashbackService.cancelForOrder(orderId).catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (admin cancel)')
+    })
 
     // Previously missing entirely — an admin cancelling an order never gave
     // the deducted stock back, so every admin-cancelled order permanently
