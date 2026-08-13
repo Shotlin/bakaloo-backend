@@ -1,7 +1,7 @@
 import { query } from '../../config/database.js'
 
 const COLUMNS = `
-  id, name, min_cart_amount, reward_type, reward_value, max_discount,
+  id, name, min_cart_amount, reward_type, reward_value, reward_percent, max_discount,
   unlock_coupon_id, message_before, message_after, icon_url, is_active,
   applicable_user_type, applicable_segment_id, stackable_with_coupon,
   priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
@@ -54,18 +54,19 @@ export class CartMilestonesRepository {
   async create(data) {
     const { rows } = await query(
       `INSERT INTO cart_milestones (
-         name, min_cart_amount, reward_type, reward_value, max_discount,
+         name, min_cart_amount, reward_type, reward_value, reward_percent, max_discount,
          unlock_coupon_id, message_before, message_after, icon_url,
          applicable_user_type, applicable_segment_id, stackable_with_coupon,
          priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
          created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING ${COLUMNS}`,
       [
         data.name,
         data.minCartAmount,
         data.rewardType,
         data.rewardValue ?? null,
+        data.rewardPercent ?? null,
         data.maxDiscount ?? null,
         data.unlockCouponId ?? null,
         data.messageBefore ?? null,
@@ -93,6 +94,7 @@ export class CartMilestonesRepository {
       minCartAmount: 'min_cart_amount',
       rewardType: 'reward_type',
       rewardValue: 'reward_value',
+      rewardPercent: 'reward_percent',
       maxDiscount: 'max_discount',
       unlockCouponId: 'unlock_coupon_id',
       messageBefore: 'message_before',
@@ -154,6 +156,7 @@ export class CartMilestonesRepository {
       minCartAmount: parseFloat(row.min_cart_amount),
       rewardType: row.reward_type,
       rewardValue: row.reward_value != null ? parseFloat(row.reward_value) : null,
+      rewardPercent: row.reward_percent != null ? parseFloat(row.reward_percent) : null,
       maxDiscount: row.max_discount != null ? parseFloat(row.max_discount) : null,
       unlockCouponId: row.unlock_coupon_id,
       messageBefore: row.message_before,

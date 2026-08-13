@@ -193,6 +193,34 @@ describe('CartMilestonesService.computeReward — each reward type (positive)', 
   })
 })
 
+describe('CartMilestonesService.computeReward — CASHBACK percentage mode (101_cart_milestone_reward_percent; reported bug: only a flat ₹ cashback was possible)', () => {
+  const service = new CartMilestonesService(makeRepoMock(), makeSegmentsRepoMock())
+
+  it('rewardPercent wins over the flat rewardValue when set (80% capped at ₹50)', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'CASHBACK', rewardValue: 10, rewardPercent: 80, maxDiscount: 50 }),
+      1000
+    )
+    expect(reward.cashbackAmount).toBe(50) // 80% of 1000 = 800, capped at 50
+  })
+
+  it('uses the flat rewardValue when rewardPercent is not set (unaffected default case)', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'CASHBACK', rewardValue: 20, rewardPercent: null }),
+      1000
+    )
+    expect(reward.cashbackAmount).toBe(20)
+  })
+
+  it('is uncapped when maxDiscount is not set', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'CASHBACK', rewardValue: 0, rewardPercent: 10, maxDiscount: null }),
+      1000
+    )
+    expect(reward.cashbackAmount).toBe(100)
+  })
+})
+
 describe('CartMilestonesService.computeReward — grantsFreeDelivery toggle (100_cart_milestone_free_delivery_toggle)', () => {
   const service = new CartMilestonesService(makeRepoMock(), makeSegmentsRepoMock())
 

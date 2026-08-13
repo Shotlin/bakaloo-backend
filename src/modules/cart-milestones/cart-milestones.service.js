@@ -113,8 +113,15 @@ export class CartMilestonesService {
       case 'FLAT_DISCOUNT':
         return { discount: Math.min(milestone.rewardValue || 0, cartTotal), freeDelivery }
       case 'CASHBACK': {
+        // rewardPercent (when set) wins over the flat rewardValue — same
+        // convention as payment_offers.cashback_percent — so an admin can
+        // configure "80% cashback, up to ₹50" instead of only a flat ₹X.
         let amount = milestone.rewardValue || 0
+        if (milestone.rewardPercent) {
+          amount = cartTotal * (milestone.rewardPercent / 100)
+        }
         if (milestone.maxDiscount) amount = Math.min(amount, milestone.maxDiscount)
+        amount = Math.round(amount * 100) / 100
         return { cashbackAmount: amount, freeDelivery }
       }
       case 'COUPON_UNLOCK':
