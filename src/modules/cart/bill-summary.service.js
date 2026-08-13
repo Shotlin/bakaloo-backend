@@ -144,6 +144,34 @@ export class BillSummaryService {
       }
     }
 
+    // Cart milestone reward — resolved here (not just at order placement) so
+    // a milestone that grants free delivery is reflected in the delivery
+    // fee the customer SEES while shopping, matching what order placement
+    // will actually charge. Previously this only fed the "Add ₹X more to
+    // unlock…" progress ladder further below and never touched
+    // forceFreeDelivery, so a milestone crossed mid-cart (e.g. "free
+    // delivery above ₹50") never waived the fee shown here — only
+    // orders.service.js applied it, and only at the very end. Best-effort:
+    // a milestone lookup failure must never break the cart summary itself.
+    let cartMilestoneProgress = { unlocked: null, next: null }
+    let eligibleMilestoneTiers = []
+    let cartMilestoneFreeDelivery = false
+    try {
+      const [progress, eligibleTiers] = await Promise.all([
+        this.cartMilestonesService.getProgress(userId, itemTotalDiscounted),
+        this.cartMilestonesService.getEligibleTiers(userId),
+      ])
+      cartMilestoneProgress = progress
+      eligibleMilestoneTiers = eligibleTiers
+      if (progress.unlocked) {
+        const reward = this.cartMilestonesService.computeReward(progress.unlocked, itemTotalDiscounted)
+        cartMilestoneFreeDelivery = !!reward.freeDelivery
+      }
+    } catch (err) {
+      logger.warn({ userId, err: err.message, action: 'bill_summary_milestone' }, 'Cart milestone progress failed')
+    }
+    const forceFreeDelivery = firstTimeOfferFreeDelivery || cartMilestoneFreeDelivery
+
     let deliveryFee = 0
     let deliveryFeeOriginal = 0
     let handlingFee = 0
@@ -182,7 +210,7 @@ export class BillSummaryService {
         itemsSubtotal: group.subtotal,
         distanceKm,
         storeName: meta.name || group.shopName || null,
-        forceFreeDelivery: firstTimeOfferFreeDelivery,
+        forceFreeDelivery,
       })
 
       deliveryFee = this._round(deliveryFee + breakdown.deliveryFee)
@@ -216,7 +244,7 @@ export class BillSummaryService {
       tipAmount,
       storeName: primaryStoreName,
       quickDeliverySelected,
-      forceFreeDelivery: firstTimeOfferFreeDelivery,
+      forceFreeDelivery,
     })
 
     // Override the aggregate's per-fee numbers with the summed per-shop values
@@ -295,22 +323,16 @@ export class BillSummaryService {
     // progress track instead of resetting to 0% every time a tier is
     // crossed — each tier fills its own segment as the cart approaches it,
     // and every earlier segment stays fully filled once passed.
-    // Best-effort: a milestone lookup failure must never break the cart summary itself.
-    let cartMilestone = { unlocked: null, next: null, ladder: [] }
-    try {
-      const [progress, eligibleTiers] = await Promise.all([
-        this.cartMilestonesService.getProgress(userId, itemTotalDiscounted),
-        this.cartMilestonesService.getEligibleTiers(userId),
-      ])
-      const ladder = this._buildRewardLadder({
+    // Reuses the progress/tiers already resolved above (for forceFreeDelivery)
+    // instead of re-querying them.
+    const cartMilestone = {
+      ...cartMilestoneProgress,
+      ladder: this._buildRewardLadder({
         freeDeliveryEnabled: aggregate.freeDelivery.enabled,
         freeDeliveryThreshold: freeThreshold,
-        tiers: eligibleTiers,
+        tiers: eligibleMilestoneTiers,
         cartTotal: itemTotalDiscounted,
-      })
-      cartMilestone = { ...progress, ladder }
-    } catch (err) {
-      logger.warn({ userId, err: err.message, action: 'bill_summary_milestone' }, 'Cart milestone progress failed')
+      }),
     }
 
     // ── Legacy-compatible shape + new canonical fields ──────────

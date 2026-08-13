@@ -432,19 +432,27 @@ export class OrdersService {
       const milestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotal)
       if (milestone && !(appliedCouponCode && !milestone.stackableWithCoupon)) {
         const reward = this.cartMilestonesService.computeReward(milestone, subtotal)
-        if (reward.discount && (appliedCouponCode || firstTimeReward?.discount)) {
-          // Discount slot already taken by a coupon or first-time offer.
-        } else {
+        const discountSlotTaken = !!(appliedCouponCode || firstTimeReward?.discount)
+        // Only the discount portion yields to an already-applied
+        // coupon/first-time discount (single discount slot, same rule as
+        // first-time offers above) — free delivery, cashback, and
+        // coupon-unlock are independent of that slot and must still apply.
+        // Previously the discount collision skipped the ENTIRE reward, so a
+        // milestone that both discounted AND granted free delivery (e.g.
+        // "min ₹50 → free delivery") silently dropped the free delivery too
+        // whenever a coupon happened to be applied.
+        const discountApplied = reward.discount && !discountSlotTaken
+        if (discountApplied) {
+          appliedCouponDiscount += reward.discount
+          couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
+        }
+        if (reward.freeDelivery) {
+          freeDeliveryOverride = true
+          freeDeliveryShopId = freeDeliveryShopId || Array.from(groupedByShop.keys())[0]
+        }
+        if (discountApplied || reward.cashbackAmount || reward.freeDelivery || reward.unlockCouponId) {
           cartMilestone = milestone
           cartMilestoneReward = reward
-          if (reward.discount) {
-            appliedCouponDiscount += reward.discount
-            couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
-          }
-          if (reward.freeDelivery) {
-            freeDeliveryOverride = true
-            freeDeliveryShopId = freeDeliveryShopId || Array.from(groupedByShop.keys())[0]
-          }
         }
       }
     }

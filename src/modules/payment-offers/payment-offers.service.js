@@ -38,6 +38,23 @@ export class PaymentOffersService {
         const amountNeeded = isLocked
           ? Math.ceil(Math.max(0, requiredThreshold - normalizedCartTotal))
           : 0
+        const isPercentage = offer.cashback_percent != null
+        const cashbackPercent = isPercentage
+          ? this._toNumber(offer.cashback_percent)
+          : null
+        const maxCashback =
+          offer.max_cashback != null ? this._toNumber(offer.max_cashback) : null
+
+        // Percentage offers are cart-total-dependent, so the amount shown
+        // pre-unlock (cart hasn't reached the threshold yet) would be
+        // computed against too-small a total to mean anything — show the
+        // capped ceiling ("up to ₹50") instead, same number checkout would
+        // actually credit once the cart is large enough to hit the cap.
+        const cashbackAmount = isPercentage
+          ? isLocked && maxCashback != null
+            ? maxCashback
+            : this._computeCashback(offer, normalizedCartTotal)
+          : this._toNumber(offer.cashback_amount)
 
         return {
           id: offer.id,
@@ -45,7 +62,10 @@ export class PaymentOffersService {
           description: offer.description,
           provider: offer.provider,
           iconUrl: offer.icon_url,
-          cashbackAmount: this._toNumber(offer.cashback_amount),
+          cashbackType: isPercentage ? 'PERCENTAGE' : 'FLAT',
+          cashbackAmount,
+          cashbackPercent,
+          maxCashback,
           minOrderAmount,
           isLocked,
           lockMessage: isLocked

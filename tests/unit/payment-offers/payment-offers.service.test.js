@@ -259,6 +259,52 @@ describe('PaymentOffersService.getPublicOffers — per-user usage cap hides exha
   })
 })
 
+describe('PaymentOffersService.getPublicOffers — percentage cashback display (reported bug: cart always showed the flat amount even when cashback_percent was actually what checkout would credit)', () => {
+  it('shows the percent-computed, cap-limited amount once the cart is unlocked (80% capped at 50)', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([
+        offer({ cashback_amount: 0, cashback_percent: 80, max_cashback: 50, min_order_amount: 0 }),
+      ]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(1000)
+
+    expect(result[0]).toMatchObject({
+      cashbackType: 'PERCENTAGE',
+      cashbackPercent: 80,
+      maxCashback: 50,
+      cashbackAmount: 50, // 80% of 1000 = 800, capped at 50
+    })
+  })
+
+  it('shows the cap as the headline amount while still locked, not a number computed off a too-small cart', async () => {
+    const repo = makeRepoMock({
+      getActive: vi.fn().mockResolvedValue([
+        offer({ cashback_amount: 0, cashback_percent: 80, max_cashback: 50, min_order_amount: 100 }),
+      ]),
+    })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(0)
+
+    expect(result[0]).toMatchObject({ isLocked: true, cashbackAmount: 50 })
+  })
+
+  it('still reports the flat amount and FLAT type for offers with no cashback_percent (unaffected default case)', async () => {
+    const repo = makeRepoMock({ getActive: vi.fn().mockResolvedValue([offer()]) })
+    const service = new PaymentOffersService(repo)
+
+    const result = await service.getPublicOffers(50)
+
+    expect(result[0]).toMatchObject({
+      cashbackType: 'FLAT',
+      cashbackPercent: null,
+      cashbackAmount: 50,
+    })
+  })
+})
+
 describe('PaymentOffersService.delete — foreign-key-in-use conflict (negative)', () => {
   // Reported bug: deleting a payment offer that a customer had already
   // redeemed threw a raw Postgres FK violation (payment_offer_usages has no
