@@ -72,6 +72,7 @@ export class FeeSettingsService {
       max_delivery_distance_km: null,
       free_delivery_enabled: true,
       free_delivery_above: 299,
+      free_delivery_in_milestone_ladder: false,
       handling_fee_enabled: true,
       handling_fee_type: 'FLAT',
       handling_fee_value: 5,

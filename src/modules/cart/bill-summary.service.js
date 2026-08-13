@@ -325,10 +325,17 @@ export class BillSummaryService {
     // and every earlier segment stays fully filled once passed.
     // Reuses the progress/tiers already resolved above (for forceFreeDelivery)
     // instead of re-querying them.
+    // The global free-delivery threshold only joins the ladder as its own
+    // checkpoint when explicitly opted in (free_delivery_in_milestone_ladder)
+    // — otherwise a shop with one real cart milestone would see what looks
+    // like two milestones in the progress track. This is purely a display
+    // decision: the threshold's own "Add ₹X more to unlock FREE DELIVERY"
+    // banner (freeDelivery.amountToUnlock above) and the actual fee waiver
+    // are computed the same either way.
     const cartMilestone = {
       ...cartMilestoneProgress,
       ladder: this._buildRewardLadder({
-        freeDeliveryEnabled: aggregate.freeDelivery.enabled,
+        freeDeliveryEnabled: aggregate.freeDelivery.enabled && !!config.free_delivery_in_milestone_ladder,
         freeDeliveryThreshold: freeThreshold,
         tiers: eligibleMilestoneTiers,
         cartTotal: itemTotalDiscounted,

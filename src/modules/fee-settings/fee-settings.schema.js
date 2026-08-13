@@ -26,6 +26,11 @@ export const updateFeeSettingsSchema = z
     max_delivery_distance_km: nonNegative.max(1000).nullable(),
     free_delivery_enabled: z.boolean(),
     free_delivery_above: nonNegative.max(10000000).nullable(),
+    // Whether the global free-delivery threshold also shows up as its own
+    // checkpoint in the cart-milestone reward ladder (Smart Bottom Bar).
+    // Off by default so a shop with real cart milestones doesn't see this
+    // generic threshold rendered as if it were one of them.
+    free_delivery_in_milestone_ladder: z.boolean(),
 
     // Handling
     handling_fee_enabled: z.boolean(),

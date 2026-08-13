@@ -118,6 +118,45 @@ describe('BillSummaryService — cart milestone free delivery (reported bug: min
     expect(result.deliveryFee.isFree).toBe(false)
   })
 
+  it('the global free-delivery threshold does NOT appear in the ladder by default (reported bug: one real milestone looked like two)', async () => {
+    const milestone = { id: 'm-3', name: 'Free delivery tier', rewardType: 'CASHBACK', rewardValue: 0, grantsFreeDelivery: true, minCartAmount: 50 }
+    const cartMilestonesService = {
+      getProgress: vi.fn().mockResolvedValue({ unlocked: null, next: { ...milestone, amountToUnlock: 20, message: '' } }),
+      getEligibleTiers: vi.fn().mockResolvedValue([milestone]),
+      computeReward: vi.fn(),
+    }
+    const svc = buildService({ cartData: cart({ subtotal: 30 }), cartMilestonesService })
+    svc.feeSettingsService.resolveForShop = vi.fn().mockResolvedValue({
+      config: { ...flatConfig, free_delivery_enabled: true, free_delivery_above: 100, free_delivery_in_milestone_ladder: false },
+      source: 'default',
+    })
+
+    const result = await svc.getBillSummary('user-1')
+
+    expect(result.cartMilestone.ladder).toHaveLength(1)
+    expect(result.cartMilestone.ladder[0].id).toBe('m-3')
+    expect(result.cartMilestone.ladder.find((c) => c.id === 'free-delivery')).toBeUndefined()
+  })
+
+  it('the global free-delivery threshold joins the ladder once opted in', async () => {
+    const milestone = { id: 'm-4', name: 'Free delivery tier', rewardType: 'CASHBACK', rewardValue: 0, grantsFreeDelivery: true, minCartAmount: 50 }
+    const cartMilestonesService = {
+      getProgress: vi.fn().mockResolvedValue({ unlocked: null, next: { ...milestone, amountToUnlock: 20, message: '' } }),
+      getEligibleTiers: vi.fn().mockResolvedValue([milestone]),
+      computeReward: vi.fn(),
+    }
+    const svc = buildService({ cartData: cart({ subtotal: 30 }), cartMilestonesService })
+    svc.feeSettingsService.resolveForShop = vi.fn().mockResolvedValue({
+      config: { ...flatConfig, free_delivery_enabled: true, free_delivery_above: 100, free_delivery_in_milestone_ladder: true },
+      source: 'default',
+    })
+
+    const result = await svc.getBillSummary('user-1')
+
+    expect(result.cartMilestone.ladder).toHaveLength(2)
+    expect(result.cartMilestone.ladder.map((c) => c.id)).toEqual(expect.arrayContaining(['m-4', 'free-delivery']))
+  })
+
   it('a milestone lookup failure never breaks the cart summary (best-effort)', async () => {
     const cartMilestonesService = {
       getProgress: vi.fn().mockRejectedValue(new Error('db down')),
