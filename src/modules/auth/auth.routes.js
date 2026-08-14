@@ -1,3 +1,4 @@
+import jwt from 'jsonwebtoken'
 import { AuthController } from './auth.controller.js'
 import { AuthService } from './auth.service.js'
 import { AuthRepository } from './auth.repository.js'
@@ -53,6 +54,30 @@ export default async function authRoutes(fastify) {
       rateLimit: {
         max: 20,
         timeWindow: '5 minutes',
+        // Bucket by the session's own subject rather than raw IP. Indian
+        // mobile carriers commonly put thousands of customers behind a
+        // handful of shared CGNAT IPs, so an IP-keyed bucket lets one burst
+        // of unrelated legitimate traffic (e.g. many users opening the app
+        // within the same couple of minutes after a broadcast promotional
+        // push) 429 an innocent customer's own token renewal sharing that
+        // IP — which the client currently can't distinguish from a real
+        // session failure. `hook: 'preHandler'` (below) runs this after
+        // body parsing so `refreshToken` is available; falls back to IP
+        // when the body doesn't decode (malformed request) so a bucket
+        // still exists.
+        keyGenerator: (request) => {
+          const token = request.body?.refreshToken
+          if (typeof token === 'string' && token) {
+            try {
+              const decoded = jwt.decode(token)
+              if (decoded?.id) return `user:${decoded.id}`
+            } catch {
+              // fall through to IP
+            }
+          }
+          return request.ip
+        },
+        hook: 'preHandler',
       },
     },
   }, controller.refreshToken.bind(controller))

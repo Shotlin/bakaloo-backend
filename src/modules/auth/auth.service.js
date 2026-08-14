@@ -7,6 +7,18 @@ import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 
 const REFRESH_TOKEN_PREFIX = 'refresh:'
+// Holds the immediately-preceding refresh token for a short window after
+// rotation. Without this, two renewal calls that land close together for
+// the same user (e.g. several screens reloading at once right after a push
+// notification wakes the app) race: the first rotates the token in Redis,
+// and the second — still holding the now-superseded token it read a moment
+// earlier — gets rejected as "invalid session" even though the underlying
+// session is perfectly valid. The false rejection forces the client to show
+// the login screen; it "fixes itself" once the app's own already-rotated
+// token takes over on the next request. This grace key absorbs that race
+// instead of punishing the loser of it.
+const REFRESH_TOKEN_GRACE_PREFIX = 'refresh:grace:'
+const REFRESH_TOKEN_GRACE_SECONDS = 30
 const SMS_SESSION_PREFIX = 'sms:session:'
 // Short-lived token issued when a staff member logs in but has multiple shop
 // assignments and must select one before getting a full session JWT.
@@ -348,10 +360,33 @@ export class AuthService {
     try {
       const decoded = verifyToken(refreshToken, env.JWT_REFRESH_SECRET)
 
-      // Check if refresh token is still valid in Redis
       const stored = await redis.get(`${REFRESH_TOKEN_PREFIX}${decoded.id}`)
-      if (!stored || stored !== refreshToken) {
-        return { success: false, message: 'Invalid or expired refresh token' }
+
+      if (stored !== refreshToken) {
+        // Not the current token. It may still be the one we rotated away
+        // from a moment ago — a duplicate renewal call already in flight
+        // when this user's session last rotated (see REFRESH_TOKEN_GRACE_
+        // PREFIX above). Accept it without rotating again so that call
+        // converges on the same session instead of failing outright.
+        const grace = stored
+          ? await redis.get(`${REFRESH_TOKEN_GRACE_PREFIX}${decoded.id}`)
+          : null
+        if (!stored || grace !== refreshToken) {
+          return { success: false, message: 'Invalid or expired refresh token' }
+        }
+
+        const user = await this.repo.findById(decoded.id)
+        if (!user || !user.is_active) {
+          return { success: false, message: 'User account is not active' }
+        }
+
+        const accessToken = signAccessToken({
+          id: user.id,
+          phone: user.phone,
+          role: user.role,
+        })
+
+        return { success: true, accessToken, refreshToken: stored }
       }
 
       // Check user still exists and is active
@@ -363,6 +398,17 @@ export class AuthService {
       // Generate new token pair (rotate refresh token)
       const payload = { id: user.id, phone: user.phone, role: user.role }
       const tokens = generateTokenPair(payload)
+
+      // Keep the just-superseded token valid for a short grace window so a
+      // duplicate renewal call already in flight with it still succeeds
+      // (see REFRESH_TOKEN_GRACE_PREFIX above) instead of forcing a false
+      // logout.
+      await redis.set(
+        `${REFRESH_TOKEN_GRACE_PREFIX}${user.id}`,
+        refreshToken,
+        'EX',
+        REFRESH_TOKEN_GRACE_SECONDS
+      )
 
       // Update refresh token in Redis
       await redis.set(
@@ -388,6 +434,7 @@ export class AuthService {
    */
   async logout(userId) {
     await redis.del(`${REFRESH_TOKEN_PREFIX}${userId}`)
+    await redis.del(`${REFRESH_TOKEN_GRACE_PREFIX}${userId}`)
     logger.info({ userId }, 'User logged out')
   }
 
@@ -397,6 +444,7 @@ export class AuthService {
   async deleteAccount(userId) {
     await this.repo.deleteUser(userId)
     await redis.del(`${REFRESH_TOKEN_PREFIX}${userId}`)
+    await redis.del(`${REFRESH_TOKEN_GRACE_PREFIX}${userId}`)
     logger.info({ userId }, 'User account deleted')
   }
 
