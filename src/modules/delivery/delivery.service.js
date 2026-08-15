@@ -1060,6 +1060,16 @@ export class DeliveryService {
       assignmentStatus: order.assignment_status,
       orderNumber: order.order_number,
       orderStatus: order.order_status,
+      // Multi-stop sequencing (item 8/9): quick-delivery ("Express") orders
+      // rank above everything else; scheduled orders carry the customer's
+      // promised window for ranking among the rest. createdAt is already
+      // spread in via `...order` — used as the fallback ordering signal
+      // for plain ASAP orders, which have no slot of their own.
+      deliveryMode: order.delivery_mode,
+      quickDeliverySelected: Boolean(order.quick_delivery_selected),
+      scheduledSlotStart: order.scheduled_slot_start,
+      scheduledSlotEnd: order.scheduled_slot_end,
+      createdAt: order.created_at,
       totalAmount: this._toNumber(order.total_amount, 0),
       paymentMethod: order.payment_method,
       riderEarning: this._toNumber(order.earnings, 0),

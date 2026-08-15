@@ -107,6 +107,8 @@ export class DeliveryRepository {
              o.shop_id, o.total_amount, o.payment_method, o.delivery_fee,
              o.delivery_address, o.delivery_notes,
              o.items, o.estimated_delivery, o.created_at,
+             o.delivery_mode, o.quick_delivery_selected,
+             o.scheduled_slot_start, o.scheduled_slot_end,
              o.user_id as customer_id,
              u.name as customer_name, u.phone as customer_phone
       FROM delivery_assignments da
