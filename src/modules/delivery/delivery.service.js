@@ -398,27 +398,33 @@ export class DeliveryService {
    * throwing. Only a successful pass returns the price-free pickup
    * checklist; sensitive order/customer data is never returned otherwise.
    */
-  async verifyScan(riderId, orderId, payload, meta = {}) {
-    const { ip = null, userAgent = null, deviceInfo = null } = meta
-    const logContext = { orderId, riderId, deviceInfo, ipAddress: ip }
+  async verifyScan(riderId, payload, meta = {}) {
+    const { ip = null, deviceInfo = null } = meta
+    // Unknown until the token is looked up below — the QR carries no
+    // order/assignment id at all (see qrToken.js), so early rejections
+    // (bad payload shape, bad signature, unrecognized token) log with
+    // orderId: null, which accurately reflects that we never learned
+    // which order was targeted.
+    let orderId = null
 
     const reject = async (failureReason, { statusCode = 403, message, tokenId = null } = {}) => {
       await this.repository.logScanAttempt({
-        ...logContext, tokenId, result: 'REJECTED', failureReason,
+        orderId, riderId, deviceInfo, ipAddress: ip, tokenId, result: 'REJECTED', failureReason,
       })
       this._logDeliveryAction('verify-scan:rejected', { orderId, riderId, reason: failureReason })
       throw { statusCode, message: message || failureReason, code: failureReason }
     }
 
-    if (!payload || payload.orderId !== orderId) {
-      return reject('ORDER_ID_MISMATCH', { message: 'This QR code does not match the scanned order.' })
+    if (!payload || !payload.token) {
+      return reject('INVALID_PAYLOAD', { message: 'This QR code is not a valid pickup slip.' })
     }
 
     // Wire format uses short field names (v, sig) to keep the QR small;
     // qrToken.js's helpers use the descriptive names (version, signature).
+    // Neither orderId nor assignmentId is part of the signed payload (see
+    // qrToken.js#signPickupPayload) — the token lookup below is what
+    // actually identifies the order and scopes it to a specific assignment.
     const signatureValid = verifyPickupSignature({
-      orderId: payload.orderId,
-      assignmentId: payload.assignmentId,
       token: payload.token,
       version: payload.v,
       signature: payload.sig,
@@ -431,6 +437,7 @@ export class DeliveryService {
     if (!token) {
       return reject('TOKEN_NOT_FOUND', { message: 'This QR code is not recognized.' })
     }
+    orderId = token.order_id
 
     let currentStatus = token.status
     if (currentStatus === 'ACTIVE') {
@@ -474,12 +481,13 @@ export class DeliveryService {
       return reject('ALREADY_VERIFIED', { tokenId: token.id, message: 'This order has already been scanned and is ready for pickup confirmation.' })
     }
 
-    await this.repository.logScanAttempt({ ...logContext, tokenId: token.id, result: 'SUCCESS' })
+    await this.repository.logScanAttempt({ orderId, riderId, deviceInfo, ipAddress: ip, tokenId: token.id, result: 'SUCCESS' })
     this._logDeliveryAction('verify-scan:success', { orderId, riderId, assignmentId: assignment.id })
 
     const checklist = await this.repository.getPickupChecklist(orderId)
     const address = checklist.order?.delivery_address || {}
     return {
+      orderId,
       orderNumber: checklist.order?.order_number ?? null,
       customerName: checklist.order?.customer_name ?? null,
       customerPhone: checklist.order?.customer_phone ?? null,

@@ -134,14 +134,12 @@ export class DeliveryController {
   }
 
   /**
-   * POST /orders/:id/verify-scan — Verify a scanned invoice QR pickup code
+   * POST /pickup-tokens/verify — Verify a scanned invoice QR pickup code
    */
   async verifyScan(request, reply) {
-    const { id } = request.params
     const { deviceInfo, ...payload } = request.body
-    const result = await this.service.verifyScan(request.user.id, id, payload, {
+    const result = await this.service.verifyScan(request.user.id, payload, {
       ip: request.ip,
-      userAgent: request.headers['user-agent'],
       deviceInfo,
     })
     return reply.code(200).send(success(result, 'QR verified'))

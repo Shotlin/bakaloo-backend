@@ -93,8 +93,11 @@ export default async function deliveryRoutes(fastify) {
     schema: cancelDeliverySchema,
   }, controller.cancelDelivery.bind(controller))
 
-  // POST /orders/:id/verify-scan — Verify a scanned invoice QR pickup code
-  fastify.post('/orders/:id/verify-scan', {
+  // POST /pickup-tokens/verify — Verify a scanned invoice QR pickup code.
+  // No order id in the path: the QR itself carries no order/assignment
+  // reference (see qrToken.js) — the token value alone identifies which
+  // order/assignment it belongs to via the order_pickup_tokens row.
+  fastify.post('/pickup-tokens/verify', {
     schema: verifyScanSchema,
   }, controller.verifyScan.bind(controller))
 

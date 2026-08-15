@@ -322,33 +322,46 @@ function drawTotals(doc, order) {
 }
 
 /**
- * Order ID, items, customer, full delivery address + coordinates, and
- * assigned rider — a minimal signed reference only. Deliberately does NOT
- * embed customer name/phone/address/items: that descriptive data is loaded
- * from the backend only after a rider authenticates AND this QR verifies
- * (see delivery.service.js#verifyScan), not baked into a QR that ends up
- * printed on a physical slip anyone could photograph. `order.pickup_token`
- * is attached by the caller (orders.service.js, both admin and customer)
- * from the order's current ACTIVE order_pickup_tokens row — absent when
- * no rider is assigned yet, or once the token's been scanned/revoked/
- * expired, in which case no QR is drawn at all (see drawQRCode).
+ * A minimal signed reference only — deliberately does NOT embed customer
+ * name/phone/address/items, or even the order id: that descriptive data
+ * (including which order this is) is loaded from the backend only after a
+ * rider authenticates AND this QR verifies (see
+ * delivery.service.js#verifyScan), which looks the token up by value and
+ * reads order_id/delivery_assignment_id straight off the DB row — nothing
+ * about which order or assignment this token belongs to is trusted from
+ * the QR itself. `order.pickup_token` is attached by the caller
+ * (orders.service.js, both admin and customer) from the order's current
+ * ACTIVE order_pickup_tokens row — absent when no rider is assigned yet,
+ * or once the token's been scanned/revoked/expired, in which case no QR
+ * is drawn at all (see drawQRCode).
+ *
+ * Compact dot-delimited wire format (`version.token.sig`) instead of
+ * JSON or a payload embedding the order id: every character here shows
+ * up as printed ink, and this keeps the QR small enough to stay at the
+ * lowest practical QR version (big, blocky modules), which is what
+ * actually makes it print and scan reliably on ordinary printers. Neither
+ * field can contain '.', so a plain split is unambiguous.
  */
 function buildQrPayload(order) {
   const pt = order.pickup_token
-  if (!pt || !pt.token || !pt.assignmentId) return null
+  if (!pt || !pt.token) return null
 
-  const orderId = order.id
-  const assignmentId = pt.assignmentId
   const version = pt.version || QR_TOKEN_VERSION
-  const sig = signPickupPayload({ orderId, assignmentId, token: pt.token, version })
+  const sig = signPickupPayload({ token: pt.token, version })
 
-  return JSON.stringify({ orderId, assignmentId, token: pt.token, v: version, sig })
+  return `${version}.${pt.token}.${sig}`
 }
 
 async function generateQrCodeBuffer(order) {
   const payload = buildQrPayload(order)
   if (!payload) return null
-  return QRCode.toBuffer(payload, { width: 120, margin: 1, errorCorrectionLevel: 'M' })
+  // High raster resolution (source bitmap, downscaled by PDFKit to the
+  // printed size) keeps module edges crisp instead of blurry when
+  // shrunk. 'H' error correction (~30% recovery) gives real printers
+  // headroom for ink smudging, thermal fade, and creases — affordable
+  // now that the payload above is short enough to stay at a low QR
+  // version even at the highest correction tier.
+  return QRCode.toBuffer(payload, { width: 480, margin: 3, errorCorrectionLevel: 'H' })
 }
 
 /**
@@ -360,7 +373,10 @@ async function generateQrCodeBuffer(order) {
  */
 function drawQRCode(doc, qrBuffer) {
   if (!qrBuffer) return
-  const qrSize = 90
+  // Printed footprint, not raster resolution (see generateQrCodeBuffer) —
+  // bigger physical modules on the receipt itself, on top of the fewer
+  // modules the shorter payload already produces.
+  const qrSize = 130
   const x = PAGE_LEFT + (PAGE_WIDTH - qrSize) / 2
   doc.moveDown(0.5)
   const y = doc.y

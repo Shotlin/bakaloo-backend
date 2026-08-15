@@ -29,11 +29,13 @@ const RAW_TOKEN = 'raw-token-value'
 const RIDER_ID = 'rider-1'
 const OTHER_RIDER_ID = 'rider-2'
 
+// The QR itself carries no order/assignment id (see qrToken.js) — only
+// {token, version, signature}. Which order it belongs to is discovered by
+// looking the token up against order_pickup_tokens.
 function makePayload(overrides = {}) {
-  const base = { orderId: ORDER_ID, assignmentId: ASSIGNMENT_ID, token: RAW_TOKEN, v: QR_TOKEN_VERSION }
+  const base = { token: RAW_TOKEN, v: QR_TOKEN_VERSION }
   const withOverrides = { ...base, ...overrides }
   const sig = overrides.sig ?? signPickupPayload({
-    orderId: withOverrides.orderId, assignmentId: withOverrides.assignmentId,
     token: withOverrides.token, version: withOverrides.v,
   })
   return { ...withOverrides, sig }
@@ -77,12 +79,13 @@ function makeService() {
 }
 
 describe('DeliveryService.verifyScan', () => {
-  it('accepts a valid scan, claims the token, and returns a price-free checklist', async () => {
+  it('accepts a valid scan, claims the token, and returns a price-free checklist with the resolved order id', async () => {
     const service = makeService()
-    const result = await service.verifyScan(RIDER_ID, ORDER_ID, makePayload(), { ip: '1.2.3.4' })
+    const result = await service.verifyScan(RIDER_ID, makePayload(), { ip: '1.2.3.4' })
 
     expect(repo.claimPickupTokenAsVerified).toHaveBeenCalledWith(TOKEN_ID, RIDER_ID)
-    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'SUCCESS', tokenId: TOKEN_ID }))
+    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'SUCCESS', tokenId: TOKEN_ID, orderId: ORDER_ID }))
+    expect(result.orderId).toBe(ORDER_ID)
     expect(result.orderNumber).toBe('ORD-1')
     expect(result.items).toHaveLength(1)
     expect(result.items[0]).toEqual({ name: 'Milk', quantity: 2, unit: 'L', image: 'http://img', variant: '1 L' })
@@ -94,22 +97,33 @@ describe('DeliveryService.verifyScan', () => {
     }
   })
 
+  it('rejects a payload missing a token before any DB lookup', async () => {
+    const service = makeService()
+
+    await expect(service.verifyScan(RIDER_ID, { v: QR_TOKEN_VERSION, sig: 'x' })).rejects.toMatchObject({
+      code: 'INVALID_PAYLOAD',
+    })
+    expect(repo.findPickupTokenByValue).not.toHaveBeenCalled()
+  })
+
   it('rejects a tampered signature before any DB lookup', async () => {
     const service = makeService()
     const badPayload = makePayload({ sig: 'not-a-real-signature' })
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, badPayload)).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, badPayload)).rejects.toMatchObject({
       code: 'INVALID_SIGNATURE',
     })
     expect(repo.findPickupTokenByValue).not.toHaveBeenCalled()
-    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'REJECTED', failureReason: 'INVALID_SIGNATURE' }))
+    // orderId is never learned for a rejection this early — the QR itself
+    // carries no order reference, only the token does.
+    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'REJECTED', failureReason: 'INVALID_SIGNATURE', orderId: null }))
   })
 
   it('rejects and flips status when the token is past its expiry', async () => {
     repo.expireTokenIfPast.mockResolvedValue(true)
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'TOKEN_EXPIRED',
     })
     expect(repo.expireTokenIfPast).toHaveBeenCalledWith(TOKEN_ID)
@@ -120,18 +134,20 @@ describe('DeliveryService.verifyScan', () => {
     repo.getAssignmentById.mockResolvedValue(makeAssignmentRow({ rider_id: OTHER_RIDER_ID }))
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'WRONG_RIDER',
       message: 'This order is not assigned to your rider account.',
     })
-    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'REJECTED', failureReason: 'WRONG_RIDER' }))
+    // Once the token is found, the resolved orderId is known and logged
+    // even on a subsequent rejection.
+    expect(repo.logScanAttempt).toHaveBeenCalledWith(expect.objectContaining({ result: 'REJECTED', failureReason: 'WRONG_RIDER', orderId: ORDER_ID }))
   })
 
   it('rejects when no assignment exists for this token at all', async () => {
     repo.getAssignmentById.mockResolvedValue(null)
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'WRONG_RIDER',
     })
   })
@@ -140,7 +156,7 @@ describe('DeliveryService.verifyScan', () => {
     repo.claimPickupTokenAsVerified.mockResolvedValue(false)
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'ALREADY_VERIFIED',
     })
   })
@@ -149,7 +165,7 @@ describe('DeliveryService.verifyScan', () => {
     repo.findPickupTokenByValue.mockResolvedValue(makeTokenRow({ status: 'REVOKED' }))
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'TOKEN_REVOKED',
     })
   })
@@ -158,7 +174,7 @@ describe('DeliveryService.verifyScan', () => {
     repo.findPickupTokenByValue.mockResolvedValue(makeTokenRow({ status: 'CONSUMED' }))
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'ALREADY_PICKED_UP',
     })
   })
@@ -167,38 +183,28 @@ describe('DeliveryService.verifyScan', () => {
     repo.getOrderAssignmentSnapshot.mockResolvedValue({ order_status: 'CANCELLED' })
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'ORDER_ALREADY_CANCELLED',
     })
-  })
-
-  it('rejects when the QR payload references a different order than the URL', async () => {
-    const service = makeService()
-    const payload = makePayload({ orderId: 'a-different-order' })
-
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, payload)).rejects.toMatchObject({
-      code: 'ORDER_ID_MISMATCH',
-    })
-    expect(repo.findPickupTokenByValue).not.toHaveBeenCalled()
   })
 
   it('rejects an unrecognized token value', async () => {
     repo.findPickupTokenByValue.mockResolvedValue(null)
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toMatchObject({
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toMatchObject({
       code: 'TOKEN_NOT_FOUND',
     })
   })
 
-  it('logs every rejection to qr_scan_logs with rider/order context even on failure', async () => {
+  it('logs every rejection to qr_scan_logs with rider context even on failure', async () => {
     repo.findPickupTokenByValue.mockResolvedValue(null)
     const service = makeService()
 
-    await expect(service.verifyScan(RIDER_ID, ORDER_ID, makePayload())).rejects.toBeTruthy()
+    await expect(service.verifyScan(RIDER_ID, makePayload())).rejects.toBeTruthy()
 
     expect(repo.logScanAttempt).toHaveBeenCalledWith(
-      expect.objectContaining({ orderId: ORDER_ID, riderId: RIDER_ID, result: 'REJECTED' })
+      expect.objectContaining({ riderId: RIDER_ID, result: 'REJECTED' })
     )
   })
 })

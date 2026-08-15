@@ -90,19 +90,10 @@ export const cancelDeliverySchema = {
 export const verifyScanSchema = {
   tags: ['Delivery'],
   summary: 'Verify a scanned invoice QR pickup code',
-  params: {
-    type: 'object',
-    required: ['id'],
-    properties: {
-      id: { type: 'string', format: 'uuid' },
-    },
-  },
   body: {
     type: 'object',
-    required: ['orderId', 'assignmentId', 'token', 'v', 'sig'],
+    required: ['token', 'v', 'sig'],
     properties: {
-      orderId: { type: 'string' },
-      assignmentId: { type: 'string' },
       token: { type: 'string' },
       v: { type: 'integer' },
       sig: { type: 'string' },
