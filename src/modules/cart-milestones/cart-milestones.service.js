@@ -149,7 +149,7 @@ export class CartMilestonesService {
         ? {
             ...nextMilestone,
             amountToUnlock: Math.max(0, Math.round((nextMilestone.minCartAmount - nextMilestone.scopedSubtotal) * 100) / 100),
-            message: this._renderMessage(nextMilestone, nextMilestone.scopedSubtotal),
+            message: await this._renderNextMessage(nextMilestone),
           }
         : null,
     }
@@ -161,6 +161,38 @@ export class CartMilestonesService {
     return template
       .replace('{amount}', String(amountToUnlock))
       .replace('{name}', milestone.name)
+  }
+
+  /**
+   * The "next milestone" teaser message — same {amount}/{name} template
+   * substitution as _renderMessage, but for a scoped milestone (103_cart_
+   * milestone_scope.sql) it also names the actual category/bundle/products
+   * that count, mirroring FirstTimeOffersService#describeUpcoming.
+   *
+   * Reported bug: the plain "Add ₹30 more to unlock FREE DELIVERY" text
+   * (admin's default template, unaware of scope) reads as a promise that
+   * ANY ₹30 unlocks it — a customer who then added ₹30 of a category
+   * outside the milestone's scope (e.g. dairy, when the milestone is
+   * scoped to vegetables) saw the amount never move and understandably
+   * read that as the feature being broken, when the underlying gating was
+   * actually correct. Naming the required category here — entirely
+   * backend-rendered text the app already displays verbatim — fixes the
+   * confusing copy without needing a mobile app release.
+   */
+  async _renderNextMessage(milestone) {
+    const base = this._renderMessage(milestone, milestone.scopedSubtotal)
+    if (!milestone.hasScope) return base
+
+    const [categoryNames, productNames] = await Promise.all([
+      this.repo.getCategoryNames(milestone.applicableCategoryIds || []),
+      this.repo.getProductNames(milestone.applicableProductIds || []),
+    ])
+    const names = [...categoryNames, ...productNames]
+    if (names.length === 0) return base
+
+    const shown = names.slice(0, 3).join(', ')
+    const label = names.length > 3 ? `${shown} & more` : shown
+    return `${base} — only ${label} count toward this`
   }
 
   /**

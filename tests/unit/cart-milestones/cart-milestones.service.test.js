@@ -41,6 +41,8 @@ function makeRepoMock(overrides = {}) {
     getUserUsageCount: vi.fn().mockResolvedValue(0),
     recordUsage: vi.fn().mockResolvedValue(undefined),
     resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()),
+    getCategoryNames: vi.fn().mockResolvedValue([]),
+    getProductNames: vi.fn().mockResolvedValue([]),
     ...overrides,
   }
 }
@@ -361,5 +363,70 @@ describe('CartMilestonesService — category/product scope (103_cart_milestone_s
 
     expect(tiers[0].scopedSubtotal).toBeUndefined()
     expect(repo.resolveMatchingProductIds).not.toHaveBeenCalled()
+  })
+})
+
+describe('CartMilestonesService.getProgress — scoped "next" message names the required category (reported bug: generic "Add ₹X more" read as broken when unrelated items didn\'t move the gap)', () => {
+  it('appends the resolved category names to the next-tier message for a scoped milestone', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-veg', name: 'FREE DELIVERY', minCartAmount: 30, applicableCategoryIds: ['cat-veg'], messageBefore: null }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()), // nothing veg in the cart
+      getCategoryNames: vi.fn().mockResolvedValue(['Fresh Vegetables']),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.next.message).toBe('Add ₹30 more to unlock FREE DELIVERY — only Fresh Vegetables count toward this')
+  })
+
+  it('the shown amount never moves for out-of-scope items — matches the reported "adding ₹20/30/40 does nothing" behavior (by design)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-veg', minCartAmount: 30, applicableCategoryIds: ['cat-veg'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()), // cart has dairy only, never matches
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const smallerDairyCart = [{ productId: PROD_MILK, quantity: 1, effectivePrice: 20, lineTotal: 20 }]
+    const biggerDairyCart = [{ productId: PROD_MILK, quantity: 3, effectivePrice: 20, lineTotal: 60 }]
+
+    const progressSmall = await service.getProgress(USER_ID, 20, smallerDairyCart)
+    const progressBig = await service.getProgress(USER_ID, 60, biggerDairyCart)
+
+    // Adding ₹40 more of dairy (20 -> 60) must not budge the gap — only
+    // vegetables count, and there are none in either cart.
+    expect(progressSmall.next.amountToUnlock).toBe(30)
+    expect(progressBig.next.amountToUnlock).toBe(30)
+  })
+
+  it('falls back to the plain message when the scoped category can no longer be resolved (e.g. deleted)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-veg', name: 'FREE DELIVERY', minCartAmount: 30, applicableCategoryIds: ['cat-deleted'], messageBefore: null }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()),
+      getCategoryNames: vi.fn().mockResolvedValue([]),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.next.message).toBe('Add ₹30 more to unlock FREE DELIVERY')
+  })
+
+  it('an unscoped milestone never calls getCategoryNames/getProductNames (unaffected default case)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ id: 'm-1', minCartAmount: 300 })]),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(repo.getCategoryNames).not.toHaveBeenCalled()
+    expect(repo.getProductNames).not.toHaveBeenCalled()
   })
 })
