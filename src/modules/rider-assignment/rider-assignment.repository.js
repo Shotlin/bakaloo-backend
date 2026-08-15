@@ -32,6 +32,24 @@ export class RiderAssignmentRepository {
     return rows
   }
 
+  /**
+   * The rider an admin picked the last time this exact customer ordered
+   * to this exact saved address, if any — `customer_address_rider_preferences`,
+   * kept up to date on every manual (re)assign in orders.service.js.
+   * Independent of area segments (an admin-configured zone→rider map);
+   * this is per-address history, auto-assigned the same way — respects
+   * capacity, ignores online status — so a returning customer's usual
+   * rider doesn't need an admin to click Assign every single time.
+   */
+  async findStickyAddressPreference(userId, addressId) {
+    const { rows } = await query(
+      `SELECT rider_id FROM customer_address_rider_preferences
+       WHERE user_id = $1 AND address_id = $2`,
+      [userId, addressId]
+    )
+    return rows[0]?.rider_id ?? null
+  }
+
   /** Global default capacity (app_settings.rider_max_active_orders), falling back to 4 if unseeded. */
   async getGlobalDefaultCapacity() {
     const { rows } = await query(

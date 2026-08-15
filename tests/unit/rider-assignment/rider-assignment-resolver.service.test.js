@@ -71,6 +71,7 @@ beforeEach(() => {
   finalizeMock = vi.fn(async ({ riderId, method }) => ({ success: true, riderId, method, assignmentId: 'a1' }))
   mockAssignmentRepo = {
     findMatchingSegments: vi.fn(async () => []),
+    findStickyAddressPreference: vi.fn(async () => null),
     getGlobalDefaultCapacity: vi.fn(async () => 4),
     getRiderCapacityStatus: vi.fn(async () => ({ capacity: 4, active_count: 0 })),
     getEligibleAutoCandidates: vi.fn(async () => []),
@@ -159,6 +160,60 @@ describe('RiderAssignmentResolverService.resolveAndFinalize', () => {
     expect(mockAssignmentRepo.logDecision).toHaveBeenCalledWith(
       expect.objectContaining({ method: 'AREA_SEGMENT', reason: expect.stringContaining('capacity') })
     )
+  })
+
+  it('tier 2.5: auto-assigns the sticky-address rider with no admin click needed, when no segment matches', async () => {
+    mockAssignmentRepo.findStickyAddressPreference.mockResolvedValue('rider-sticky')
+    const resolver = new RiderAssignmentResolverService(makeFastify())
+
+    const result = await resolver.resolveAndFinalize(ORDER_ID, {})
+
+    expect(result.success).toBe(true)
+    expect(mockAssignmentRepo.findStickyAddressPreference).toHaveBeenCalledWith(USER_ID, ADDRESS_ID)
+    expect(finalizeMock).toHaveBeenCalledWith(
+      ORDER_ID,
+      expect.objectContaining({ riderId: 'rider-sticky', method: 'AUTO', reason: expect.stringContaining('Sticky address preference') })
+    )
+  })
+
+  it('tier 2 beats tier 2.5: an area-segment match wins over a sticky-address preference', async () => {
+    mockAssignmentRepo.findMatchingSegments.mockResolvedValue([
+      { id: 'seg-1', name: 'Zone A', rider_id: 'rider-segment', priority: 5, created_at: new Date() },
+    ])
+    mockAssignmentRepo.findStickyAddressPreference.mockResolvedValue('rider-sticky')
+    const resolver = new RiderAssignmentResolverService(makeFastify())
+
+    await resolver.resolveAndFinalize(ORDER_ID, {})
+
+    expect(finalizeMock).toHaveBeenCalledWith(ORDER_ID, expect.objectContaining({ riderId: 'rider-segment', method: 'AREA_SEGMENT' }))
+    expect(mockAssignmentRepo.findStickyAddressPreference).not.toHaveBeenCalled()
+  })
+
+  it('tier 2.5 falls through to tier 3 when the sticky rider is at capacity, and logs it', async () => {
+    mockAssignmentRepo.findStickyAddressPreference.mockResolvedValue('rider-sticky')
+    mockAssignmentRepo.getRiderCapacityStatus.mockResolvedValue({ capacity: 4, active_count: 4 })
+    mockAssignmentRepo.getEligibleAutoCandidates.mockResolvedValue([
+      { rider_id: 'rider-auto', current_lat: '12.9', current_lng: '77.6', last_assigned_at: null, active_count: 0, capacity: 4 },
+    ])
+    const resolver = new RiderAssignmentResolverService(makeFastify())
+
+    await resolver.resolveAndFinalize(ORDER_ID, {})
+
+    expect(finalizeMock).toHaveBeenCalledWith(ORDER_ID, expect.objectContaining({ riderId: 'rider-auto', method: 'AUTO' }))
+    expect(mockAssignmentRepo.logDecision).toHaveBeenCalledWith(
+      expect.objectContaining({ riderId: 'rider-sticky', reason: expect.stringContaining('capacity') })
+    )
+  })
+
+  it('tier 2.5 is skipped (falls to tier 3) when there is no sticky preference for this address', async () => {
+    mockAssignmentRepo.getEligibleAutoCandidates.mockResolvedValue([
+      { rider_id: 'rider-auto', current_lat: '12.9', current_lng: '77.6', last_assigned_at: null, active_count: 0, capacity: 4 },
+    ])
+    const resolver = new RiderAssignmentResolverService(makeFastify())
+
+    await resolver.resolveAndFinalize(ORDER_ID, {})
+
+    expect(finalizeMock).toHaveBeenCalledWith(ORDER_ID, expect.objectContaining({ riderId: 'rider-auto', method: 'AUTO' }))
   })
 
   it('tier 3: picks the rider with the lowest workload first', async () => {

@@ -55,6 +55,16 @@ export class RiderAssignmentResolverService {
     if (addressId) {
       const segmentResult = await this._tryAreaSegment(orderId, order, addressId, trigger)
       if (segmentResult) return segmentResult
+
+      // Tier 2.5 — sticky-address rider preference: this exact customer
+      // has ordered to this exact saved address before, and an admin
+      // picked a rider for it then (customer_address_rider_preferences,
+      // updated on every manual (re)assign). Auto-assigns the same rider
+      // again — no separate admin click needed — as long as they're
+      // still capacity-eligible; falls through to general auto-assign
+      // otherwise (at capacity, or no sticky preference at all).
+      const stickyResult = await this._tryStickyAddressPreference(orderId, order, addressId, trigger)
+      if (stickyResult) return stickyResult
     }
 
     // Tier 3 — general auto-assignment.
@@ -96,6 +106,36 @@ export class RiderAssignmentResolverService {
       riderId: chosen.rider_id,
       method: 'AREA_SEGMENT',
       reason: `${reason} — skipped, rider at capacity (${capacity.active_count}/${capacity.capacity}); falling back to general auto-assignment`,
+      triggeredBy: 'SYSTEM',
+    })
+    return null
+  }
+
+  async _tryStickyAddressPreference(orderId, order, addressId, trigger) {
+    const riderId = await this.repo.findStickyAddressPreference(order.user_id, addressId)
+    if (!riderId) return null
+
+    const globalCapacity = await this.repo.getGlobalDefaultCapacity()
+    const capacity = await this.repo.getRiderCapacityStatus(riderId, globalCapacity)
+
+    // Same "respects capacity, ignores online status" rule as area
+    // segments — a returning-customer match is a weaker signal than an
+    // explicit admin-configured zone, but still automatic, not a mere
+    // suggestion the admin has to click through.
+    if (!capacity || capacity.active_count < capacity.capacity) {
+      return this.finalizeService.finalize(orderId, {
+        riderId,
+        method: 'AUTO',
+        reason: `Sticky address preference: same rider used for this customer's saved address before (${trigger})`,
+        triggeredBy: 'SYSTEM',
+      })
+    }
+
+    await this.repo.logDecision({
+      orderId,
+      riderId,
+      method: 'AUTO',
+      reason: `Sticky address preference skipped — rider at capacity (${capacity.active_count}/${capacity.capacity}); falling back to general auto-assignment`,
       triggeredBy: 'SYSTEM',
     })
     return null
