@@ -18,6 +18,8 @@ const milestoneProperties = {
   cashbackCreditTrigger: { type: 'string' },
   usageLimitPerUser:     { type: ['integer', 'null'] },
   grantsFreeDelivery:    { type: 'boolean' },
+  applicableCategoryIds: { type: ['array', 'null'], items: { type: 'string' } },
+  applicableProductIds:  { type: ['array', 'null'], items: { type: 'string' } },
   createdAt:             { type: 'string' },
 }
 
@@ -79,6 +81,8 @@ export const createMilestoneSchema = {
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'], default: 'ORDER_DELIVERED' },
       usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
       grantsFreeDelivery:    { type: 'boolean', default: false },
+      applicableCategoryIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+      applicableProductIds:  { type: 'array', items: { type: 'string', format: 'uuid' } },
     },
   },
   response: { 201: milestoneResponse },
@@ -113,6 +117,8 @@ export const updateMilestoneSchema = {
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'] },
       usageLimitPerUser:     { type: ['integer', 'null'], minimum: 1 },
       grantsFreeDelivery:    { type: 'boolean' },
+      applicableCategoryIds: { type: ['array', 'null'], items: { type: 'string', format: 'uuid' } },
+      applicableProductIds:  { type: ['array', 'null'], items: { type: 'string', format: 'uuid' } },
     },
   },
   response: { 200: milestoneResponse },

@@ -5,6 +5,7 @@ const COLUMNS = `
   unlock_coupon_id, message_before, message_after, icon_url, is_active,
   applicable_user_type, applicable_segment_id, stackable_with_coupon,
   priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
+  applicable_category_ids, applicable_product_ids,
   created_by, created_at, updated_at
 `
 
@@ -58,8 +59,9 @@ export class CartMilestonesRepository {
          unlock_coupon_id, message_before, message_after, icon_url,
          applicable_user_type, applicable_segment_id, stackable_with_coupon,
          priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
+         applicable_category_ids, applicable_product_ids,
          created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
        RETURNING ${COLUMNS}`,
       [
         data.name,
@@ -79,6 +81,8 @@ export class CartMilestonesRepository {
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
         data.usageLimitPerUser ?? null,
         !!data.grantsFreeDelivery,
+        data.applicableCategoryIds?.length ? data.applicableCategoryIds : null,
+        data.applicableProductIds?.length ? data.applicableProductIds : null,
         data.createdBy ?? null,
       ]
     )
@@ -108,11 +112,14 @@ export class CartMilestonesRepository {
       cashbackCreditTrigger: 'cashback_credit_trigger',
       usageLimitPerUser: 'usage_limit_per_user',
       grantsFreeDelivery: 'grants_free_delivery',
+      applicableCategoryIds: 'applicable_category_ids',
+      applicableProductIds: 'applicable_product_ids',
     }
     for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
       if (data[jsKey] !== undefined) {
+        const isArrayScopeField = jsKey === 'applicableCategoryIds' || jsKey === 'applicableProductIds'
         fields.push(`${dbKey} = $${idx++}`)
-        params.push(data[jsKey])
+        params.push(isArrayScopeField && !data[jsKey]?.length ? null : data[jsKey])
       }
     }
     if (fields.length === 0) return this.findById(id)
@@ -149,6 +156,87 @@ export class CartMilestonesRepository {
     )
   }
 
+  /**
+   * Of `cartProductIds`, which ones fall inside a milestone's
+   * applicable_category_ids/applicable_product_ids scope. Identical logic
+   * to CouponsRepository#resolveMatchingProductIds and
+   * FirstTimeOffersRepository#resolveMatchingProductIds — a category id can
+   * be an ordinary/sub-category (products.category_id) or a BUNDLE (matched
+   * via category_products). No scope at all means "matches everything", the
+   * safe default that keeps existing unscoped milestones unchanged.
+   *
+   * @param {string[]} cartProductIds
+   * @param {{applicableCategoryIds?: string[]|null, applicableProductIds?: string[]|null}} scope
+   * @returns {Promise<Set<string>>} matching product ids
+   */
+  async resolveMatchingProductIds(cartProductIds, { applicableCategoryIds, applicableProductIds } = {}) {
+    const hasProductScope = Array.isArray(applicableProductIds) && applicableProductIds.length > 0
+    const hasCategoryScope = Array.isArray(applicableCategoryIds) && applicableCategoryIds.length > 0
+
+    if (!hasProductScope && !hasCategoryScope) {
+      return new Set(cartProductIds)
+    }
+    if (cartProductIds.length === 0) {
+      return new Set()
+    }
+
+    const { rows } = await query(
+      `SELECT DISTINCT p.id AS product_id
+         FROM products p
+        WHERE p.id = ANY($1::uuid[])
+          AND (
+               ($2::uuid[] IS NOT NULL AND p.id = ANY($2::uuid[]))
+            OR ($3::uuid[] IS NOT NULL AND (
+                     p.category_id = ANY($3::uuid[])
+                  OR EXISTS (
+                       SELECT 1 FROM category_products cp
+                       WHERE cp.product_id = p.id AND cp.category_id = ANY($3::uuid[])
+                     )
+                ))
+              )`,
+      [
+        cartProductIds,
+        hasProductScope ? applicableProductIds : null,
+        hasCategoryScope ? applicableCategoryIds : null,
+      ]
+    )
+    return new Set(rows.map((r) => r.product_id))
+  }
+
+  /**
+   * Human-readable names for a set of category ids — lets an "add X to
+   * unlock this milestone" teaser name the actual category/bundle instead
+   * of a generic "specific products". Identical to CouponsRepository's and
+   * FirstTimeOffersRepository's version.
+   *
+   * @param {string[]} categoryIds
+   * @returns {Promise<string[]>}
+   */
+  async getCategoryNames(categoryIds) {
+    if (!Array.isArray(categoryIds) || categoryIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM categories WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [categoryIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
+  /**
+   * Human-readable names for a set of product ids — same purpose as
+   * getCategoryNames(), for milestones scoped to specific products.
+   *
+   * @param {string[]} productIds
+   * @returns {Promise<string[]>}
+   */
+  async getProductNames(productIds) {
+    if (!Array.isArray(productIds) || productIds.length === 0) return []
+    const { rows } = await query(
+      `SELECT name FROM products WHERE id = ANY($1::uuid[]) ORDER BY name ASC`,
+      [productIds]
+    )
+    return rows.map((r) => r.name)
+  }
+
   _format(row) {
     return {
       id: row.id,
@@ -170,6 +258,8 @@ export class CartMilestonesRepository {
       cashbackCreditTrigger: row.cashback_credit_trigger,
       usageLimitPerUser: row.usage_limit_per_user,
       grantsFreeDelivery: row.grants_free_delivery,
+      applicableCategoryIds: row.applicable_category_ids,
+      applicableProductIds: row.applicable_product_ids,
       createdBy: row.created_by,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

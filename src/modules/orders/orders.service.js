@@ -429,7 +429,13 @@ export class OrdersService {
     let cartMilestone = null
     let cartMilestoneReward = null
     if (groupedByShop.size === 1) {
-      const milestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotal)
+      // Resolved with this shop's actual cart lines (mirrors the coupon and
+      // first-time-offer resolution above) so a category/product-scoped
+      // milestone (103_cart_milestone_scope.sql) is checked against the
+      // matching slice of the cart, not just the flat subtotal number.
+      const milestone = await this.cartMilestonesService.resolveForCheckout(
+        userId, subtotal, groupedByShop.get(Array.from(groupedByShop.keys())[0])
+      )
       if (milestone && !(appliedCouponCode && !milestone.stackableWithCoupon)) {
         const reward = this.cartMilestonesService.computeReward(milestone, subtotal)
         const discountSlotTaken = !!(appliedCouponCode || firstTimeReward?.discount)

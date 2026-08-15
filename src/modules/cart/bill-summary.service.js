@@ -153,13 +153,22 @@ export class BillSummaryService {
     // delivery above ₹50") never waived the fee shown here — only
     // orders.service.js applied it, and only at the very end. Best-effort:
     // a milestone lookup failure must never break the cart summary itself.
+    // A cart-milestone scope (applicable_category_ids/applicable_product_ids,
+    // 103_cart_milestone_scope.sql) is evaluated against the actual cart
+    // lines, not just the aggregate total — same as coupons/first-time-offers.
+    // Unlike those two, cart milestones aren't restricted to single-shop
+    // carts elsewhere in this method (the aggregate itemTotalDiscounted
+    // already spans every shop), so the scoped slice is pulled from every
+    // shop group's items too, keeping that same multi-shop behavior for
+    // scoped milestones instead of silently only ever matching shop #1.
+    const allCartItems = shopGroups.flatMap((g) => g.items || [])
     let cartMilestoneProgress = { unlocked: null, next: null }
     let eligibleMilestoneTiers = []
     let cartMilestoneFreeDelivery = false
     try {
       const [progress, eligibleTiers] = await Promise.all([
-        this.cartMilestonesService.getProgress(userId, itemTotalDiscounted),
-        this.cartMilestonesService.getEligibleTiers(userId),
+        this.cartMilestonesService.getProgress(userId, itemTotalDiscounted, allCartItems),
+        this.cartMilestonesService.getEligibleTiers(userId, itemTotalDiscounted, allCartItems),
       ])
       cartMilestoneProgress = progress
       eligibleMilestoneTiers = eligibleTiers
@@ -629,6 +638,7 @@ export class BillSummaryService {
         id: 'free-delivery',
         label: 'Free delivery',
         minAmount: this._round(freeDeliveryThreshold),
+        amount: cartTotal,
       })
     }
     for (const tier of tiers) {
@@ -636,6 +646,13 @@ export class BillSummaryService {
         id: tier.id,
         label: tier.name,
         minAmount: this._round(tier.minCartAmount),
+        // A category/product-scoped tier (103_cart_milestone_scope.sql)
+        // fills based on only the matching slice of the cart — see
+        // CartMilestonesService#_scopedSubtotal, already resolved onto each
+        // tier by getEligibleTiers. Falls back to the plain cart total for
+        // an unscoped tier, so existing unscoped milestones render exactly
+        // as before.
+        amount: tier.scopedSubtotal ?? cartTotal,
       })
     }
     checkpoints.sort((a, b) => a.minAmount - b.minAmount)
@@ -643,14 +660,20 @@ export class BillSummaryService {
     let previousAmount = 0
     return checkpoints.map((checkpoint) => {
       const span = checkpoint.minAmount - previousAmount
-      const achieved = cartTotal >= checkpoint.minAmount
+      const achieved = checkpoint.amount >= checkpoint.minAmount
       const segmentProgress = achieved
         ? 1
         : span > 0
-          ? Math.max(0, Math.min(1, (cartTotal - previousAmount) / span))
+          ? Math.max(0, Math.min(1, (checkpoint.amount - previousAmount) / span))
           : 0
       previousAmount = checkpoint.minAmount
-      return { ...checkpoint, achieved, segmentProgress: this._round(segmentProgress) }
+      return {
+        id: checkpoint.id,
+        label: checkpoint.label,
+        minAmount: checkpoint.minAmount,
+        achieved,
+        segmentProgress: this._round(segmentProgress),
+      }
     })
   }
 

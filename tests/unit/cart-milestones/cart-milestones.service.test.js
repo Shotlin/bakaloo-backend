@@ -6,6 +6,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { CartMilestonesService } from '../../../src/modules/cart-milestones/cart-milestones.service.js'
 
 const USER_ID = 'user-1'
+const PROD_MILK = 'prod-milk'
+const PROD_TOMATO = 'prod-tomato'
+
+const cartItems = [
+  { productId: PROD_MILK, quantity: 2, effectivePrice: 30, lineTotal: 60 },
+  { productId: PROD_TOMATO, quantity: 5, effectivePrice: 10, lineTotal: 50 },
+]
+// cart total = 110; dairy-only (milk) subtotal = 60
 
 function tier(overrides = {}) {
   return {
@@ -32,6 +40,7 @@ function makeRepoMock(overrides = {}) {
     hasPriorOrder: vi.fn().mockResolvedValue(false),
     getUserUsageCount: vi.fn().mockResolvedValue(0),
     recordUsage: vi.fn().mockResolvedValue(undefined),
+    resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()),
     ...overrides,
   }
 }
@@ -236,5 +245,121 @@ describe('CartMilestonesService.computeReward — grantsFreeDelivery toggle (100
     )
     expect(reward.freeDelivery).toBe(true)
     expect(reward.cashbackAmount).toBe(20)
+  })
+})
+
+describe('CartMilestonesService — category/product scope (103_cart_milestone_scope, mirroring coupons/first-time-offers)', () => {
+  it('an unscoped milestone behaves exactly as before, evaluated against the full cart total', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ id: 'm-100', minCartAmount: 100 })]),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.unlocked.id).toBe('m-100')
+    expect(repo.resolveMatchingProductIds).not.toHaveBeenCalled()
+  })
+
+  it('a scoped milestone only counts the matching slice of the cart toward its minCartAmount', async () => {
+    // Dairy-only subtotal is 60 — a 100 min cart fails even though the
+    // whole cart (110) would clear it.
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-dairy', minCartAmount: 100, applicableCategoryIds: ['cat-dairy'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set([PROD_MILK])),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.unlocked).toBeNull()
+    expect(progress.next.id).toBe('m-dairy')
+    expect(progress.next.amountToUnlock).toBe(40) // 100 - 60, not 100 - 110
+    expect(repo.resolveMatchingProductIds).toHaveBeenCalledWith(
+      [PROD_MILK, PROD_TOMATO],
+      { applicableCategoryIds: ['cat-dairy'], applicableProductIds: undefined }
+    )
+  })
+
+  it('a scoped milestone unlocks and its reward is computed against the scoped subtotal, not the full cart total', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-dairy', minCartAmount: 50, rewardType: 'CASHBACK', rewardPercent: 10, maxDiscount: null, applicableCategoryIds: ['cat-dairy'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set([PROD_MILK])),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.unlocked.id).toBe('m-dairy')
+    expect(progress.unlocked.scopedSubtotal).toBe(60)
+    expect(service.computeReward(progress.unlocked, 110)).toEqual({ cashbackAmount: 6, freeDelivery: false }) // 10% of 60, not 110
+  })
+
+  it("rejects a scoped milestone with minCartAmount 0 when nothing in the cart matches (0 >= 0 must not count as satisfied) — same guard as first-time-offers' reported bug", async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-veg', minCartAmount: 0, applicableCategoryIds: ['cat-veg'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set()), // nothing in the cart is a vegetable
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 110, cartItems)
+
+    expect(progress.unlocked).toBeNull()
+    expect(progress.next.id).toBe('m-veg')
+    expect(progress.next.amountToUnlock).toBe(0) // still needs a matching item, not more rupees
+  })
+
+  it('resolveForCheckout passes cartItems through so order placement respects the same scope', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-dairy', minCartAmount: 50, applicableCategoryIds: ['cat-dairy'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn().mockResolvedValue(new Set([PROD_MILK])),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const milestone = await service.resolveForCheckout(USER_ID, 110, cartItems)
+
+    expect(milestone.id).toBe('m-dairy')
+    expect(milestone.scopedSubtotal).toBe(60)
+  })
+
+  it('a higher-value scoped tier can win over a lower, unscoped one it would not naturally follow in ascending order', async () => {
+    // m-veg (min 200, scoped to veg — cart has none) stays unsatisfied,
+    // while m-dairy (min 300, scoped to dairy — cart has 400 worth) IS
+    // satisfied despite sitting later in the ascending min-amount order.
+    const dairyItems = [{ productId: PROD_MILK, quantity: 1, effectivePrice: 400, lineTotal: 400 }]
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-veg', minCartAmount: 200, applicableCategoryIds: ['cat-veg'] }),
+        tier({ id: 'm-dairy', minCartAmount: 300, applicableCategoryIds: ['cat-dairy'] }),
+      ]),
+      resolveMatchingProductIds: vi.fn()
+        .mockResolvedValueOnce(new Set()) // m-veg: nothing matches
+        .mockResolvedValueOnce(new Set([PROD_MILK])), // m-dairy: matches
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 400, dairyItems)
+
+    expect(progress.unlocked.id).toBe('m-dairy')
+  })
+
+  it('getEligibleTiers omits scopedSubtotal when cartTotal is not provided (plain eligibility list, unaffected default case)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([tier({ id: 'm-1', applicableCategoryIds: ['cat-dairy'] })]),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const tiers = await service.getEligibleTiers(USER_ID)
+
+    expect(tiers[0].scopedSubtotal).toBeUndefined()
+    expect(repo.resolveMatchingProductIds).not.toHaveBeenCalled()
   })
 })
