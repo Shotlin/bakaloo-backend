@@ -50,13 +50,22 @@ export class FinalizeAssignmentRepository {
    * whose status is already 'ACCEPTED' — leaving this at 'ASSIGNED' would
    * make every pickup-confirmation silently no-op for every order
    * finalized through this resolver.
+   *
+   * `deliveryOtp` is seeded here for the same reason the pickup token is
+   * minted in this same transaction (see mintToken below): the old
+   * `delivery.service.js#acceptOrder` flow used to be where the OTP was
+   * generated, but the firm-assignment model never calls it, so every
+   * order finalized through this resolver was left with a permanently
+   * NULL `delivery_otp` — invisible to the customer app, which hides its
+   * OTP card whenever the field is null, and the "Delivered" OTP-entry
+   * step then has nothing valid to check the rider's input against.
    */
-  async insertAssignment(client, orderId, riderId, earnings) {
+  async insertAssignment(client, orderId, riderId, earnings, deliveryOtp) {
     const { rows } = await client.query(
-      `INSERT INTO delivery_assignments (order_id, rider_id, status, assigned_at, accepted_at, earnings)
-       VALUES ($1, $2, 'ACCEPTED', NOW(), NOW(), $3)
+      `INSERT INTO delivery_assignments (order_id, rider_id, status, assigned_at, accepted_at, earnings, delivery_otp)
+       VALUES ($1, $2, 'ACCEPTED', NOW(), NOW(), $3, $4)
        RETURNING id, order_id, rider_id, status, assigned_at, accepted_at`,
-      [orderId, riderId, earnings]
+      [orderId, riderId, earnings, deliveryOtp]
     )
     return rows[0]
   }

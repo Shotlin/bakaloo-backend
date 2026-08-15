@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { logger } from '../../config/logger.js'
 import { sendPush } from '../../utils/pushNotification.js'
 import { generatePickupToken, QR_TOKEN_VERSION } from '../../utils/qrToken.js'
@@ -77,7 +78,11 @@ export class FinalizeAssignmentService {
         ? (Number.isFinite(configuredFee) && configuredFee > 0 ? configuredFee : DEFAULT_RIDER_EARNING)
         : 0
 
-      assignment = await this.repo.insertAssignment(client, orderId, riderId, earnings)
+      // Same 4-digit format the old acceptOrder flow used to generate —
+      // the customer reads this out to the rider at the door
+      // (delivery.repository.js#verifyDeliveryOtp).
+      const deliveryOtp = crypto.randomInt(1000, 9999).toString()
+      assignment = await this.repo.insertAssignment(client, orderId, riderId, earnings, deliveryOtp)
       await this.repo.updateOrderAssignment(client, orderId, { riderId, method, areaSegmentId })
       await this.repo.revokeActiveTokens(client, orderId, `Reassigned (${method})`)
 

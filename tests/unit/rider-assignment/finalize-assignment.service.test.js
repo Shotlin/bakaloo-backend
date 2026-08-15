@@ -92,7 +92,7 @@ describe('FinalizeAssignmentService.finalize', () => {
     expect(result.success).toBe(true)
     expect(mockRepo.cancelOpenAssignment).toHaveBeenCalledWith(mockClient, ORDER_ID, expect.stringContaining('AUTO'))
     expect(mockRepo.revokeActiveTokens).toHaveBeenCalled()
-    expect(mockRepo.insertAssignment).toHaveBeenCalledWith(mockClient, ORDER_ID, NEW_RIDER_ID, expect.any(Number))
+    expect(mockRepo.insertAssignment).toHaveBeenCalledWith(mockClient, ORDER_ID, NEW_RIDER_ID, expect.any(Number), expect.any(String))
     expect(mockRepo.mintToken).toHaveBeenCalled()
     expect(mockClient.query).toHaveBeenCalledWith('COMMIT')
 
@@ -142,7 +142,16 @@ describe('FinalizeAssignmentService.finalize', () => {
 
     await service.finalize(ORDER_ID, { riderId: NEW_RIDER_ID, method: 'AUTO' })
 
-    expect(mockRepo.insertAssignment).toHaveBeenCalledWith(mockClient, ORDER_ID, NEW_RIDER_ID, 0)
+    expect(mockRepo.insertAssignment).toHaveBeenCalledWith(mockClient, ORDER_ID, NEW_RIDER_ID, 0, expect.any(String))
+  })
+
+  it('seeds a 4-digit delivery OTP on every assignment — the firm-assignment model has no accept step where this used to be generated', async () => {
+    const service = new FinalizeAssignmentService(makeFastify())
+
+    await service.finalize(ORDER_ID, { riderId: NEW_RIDER_ID, method: 'AUTO' })
+
+    const [, , , , deliveryOtp] = mockRepo.insertAssignment.mock.calls[0]
+    expect(deliveryOtp).toMatch(/^\d{4}$/)
   })
 
   it('does not double-push when the notification slot was already claimed (dedup)', async () => {
