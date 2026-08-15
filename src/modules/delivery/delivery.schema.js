@@ -146,6 +146,11 @@ export const markDeliveredSchema = {
       otp: { type: 'string', minLength: 4, maxLength: 6 },
       proofPhotoUrl: { type: 'string', format: 'uri' },
       demoMode: { type: 'boolean' },
+      // COD payment-collection figures — only meaningful (and only
+      // validated) for Cash on Delivery orders; ignored for Wallet/Online
+      // orders, which are already paid (see delivery.service.js#markDelivered).
+      cashCollected: { type: 'number', minimum: 0 },
+      upiCollected: { type: 'number', minimum: 0 },
     },
     anyOf: [
       { required: ['otp'] },

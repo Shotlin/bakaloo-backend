@@ -27,7 +27,22 @@ describe('PaymentSettingsService', () => {
       walletEnabled: true,
       codMinOrderAmount: 99,
       codMaxOrderAmount: 2000,
+      businessUpiId: null,
     })
+  })
+
+  it('reflects an admin-configured UPI ID', async () => {
+    const { service } = makeService({ business_upi_id: 'bakaloo@upi' })
+    const config = await service.getConfig()
+
+    expect(config.businessUpiId).toBe('bakaloo@upi')
+  })
+
+  it('treats a blank/whitespace-only UPI ID as not configured', async () => {
+    const { service } = makeService({ business_upi_id: '   ' })
+    const config = await service.getConfig()
+
+    expect(config.businessUpiId).toBeNull()
   })
 
   it('reflects admin-saved values, including a disabled method', async () => {

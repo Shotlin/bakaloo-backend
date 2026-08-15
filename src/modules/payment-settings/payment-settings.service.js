@@ -6,6 +6,7 @@ const KEYS = [
   'wallet_enabled',
   'cod_min_order_amount',
   'cod_max_amount',
+  'business_upi_id',
 ]
 
 const DEFAULTS = {
@@ -14,6 +15,7 @@ const DEFAULTS = {
   walletEnabled: true,
   codMinOrderAmount: 99,
   codMaxOrderAmount: 2000,
+  businessUpiId: null,
 }
 
 /**
@@ -39,6 +41,7 @@ export class PaymentSettingsService {
       walletEnabled: this._toBoolean(raw.wallet_enabled, DEFAULTS.walletEnabled),
       codMinOrderAmount: this._toNumber(raw.cod_min_order_amount, DEFAULTS.codMinOrderAmount),
       codMaxOrderAmount: this._toNumber(raw.cod_max_amount, DEFAULTS.codMaxOrderAmount),
+      businessUpiId: this._toStringOrNull(raw.business_upi_id),
     }
   }
 
@@ -51,5 +54,12 @@ export class PaymentSettingsService {
     if (value === undefined || value === null) return fallback
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+
+  /** UPI IDs are free-form strings — trims and treats blank as "not configured". */
+  _toStringOrNull(value) {
+    if (typeof value !== 'string') return null
+    const trimmed = value.trim()
+    return trimmed ? trimmed : null
   }
 }

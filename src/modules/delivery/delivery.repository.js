@@ -136,7 +136,7 @@ export class DeliveryRepository {
   async getAssignmentByOrderAndRider(orderId, riderId) {
     const { rows } = await query(
       `SELECT da.id as assignment_id, da.*, o.order_number, o.user_id as customer_id, o.status as order_status,
-              o.shop_id,
+              o.shop_id, o.total_amount, o.payment_method,
               ru.name as rider_name, ru.phone as rider_phone,
               rp.current_lat as rider_lat, rp.current_lng as rider_lng
        FROM delivery_assignments da
@@ -528,7 +528,10 @@ export class DeliveryRepository {
     }
   }
 
-  async markDelivered(assignmentId, orderId, proofPhotoUrl, commissionEnabled = true) {
+  async markDelivered(
+    assignmentId, orderId, proofPhotoUrl, commissionEnabled = true,
+    cashCollected = null, upiCollected = null
+  ) {
     const client = await getClient()
     try {
       await client.query('BEGIN')
@@ -544,10 +547,11 @@ export class DeliveryRepository {
       let { rows: [assignment] } = await client.query(
         `UPDATE delivery_assignments
          SET status = 'DELIVERED', delivered_at = NOW(), proof_photo_url = $2,
-             delivery_otp = NULL, updated_at = NOW()
+             delivery_otp = NULL, cash_collected = $3, upi_collected = $4,
+             updated_at = NOW()
          WHERE id = $1 AND status = 'IN_TRANSIT'
          RETURNING *`,
-        [assignmentId, proofPhotoUrl || null]
+        [assignmentId, proofPhotoUrl || null, cashCollected, upiCollected]
       )
 
       if (!assignment) {

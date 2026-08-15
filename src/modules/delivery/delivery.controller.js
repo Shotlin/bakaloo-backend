@@ -169,13 +169,15 @@ export class DeliveryController {
    */
   async markDelivered(request, reply) {
     const { id } = request.params
-    const { otp, proofPhotoUrl, demoMode } = request.body || {}
+    const { otp, proofPhotoUrl, demoMode, cashCollected, upiCollected } = request.body || {}
     const result = await this.service.markDelivered(
       request.user.id,
       id,
       otp,
       proofPhotoUrl,
-      demoMode
+      demoMode,
+      cashCollected,
+      upiCollected
     )
     return reply.code(200).send(success(result, 'Order delivered'))
   }

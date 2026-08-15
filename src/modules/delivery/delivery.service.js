@@ -7,6 +7,7 @@ import { buildCustomerOrderEventNotification } from '../notifications/customer-o
 import { UploadsService } from '../uploads/uploads.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
+import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { verifyPickupSignature } from '../../utils/qrToken.js'
 import { OPEN_ASSIGNMENT_STATUSES } from './delivery.repository.js'
 
@@ -27,6 +28,7 @@ export class DeliveryService {
       : null
     this.cashbackService = new CashbackService()
     this.commissionSettingsRepo = new CommissionSettingsRepository()
+    this.paymentSettingsService = new PaymentSettingsService()
   }
 
   // ─── RIDER PROFILE ──────────────────────────────────
@@ -38,7 +40,12 @@ export class DeliveryService {
     // every earnings display without guessing — riders are salary-based
     // while this flag is off (see commission-settings.repository.js).
     const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()
-    return { ...profile, commission_enabled: commissionEnabled }
+    // The business's UPI ID, used to render the payment-collection QR at
+    // delivery time for COD orders — null when the admin hasn't configured
+    // one yet, in which case the rider app skips the QR and falls back to
+    // cash-only collection.
+    const { businessUpiId } = await this.paymentSettingsService.getConfig()
+    return { ...profile, commission_enabled: commissionEnabled, business_upi_id: businessUpiId }
   }
 
   async toggleOnline(riderId, isOnline) {
@@ -653,7 +660,10 @@ export class DeliveryService {
     return { deliveryOtp: otp }
   }
 
-  async markDelivered(riderId, orderId, otp, proofPhotoUrl, demoMode = false) {
+  async markDelivered(
+    riderId, orderId, otp, proofPhotoUrl, demoMode = false,
+    cashCollected = null, upiCollected = null
+  ) {
     const assignment = await this.repository.getAssignmentByOrderAndRider(orderId, riderId)
     if (!assignment) {
       const snapshot = await this.repository.getOrderAssignmentSnapshot(orderId, riderId)
@@ -734,6 +744,32 @@ export class DeliveryService {
       }
     }
 
+    // COD orders that went through the rider app's payment-collection step
+    // report how much the customer paid in cash vs. via the UPI QR. Only
+    // trust/store this for COD orders — Wallet/Online orders are already
+    // paid, so any collection figures on those are ignored rather than
+    // validated (a defensive no-op, not a client-facing error, since a
+    // well-behaved client never sends them for non-COD orders anyway).
+    const isCod = assignment.payment_method === 'COD'
+    let normalizedCashCollected = null
+    let normalizedUpiCollected = null
+    if (isCod && (cashCollected != null || upiCollected != null)) {
+      normalizedCashCollected = Number(cashCollected) || 0
+      normalizedUpiCollected = Number(upiCollected) || 0
+      const orderTotal = Number(assignment.total_amount) || 0
+      const collectedTotal = normalizedCashCollected + normalizedUpiCollected
+      // Small tolerance for paise-level rounding, not a strict equality —
+      // the rider is hand-entering these from what the customer actually
+      // paid.
+      if (Math.abs(collectedTotal - orderTotal) > 2) {
+        throw {
+          statusCode: 400,
+          message: `Collected amount (₹${collectedTotal.toFixed(2)}) doesn't match the order total (₹${orderTotal.toFixed(2)})`,
+          code: 'PAYMENT_AMOUNT_MISMATCH',
+        }
+      }
+    }
+
     const assignmentId = this._resolveAssignmentId(assignment)
     this._logDeliveryAction('deliver:lookup', {
       orderId,
@@ -745,7 +781,8 @@ export class DeliveryService {
 
     const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()
     const result = await this.repository.markDelivered(
-      assignmentId, orderId, cleanProof || null, commissionEnabled
+      assignmentId, orderId, cleanProof || null, commissionEnabled,
+      normalizedCashCollected, normalizedUpiCollected
     )
     if (!result) {
       const snapshot = await this.repository.getOrderAssignmentSnapshot(orderId, riderId)
