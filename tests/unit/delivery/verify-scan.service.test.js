@@ -58,6 +58,7 @@ let repo
 beforeEach(() => {
   repo = {
     findPickupTokenByValue: vi.fn(async () => makeTokenRow()),
+    findVerifiedTokenForOrderAndRider: vi.fn(async () => makeTokenRow({ status: 'VERIFIED' })),
     expireTokenIfPast: vi.fn(async () => false),
     getAssignmentById: vi.fn(async () => makeAssignmentRow()),
     getOrderAssignmentSnapshot: vi.fn(async () => ({ order_status: 'PACKED' })),
@@ -206,5 +207,43 @@ describe('DeliveryService.verifyScan', () => {
     expect(repo.logScanAttempt).toHaveBeenCalledWith(
       expect.objectContaining({ riderId: RIDER_ID, result: 'REJECTED' })
     )
+  })
+})
+
+describe('DeliveryService.getPendingChecklist', () => {
+  it('returns the checklist for an order this rider already scanned (VERIFIED, not yet consumed)', async () => {
+    const service = makeService()
+    const result = await service.getPendingChecklist(RIDER_ID, ORDER_ID)
+
+    expect(repo.findVerifiedTokenForOrderAndRider).toHaveBeenCalledWith(ORDER_ID, RIDER_ID)
+    expect(result.orderId).toBe(ORDER_ID)
+    expect(result.orderNumber).toBe('ORD-1')
+    expect(result.items).toHaveLength(1)
+
+    // Same price-free guarantee as verify-scan's response.
+    const serialized = JSON.stringify(result).toLowerCase()
+    for (const forbidden of ['price', 'subtotal', 'tax', 'discount', 'commission', 'revenue', 'amount']) {
+      expect(serialized).not.toContain(forbidden)
+    }
+  })
+
+  it('rejects when there is no VERIFIED token for this order/rider pair', async () => {
+    repo.findVerifiedTokenForOrderAndRider.mockResolvedValue(null)
+    const service = makeService()
+
+    await expect(service.getPendingChecklist(RIDER_ID, ORDER_ID)).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'NO_PENDING_CHECKLIST',
+    })
+  })
+
+  it('never returns another rider\'s pending checklist (scoped in the query, not just by convention)', async () => {
+    repo.findVerifiedTokenForOrderAndRider.mockResolvedValue(null)
+    const service = makeService()
+
+    await expect(service.getPendingChecklist(OTHER_RIDER_ID, ORDER_ID)).rejects.toMatchObject({
+      code: 'NO_PENDING_CHECKLIST',
+    })
+    expect(repo.findVerifiedTokenForOrderAndRider).toHaveBeenCalledWith(ORDER_ID, OTHER_RIDER_ID)
   })
 })

@@ -146,6 +146,16 @@ export class DeliveryController {
   }
 
   /**
+   * GET /orders/:id/pending-checklist — Re-fetch the checklist for an
+   * order this rider already scanned (VERIFIED) but hasn't confirmed yet
+   */
+  async getPendingChecklist(request, reply) {
+    const { id } = request.params
+    const result = await this.service.getPendingChecklist(request.user.id, id)
+    return reply.code(200).send(success(result, 'Pending checklist fetched'))
+  }
+
+  /**
    * PATCH /orders/:id/pickup — Mark order as picked up
    */
   async markPickedUp(request, reply) {

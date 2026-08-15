@@ -157,6 +157,19 @@ export class DeliveryRepository {
     return rows[0] || null
   }
 
+  /** Rider-scoped: is there a VERIFIED-but-not-yet-CONSUMED token for this order, owned by this rider's assignment? */
+  async findVerifiedTokenForOrderAndRider(orderId, riderId) {
+    const { rows } = await query(
+      `SELECT t.* FROM order_pickup_tokens t
+       JOIN delivery_assignments da ON da.id = t.delivery_assignment_id
+       WHERE t.order_id = $1 AND da.rider_id = $2 AND t.status = 'VERIFIED'
+       ORDER BY t.verified_at DESC
+       LIMIT 1`,
+      [orderId, riderId]
+    )
+    return rows[0] || null
+  }
+
   async getAssignmentById(assignmentId) {
     const { rows } = await query(`SELECT * FROM delivery_assignments WHERE id = $1`, [assignmentId])
     return rows[0] || null

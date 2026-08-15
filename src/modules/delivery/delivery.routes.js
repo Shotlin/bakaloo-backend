@@ -8,6 +8,7 @@ import {
   cancelDeliverySchema,
   rejectOrderSchema,
   verifyScanSchema,
+  getPendingChecklistSchema,
   markPickedUpSchema,
   markDeliveredSchema,
   uploadProofSchema,
@@ -100,6 +101,15 @@ export default async function deliveryRoutes(fastify) {
   fastify.post('/pickup-tokens/verify', {
     schema: verifyScanSchema,
   }, controller.verifyScan.bind(controller))
+
+  // GET /orders/:id/pending-checklist — Recovery path: re-fetch the
+  // checklist for an order already scanned (VERIFIED) but not yet
+  // confirmed picked up, without needing another QR scan (the token was
+  // already claimed and can't be re-verified). Covers app restarts, a
+  // second device, or the checklist sheet closing before confirmation.
+  fastify.get('/orders/:id/pending-checklist', {
+    schema: getPendingChecklistSchema,
+  }, controller.getPendingChecklist.bind(controller))
 
   // PATCH /orders/:id/pickup — Mark picked up
   fastify.patch('/orders/:id/pickup', {

@@ -102,6 +102,18 @@ export const verifyScanSchema = {
   },
 }
 
+export const getPendingChecklistSchema = {
+  tags: ['Delivery'],
+  summary: 'Re-fetch the pickup checklist for an order already scanned (VERIFIED) but not yet confirmed picked up',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
 export const markPickedUpSchema = {
   tags: ['Delivery'],
   summary: 'Mark order as picked up from store',

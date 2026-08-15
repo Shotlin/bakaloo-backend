@@ -484,6 +484,11 @@ export class DeliveryService {
     await this.repository.logScanAttempt({ orderId, riderId, deviceInfo, ipAddress: ip, tokenId: token.id, result: 'SUCCESS' })
     this._logDeliveryAction('verify-scan:success', { orderId, riderId, assignmentId: assignment.id })
 
+    return this._buildChecklistResponse(orderId)
+  }
+
+  /** Shared by verifyScan and getPendingChecklist — same price-free shape either way. */
+  async _buildChecklistResponse(orderId) {
     const checklist = await this.repository.getPickupChecklist(orderId)
     const address = checklist.order?.delivery_address || {}
     return {
@@ -504,6 +509,25 @@ export class DeliveryService {
         variant: item.option_label || item.net_quantity || null,
       })),
     }
+  }
+
+  /**
+   * Recovery path for pickup_batch_screen.dart: re-fetches the checklist
+   * for an order this rider already scanned successfully (token status
+   * VERIFIED, not yet CONSUMED) without needing another QR scan — the
+   * token was already claimed by claimPickupTokenAsVerified, so it can't
+   * be re-verified, only re-displayed. Needed because the app's local
+   * "needs scan / verified / picked up" tracking is session-only
+   * (PickupSessionController): a killed/restarted app, or a second
+   * device, has no other way to learn a token is sitting VERIFIED,
+   * mid-confirmation, with no scan left to make.
+   */
+  async getPendingChecklist(riderId, orderId) {
+    const token = await this.repository.findVerifiedTokenForOrderAndRider(orderId, riderId)
+    if (!token) {
+      throw { statusCode: 404, message: 'No pending pickup confirmation for this order.', code: 'NO_PENDING_CHECKLIST' }
+    }
+    return this._buildChecklistResponse(orderId)
   }
 
   async markPickedUp(riderId, orderId) {
