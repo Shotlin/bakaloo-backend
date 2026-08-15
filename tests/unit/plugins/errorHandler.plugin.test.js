@@ -50,6 +50,38 @@ describe('errorHandler.plugin — untrusted 401/403 remap (negative, the bug fix
   })
 })
 
+describe('errorHandler.plugin — trusted first-party 401/403 rejections pass through', () => {
+  it('passes through a plain-object 403 throw (this codebase\'s convention for deliberate rejections)', async () => {
+    // e.g. delivery.service.js#verifyScan's WRONG_RIDER/ALREADY_VERIFIED,
+    // auth.service.js's USER_INACTIVE, reviews.service.js's ownership
+    // checks — all `throw { statusCode, message, code }`, never a real
+    // Error instance, so these are never what the 2026-07-03 incident
+    // was about and must not be remapped to a fake 502.
+    const app = await buildApp(async () => {
+      throw { statusCode: 403, message: 'This order is not assigned to your rider account.', code: 'WRONG_RIDER' }
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/boom' })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.json()).toMatchObject({
+      message: 'This order is not assigned to your rider account.',
+      code: 'WRONG_RIDER',
+    })
+  })
+
+  it('passes through a plain-object 401 throw the same way', async () => {
+    const app = await buildApp(async () => {
+      throw { statusCode: 401, message: 'Session expired', code: 'SESSION_EXPIRED' }
+    })
+
+    const res = await app.inject({ method: 'GET', url: '/boom' })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json().code).toBe('SESSION_EXPIRED')
+  })
+})
+
 describe('errorHandler.plugin — trusted Fastify auth errors pass through (positive, regression guard)', () => {
   it('still returns 401 for a genuine Fastify-coded auth error', async () => {
     const app = await buildApp(async () => {

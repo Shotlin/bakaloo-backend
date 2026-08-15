@@ -34,15 +34,27 @@ async function errorHandlerPlugin(fastify) {
 
     // 401/403 from a *thrown* error (as opposed to an explicit
     // `reply.code(401).send(...)`, which never reaches this handler) is
-    // trustworthy only when it's a genuine Fastify/plugin error — those
-    // carry a `FST_`-prefixed `code` (e.g. the JWT plugin's expired/
-    // invalid-token errors). Third-party SDKs (Razorpay, etc.) throw
-    // errors whose `statusCode` mirrors THEIR API's response, not ours
-    // — a Razorpay account misconfiguration returning 401 must not be
-    // forwarded as if the customer's own session were invalid, or every
-    // provider-side outage looks like "you're logged out" to the app.
+    // trustworthy when either:
+    //  - it's a genuine Fastify/plugin error — those carry a `FST_`-
+    //    prefixed `code` (e.g. the JWT plugin's expired/invalid-token
+    //    errors), or
+    //  - it's a plain object literal thrown by our own service code
+    //    (`throw { statusCode, message, code }` — the convention used
+    //    throughout this codebase for deliberate business-logic
+    //    rejections: verify-scan's WRONG_RIDER/ALREADY_VERIFIED/etc.,
+    //    auth.service.js's USER_INACTIVE, reviews.service.js's
+    //    ownership checks...). A real `Error` instance is what
+    //    third-party SDKs (Razorpay, etc.) throw when their OWN API
+    //    call fails — those carry a `statusCode` mirrored from THEIR
+    //    response, not ours, and must not be forwarded as if the
+    //    caller's own session were invalid (a Razorpay account
+    //    misconfiguration returning 401 would otherwise look
+    //    identical to "you're logged out"). Plain-object throws are
+    //    never that: nothing in this codebase constructs one from an
+    //    upstream SDK's response, so they're safe to trust outright.
     const isTrustedAuthStatus =
       (statusCode !== 401 && statusCode !== 403) ||
+      !(error instanceof Error) ||
       (typeof code === 'string' && code.startsWith('FST_'))
 
     // Known HTTP errors
