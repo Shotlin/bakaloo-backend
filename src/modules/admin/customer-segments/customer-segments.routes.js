@@ -9,6 +9,7 @@ import {
   listMembersSchema,
   addMembersSchema,
   removeMemberSchema,
+  importMembersSchema,
   searchCandidatesSchema,
 } from './customer-segments.schema.js'
 
@@ -28,12 +29,14 @@ export default async function adminCustomerSegmentsRoutes(fastify) {
 
   fastify.get('/', { schema: listSegmentsSchema }, controller.list.bind(controller))
   fastify.post('/', { schema: createSegmentSchema }, controller.create.bind(controller))
+  fastify.get('/import-template', controller.downloadTemplate.bind(controller))
   fastify.get('/:id', { schema: segmentIdSchema }, controller.getDetail.bind(controller))
   fastify.patch('/:id', { schema: updateSegmentSchema }, controller.update.bind(controller))
   fastify.delete('/:id', { schema: segmentIdSchema }, controller.delete.bind(controller))
 
   fastify.get('/:id/members', { schema: listMembersSchema }, controller.getMembers.bind(controller))
   fastify.post('/:id/members', { schema: addMembersSchema }, controller.addMembers.bind(controller))
+  fastify.post('/:id/members/import', { schema: importMembersSchema }, controller.importMembers.bind(controller))
   fastify.delete('/:id/members/:userId', { schema: removeMemberSchema }, controller.removeMember.bind(controller))
 
   fastify.get('/:id/search-candidates', { schema: searchCandidatesSchema }, controller.searchCandidates.bind(controller))

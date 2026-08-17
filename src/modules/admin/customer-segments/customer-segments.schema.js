@@ -111,6 +111,17 @@ export const removeMemberSchema = {
   },
 }
 
+export const importMembersSchema = {
+  tags: ['Customer Segments'],
+  summary: 'Bulk-import segment members from an Excel/CSV file, matched by customer number [ADMIN]',
+  consumes: ['multipart/form-data'],
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', format: 'uuid' } },
+  },
+}
+
 export const searchCandidatesSchema = {
   tags: ['Customer Segments'],
   summary: 'Search customers to add to a segment [ADMIN]',

@@ -77,6 +77,20 @@ export class AdminCustomersRepository {
     }
   }
 
+  /** Bulk-resolve customers by phone number — used by segment Excel/CSV import,
+   *  which matches on number only since it's the one field guaranteed unique. */
+  async findByPhones(phones) {
+    if (!phones?.length) return []
+    const { rows } = await query(
+      `SELECT u.id, u.phone, u.name
+       FROM users u
+       WHERE u.phone = ANY($1::text[])
+         AND (u.role = 'CUSTOMER' OR EXISTS (SELECT 1 FROM orders eo WHERE eo.user_id = u.id))`,
+      [phones]
+    )
+    return rows
+  }
+
   async findById(id) {
     const { rows: [customer] } = await query(
       `SELECT u.*, COALESCE(w.balance, 0) AS wallet_balance,

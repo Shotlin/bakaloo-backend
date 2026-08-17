@@ -92,4 +92,28 @@ export class CustomerSegmentsController {
     const candidates = await this.service.searchCandidates(request.query.q, { limit: request.query.limit })
     return reply.code(200).send(success(candidates, 'Candidates fetched'))
   }
+
+  /** GET /import-template */
+  async downloadTemplate(request, reply) {
+    const { buffer, filename } = await this.service.buildImportTemplate()
+    reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    reply.header('Content-Disposition', `attachment; filename="${filename}"`)
+    return reply.send(buffer)
+  }
+
+  /** POST /:id/members/import */
+  async importMembers(request, reply) {
+    const actor = this._actorCtx(request)
+    const file = await request.file()
+    if (!file) {
+      return reply.code(400).send(error('No file uploaded', 'BAD_REQUEST'))
+    }
+    const buffer = await file.toBuffer()
+    const result = await this.service.importMembers(request.params.id, buffer, file.filename, actor)
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'IMPORT_FAILED'))
+    }
+    const { success: _ok, ...summary } = result
+    return reply.code(200).send(success(summary, 'Segment members imported'))
+  }
 }
