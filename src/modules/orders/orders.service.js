@@ -428,22 +428,36 @@ export class OrdersService {
 
     // 3c. Cart milestone — the highest cart-value tier this user is
     // eligible for and has already reached with this cart (applies to
-    // every order, not just a customer's first). `stackableWithCoupon`
-    // is a hard admin toggle: false means the milestone is skipped
-    // outright whenever a coupon code was applied to this order, of any
-    // reward type. When it does apply, a FLAT_DISCOUNT reward still
-    // yields to a coupon/first-time-offer discount already occupying the
-    // bill's single discount slot, same rule as first-time offers above.
+    // every order, not just a customer's first). Resolved against the
+    // WHOLE cart (every shop combined) — the same total the customer saw
+    // promised in the live cart preview (bill-summary.service.js) —
+    // regardless of how many shops it splits into at checkout.
+    //
+    // Reported bug: a milestone shown as "unlocked" while shopping
+    // silently granted NOTHING once checkout actually split the cart
+    // across 2+ shops, because this whole block used to be gated behind
+    // `groupedByShop.size === 1` (like coupons/first-time-offers). That
+    // single-shop restriction genuinely still applies to the DISCOUNT and
+    // FREE_DELIVERY portions below — both need order-splitter.service.js's
+    // shared fee slot, which only ever targets one shop's order — but
+    // CASHBACK and COUPON_UNLOCK are per-user/per-order side effects with
+    // no such dependency, so those now apply correctly no matter how many
+    // shops the cart split into.
+    //
+    // `stackableWithCoupon` is a hard admin toggle: false means the
+    // milestone is skipped outright whenever a coupon code was applied to
+    // this order, of any reward type.
     let cartMilestone = null
     let cartMilestoneReward = null
-    if (groupedByShop.size === 1) {
-      // Resolved with this shop's actual cart lines (mirrors the coupon and
-      // first-time-offer resolution above) so a category/product-scoped
-      // milestone (103_cart_milestone_scope.sql) is checked against the
-      // matching slice of the cart, not just the flat subtotal number.
-      const milestone = await this.cartMilestonesService.resolveForCheckout(
-        userId, subtotal, groupedByShop.get(Array.from(groupedByShop.keys())[0])
-      )
+    {
+      const isSingleShop = groupedByShop.size === 1
+      // Resolved with the actual cart lines across every shop (mirrors the
+      // coupon and first-time-offer resolution above) so a category/
+      // product-scoped milestone (103_cart_milestone_scope.sql) is checked
+      // against the matching slice of the cart, not just the flat subtotal
+      // number.
+      const allCartItems = Array.from(groupedByShop.values()).flat()
+      const milestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotal, allCartItems)
       if (milestone && !(appliedCouponCode && !milestone.stackableWithCoupon)) {
         const reward = this.cartMilestonesService.computeReward(milestone, subtotal)
         const discountSlotTaken = !!(appliedCouponCode || firstTimeReward?.discount)
@@ -455,16 +469,17 @@ export class OrdersService {
         // milestone that both discounted AND granted free delivery (e.g.
         // "min ₹50 → free delivery") silently dropped the free delivery too
         // whenever a coupon happened to be applied.
-        const discountApplied = reward.discount && !discountSlotTaken
+        const discountApplied = isSingleShop && reward.discount && !discountSlotTaken
         if (discountApplied) {
           appliedCouponDiscount += reward.discount
           couponShopId = couponShopId || Array.from(groupedByShop.keys())[0]
         }
-        if (reward.freeDelivery) {
+        const freeDeliveryApplied = isSingleShop && reward.freeDelivery
+        if (freeDeliveryApplied) {
           freeDeliveryOverride = true
           freeDeliveryShopId = freeDeliveryShopId || Array.from(groupedByShop.keys())[0]
         }
-        if (discountApplied || reward.cashbackAmount || reward.freeDelivery || reward.unlockCouponId) {
+        if (discountApplied || reward.cashbackAmount || freeDeliveryApplied || reward.unlockCouponId) {
           cartMilestone = milestone
           cartMilestoneReward = reward
         }
@@ -707,8 +722,12 @@ export class OrdersService {
       }
     }
 
-    // Cart milestone follow-through — same pattern as first-time offers.
-    if (cartMilestone && cartMilestoneReward && createdOrders.length === 1) {
+    // Cart milestone follow-through — same pattern as first-time offers,
+    // except gated on `createdOrders.length > 0` rather than `=== 1`: a
+    // cart milestone can now resolve on a multi-shop cart (see above), and
+    // cashback/usage-tracking simply anchor to the first resulting order
+    // since the milestone itself isn't tied to any one shop's order.
+    if (cartMilestone && cartMilestoneReward && createdOrders.length > 0) {
       try {
         if (cartMilestoneReward.cashbackAmount) {
           await this.cashbackService.createPending({
