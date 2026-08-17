@@ -2,6 +2,9 @@ import { getClient } from '../../config/database.js'
 import { query, pool } from '../../config/database.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { logger } from '../../config/logger.js'
+import { razorpay } from '../../config/razorpay.js'
+import { PaymentsRepository } from '../payments/payments.repository.js'
+import { PaymentsService } from '../payments/payments.service.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
@@ -65,6 +68,11 @@ export class OrdersService {
     this.abandonedCartsRepo =
       options.abandonedCartsRepository || new AbandonedCartsRepository()
     this.addressRepo = options.addressesRepository || new AddressesRepository()
+    // Used only to double-check with Razorpay before honoring a customer
+    // cancel on a still-unpaid ONLINE order — see cancel()/_reconcileBeforeCancel().
+    this.paymentsRepo = options.paymentsRepository || new PaymentsRepository()
+    this.paymentsService =
+      options.paymentsService || new PaymentsService(this.paymentsRepo, fastify)
     // Serviceable-area gate at order placement — see placeOrder() step 2c.
     this.allocationRepo = options.allocationRepository || new AllocationRepository()
     this.couponsRepo = options.couponsRepository || new CouponsRepository()
@@ -1016,6 +1024,46 @@ export class OrdersService {
       }
     }
 
+    // Guard specifically for unpaid ONLINE orders — this endpoint is also
+    // what the app calls the instant Razorpay Checkout reports ANY failure
+    // (network error, timeout, unknown SDK error — not just a genuine user
+    // cancel), often within seconds of order creation. Unlike the 15-minute
+    // payment-expiry worker, this path had no check against Razorpay before
+    // cancelling, so a payment Razorpay actually captured could get silently
+    // orphaned: money taken, order cancelled, no refund, and — because the
+    // order leaves PENDING status here — the worker's own reconciliation
+    // query never revisits it either. Mirrors the worker's check.
+    if (
+      order.status === ORDER_STATUS.PENDING &&
+      order.paymentMethod === 'ONLINE' &&
+      order.paymentStatus === 'PENDING'
+    ) {
+      let confirmedOrder
+      try {
+        confirmedOrder = await this._reconcileBeforeCancel(order)
+      } catch (err) {
+        // Could not verify with Razorpay (network/API error) — do not cancel
+        // blind. Same fail-safe as payment-expiry.worker.js: leave it PENDING
+        // for the customer to retry or for the worker to resolve later.
+        logger.warn(
+          { err: err.message, orderId },
+          'Order cancel: Razorpay verification check failed, refusing to cancel blind'
+        )
+        return {
+          success: false,
+          message: 'Unable to verify payment status right now. Please try again in a moment.',
+        }
+      }
+      if (confirmedOrder) {
+        return {
+          success: false,
+          paymentConfirmed: true,
+          order: confirmedOrder,
+          message: 'Payment was already confirmed for this order — it is being processed and cannot be cancelled.',
+        }
+      }
+    }
+
     // Restore stock in a transaction — goes through the centralized
     // applyStockChange() so this gets a CANCELLATION_RESTORE stock_movements
     // ledger row (previously this used a raw UPDATE with no ledger entry
@@ -1070,6 +1118,45 @@ export class OrdersService {
 
     logger.info({ orderId, userId }, 'Order cancelled')
     return { success: true, order: updated }
+  }
+
+  /**
+   * Checks Razorpay directly for a captured payment on this order before a
+   * cancel is allowed to proceed — mirrors payment-expiry.worker.js's
+   * _processOneExpiredPayment(). Returns the (now-confirmed) order if a
+   * captured payment was found, so the caller must NOT cancel; returns null
+   * when it's safe to proceed (no payment row yet, already resolved to
+   * something other than PENDING, or Razorpay genuinely shows no capture).
+   *
+   * Throws on a Razorpay API/network failure — the caller decides how to
+   * fail safe (never cancel without having actually verified).
+   */
+  async _reconcileBeforeCancel(order) {
+    if (!razorpay) return null
+
+    const payment = await this.paymentsRepo.findByOrderId(order.id)
+    if (!payment || !payment.razorpayOrderId || payment.status !== 'PENDING') {
+      return null
+    }
+
+    const payments = await razorpay.orders.fetchPayments(payment.razorpayOrderId)
+    const captured = (payments.items || []).find((p) => p.status === 'captured')
+    if (!captured) return null
+
+    const result = await this.paymentsService.completeVerifiedPayment(payment.razorpayOrderId, {
+      razorpayPaymentId: captured.id,
+      method: captured.method,
+      source: 'ORDER_CANCEL_RECONCILE',
+    })
+
+    if (!result.success) return null
+
+    logger.info(
+      { orderId: order.id, paymentId: captured.id },
+      'Order cancel blocked: Razorpay shows the payment was actually captured — order confirmed instead of cancelled'
+    )
+
+    return this.repo.findByIdAndUser(order.id, order.userId)
   }
 
   /**
