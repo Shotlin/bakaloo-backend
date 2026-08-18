@@ -36,6 +36,7 @@ export const buildApp = async () => {
 
   // ─── PLUGINS (order matters) ────────────────────────────
   await app.register(import('./plugins/errorHandler.plugin.js'))
+  await app.register(import('./plugins/requestContext.plugin.js'))
   await app.register(import('./plugins/cors.plugin.js'))
   await app.register(import('./plugins/helmet.plugin.js'))
   await app.register(import('./plugins/rateLimit.plugin.js'))

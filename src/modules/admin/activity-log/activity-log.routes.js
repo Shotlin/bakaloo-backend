@@ -1,5 +1,21 @@
+import geoip from 'geoip-lite'
 import { query } from '../../../config/database.js'
 import { success } from '../../../utils/apiResponse.js'
+
+// Country is derived from the stored IP at read-time (not stored) so it
+// applies to historical rows too, not just ones logged after this shipped.
+// geoip-lite is a bundled offline DB — no API key, no per-request network
+// call, fine for this page's volume. Malformed/private/unresolvable IPs
+// (127.0.0.1, 10.x, etc., or a null ip_address on old rows) just yield null
+// rather than throwing.
+function countryCodeForIp(ip) {
+  if (!ip) return null
+  try {
+    return geoip.lookup(ip)?.country ?? null
+  } catch {
+    return null
+  }
+}
 
 export default async function adminActivityLogRoutes(fastify) {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -43,11 +59,13 @@ export default async function adminActivityLogRoutes(fastify) {
     const combinedCte = `
       WITH combined AS (
         SELECT id, admin_id, action, entity_type, entity_id,
-               old_value, new_value, ip_address::text AS ip_address, created_at
+               old_value, new_value, ip_address::text AS ip_address,
+               user_agent, created_at
           FROM admin_activity_log
         UNION ALL
         SELECT id, actor_user_id AS admin_id, action, target_type AS entity_type, target_id AS entity_id,
-               before AS old_value, after AS new_value, ip_address::text AS ip_address, created_at
+               before AS old_value, after AS new_value, ip_address::text AS ip_address,
+               user_agent, created_at
           FROM audit_logs
       )
     `
@@ -63,6 +81,11 @@ export default async function adminActivityLogRoutes(fastify) {
       [...params, limit, offset]
     )
 
+    const logs = rows.map((row) => ({
+      ...row,
+      country_code: countryCodeForIp(row.ip_address),
+    }))
+
     const countRes = await query(
       `${combinedCte}
        SELECT COUNT(*)::int AS total FROM combined c ${where}`,
@@ -70,7 +93,7 @@ export default async function adminActivityLogRoutes(fastify) {
     )
 
     return success({
-      logs: rows,
+      logs,
       total: countRes.rows[0].total,
       page,
       limit,
