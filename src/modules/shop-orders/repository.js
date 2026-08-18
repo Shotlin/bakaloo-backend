@@ -370,6 +370,24 @@ export class ShopOrdersRepository {
 
     if (newStatus === 'CANCELLED' || newStatus === 'DELIVERED') {
       await revokeOrderPickupTokens(client, orderId, `Order ${newStatus}`)
+
+      // Closing the order here can happen out-of-band from the rider's
+      // own pickup/delivery flow — without this, delivery_assignments
+      // stays stuck on its last in-flight status forever, and the rider
+      // app's getAssignedOrders() (which filters on delivery_assignments
+      // .status, not orders.status) keeps resurfacing an already-closed
+      // order as still needing pickup. See admin orders.repository.js's
+      // updateStatus() for the same fix.
+      await client.query(
+        `UPDATE delivery_assignments
+         SET status = $1,
+             delivered_at = CASE WHEN $1 = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+             cancelled_at = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+             cancel_reason = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled') ELSE cancel_reason END,
+             updated_at = NOW()
+         WHERE order_id = $2 AND status NOT IN ('DELIVERED', 'CANCELLED')`,
+        [newStatus, orderId]
+      )
     }
 
     return result.rows[0] ? formatRow(result.rows[0]) : null

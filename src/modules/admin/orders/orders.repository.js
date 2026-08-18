@@ -196,6 +196,27 @@ export class AdminOrdersRepository {
         await revokeOrderPickupTokens(client, orderId, `Order ${newStatus}`)
       }
 
+      // This admin path can close an order out-of-band from the rider's
+      // own pickup/delivery flow (e.g. support marking an order DELIVERED
+      // after the rider handed it over but the app never confirmed
+      // pickup). Without this, delivery_assignments stays stuck on its
+      // last in-flight status (ASSIGNED/ACCEPTED/PICKED_UP/IN_TRANSIT)
+      // forever, and the rider app's getAssignedOrders() — which filters
+      // purely on delivery_assignments.status, not orders.status — keeps
+      // resurfacing an already-closed order as still needing pickup.
+      if (newStatus === 'CANCELLED' || newStatus === 'DELIVERED') {
+        await client.query(
+          `UPDATE delivery_assignments
+           SET status = $1,
+               delivered_at = CASE WHEN $1 = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+               cancelled_at = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+               cancel_reason = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled by admin') ELSE cancel_reason END,
+               updated_at = NOW()
+           WHERE order_id = $2 AND status NOT IN ('DELIVERED', 'CANCELLED')`,
+          [newStatus, orderId]
+        )
+      }
+
       await client.query('COMMIT')
       return order.status // return old status for activity log
     } catch (err) {
