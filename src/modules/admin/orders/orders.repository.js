@@ -206,11 +206,17 @@ export class AdminOrdersRepository {
       // resurfacing an already-closed order as still needing pickup.
       if (newStatus === 'CANCELLED' || newStatus === 'DELIVERED') {
         await client.query(
+          // $1 is reused both as a direct column assignment and inside
+          // CASE/text comparisons — without the explicit cast, Postgres's
+          // extended-query protocol can't reconcile the two inferred
+          // types for the same placeholder and throws "inconsistent
+          // types deduced for parameter $1" (42P08) at prepare time,
+          // before any row is even touched.
           `UPDATE delivery_assignments
-           SET status = $1,
-               delivered_at = CASE WHEN $1 = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
-               cancelled_at = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
-               cancel_reason = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled by admin') ELSE cancel_reason END,
+           SET status = $1::text,
+               delivered_at = CASE WHEN $1::text = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+               cancelled_at = CASE WHEN $1::text = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+               cancel_reason = CASE WHEN $1::text = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled by admin') ELSE cancel_reason END,
                updated_at = NOW()
            WHERE order_id = $2 AND status NOT IN ('DELIVERED', 'CANCELLED')`,
           [newStatus, orderId]

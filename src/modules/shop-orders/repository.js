@@ -379,11 +379,17 @@ export class ShopOrdersRepository {
       // order as still needing pickup. See admin orders.repository.js's
       // updateStatus() for the same fix.
       await client.query(
+        // $1 is reused both as a direct column assignment and inside
+        // CASE/text comparisons — without the explicit cast, Postgres
+        // can't reconcile the two inferred types for the same
+        // placeholder and throws "inconsistent types deduced for
+        // parameter $1" (42P08) at prepare time. See admin
+        // orders.repository.js's updateStatus() for the same fix.
         `UPDATE delivery_assignments
-         SET status = $1,
-             delivered_at = CASE WHEN $1 = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
-             cancelled_at = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
-             cancel_reason = CASE WHEN $1 = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled') ELSE cancel_reason END,
+         SET status = $1::text,
+             delivered_at = CASE WHEN $1::text = 'DELIVERED' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+             cancelled_at = CASE WHEN $1::text = 'CANCELLED' THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+             cancel_reason = CASE WHEN $1::text = 'CANCELLED' THEN COALESCE(cancel_reason, 'Order cancelled') ELSE cancel_reason END,
              updated_at = NOW()
          WHERE order_id = $2 AND status NOT IN ('DELIVERED', 'CANCELLED')`,
         [newStatus, orderId]
