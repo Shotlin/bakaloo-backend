@@ -294,6 +294,48 @@ describe('CartMilestonesService.computeReward — CASHBACK percentage mode (101_
   })
 })
 
+describe('CartMilestonesService.computeReward — FLAT_DISCOUNT ("Instant Discount") percentage mode, mirroring CASHBACK\'s percent/maxDiscount convention', () => {
+  const service = new CartMilestonesService(makeRepoMock(), makeSegmentsRepoMock())
+
+  it('rewardPercent wins over the flat rewardValue when set (20% capped at ₹50)', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'FLAT_DISCOUNT', rewardValue: 10, rewardPercent: 20, maxDiscount: 50 }),
+      1000
+    )
+    expect(reward.discount).toBe(50) // 20% of 1000 = 200, capped at 50
+  })
+
+  it('uses the flat rewardValue when rewardPercent is not set (unaffected default case)', () => {
+    const reward = service.computeReward(
+      tier({ rewardType: 'FLAT_DISCOUNT', rewardValue: 20, rewardPercent: null }),
+      1000
+    )
+    expect(reward.discount).toBe(20)
+  })
+
+  it('is uncapped when maxDiscount is not set, but still clamped to the cart amount', () => {
+    const uncapped = service.computeReward(
+      tier({ rewardType: 'FLAT_DISCOUNT', rewardValue: 0, rewardPercent: 10, maxDiscount: null }),
+      1000
+    )
+    expect(uncapped.discount).toBe(100)
+
+    const clampedToCart = service.computeReward(
+      tier({ rewardType: 'FLAT_DISCOUNT', rewardValue: 0, rewardPercent: 50, maxDiscount: null }),
+      80
+    )
+    expect(clampedToCart.discount).toBe(40) // 50% of 80, never more than the cart itself
+  })
+
+  it('percentage discount is computed against the scoped subtotal when the milestone is scoped, not the raw cart total', () => {
+    const reward = service.computeReward(
+      { rewardType: 'FLAT_DISCOUNT', rewardPercent: 10, maxDiscount: null, scopedSubtotal: 60 },
+      110
+    )
+    expect(reward.discount).toBe(6) // 10% of 60, not 110
+  })
+})
+
 describe('CartMilestonesService.computeReward — grantsFreeDelivery toggle (100_cart_milestone_free_delivery_toggle)', () => {
   const service = new CartMilestonesService(makeRepoMock(), makeSegmentsRepoMock())
 

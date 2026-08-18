@@ -145,26 +145,32 @@ export class BillSummaryService {
     }
 
     // Cart milestone reward — resolved here (not just at order placement) so
-    // a milestone that grants free delivery is reflected in the delivery
-    // fee the customer SEES while shopping, matching what order placement
-    // will actually charge. Previously this only fed the "Add ₹X more to
-    // unlock…" progress ladder further below and never touched
-    // forceFreeDelivery, so a milestone crossed mid-cart (e.g. "free
-    // delivery above ₹50") never waived the fee shown here — only
-    // orders.service.js applied it, and only at the very end. Best-effort:
-    // a milestone lookup failure must never break the cart summary itself.
+    // a milestone that grants free delivery OR an instant discount
+    // (FLAT_DISCOUNT — "Instant Discount" in the dashboard) is reflected in
+    // what the customer SEES while shopping, matching what order placement
+    // will actually charge. Previously this only fed free delivery through;
+    // the discount portion was computed here but silently dropped, so a
+    // milestone crossing ₹49 promised an instant discount that never showed
+    // up until the order confirmation screen — only orders.service.js ever
+    // applied it, and only at the very end. Best-effort: a milestone lookup
+    // failure must never break the cart summary itself.
     // A cart-milestone scope (applicable_category_ids/applicable_product_ids,
     // 103_cart_milestone_scope.sql) is evaluated against the actual cart
     // lines, not just the aggregate total — same as coupons/first-time-offers.
     // Unlike those two, cart milestones aren't restricted to single-shop
-    // carts elsewhere in this method (the aggregate itemTotalDiscounted
-    // already spans every shop), so the scoped slice is pulled from every
-    // shop group's items too, keeping that same multi-shop behavior for
-    // scoped milestones instead of silently only ever matching shop #1.
+    // carts for FREE DELIVERY/CASHBACK/COUPON_UNLOCK (the aggregate
+    // itemTotalDiscounted already spans every shop) — but the discount
+    // portion specifically still is, same as OrdersService.placeOrder()'s
+    // "single discount slot" rule below (order-splitter.service.js's fee
+    // engine only ever discounts one shop's order, and a manually-typed
+    // coupon isn't known yet at cart-view time so first-time-offer is the
+    // only other slot-occupant this preview needs to check against).
     const allCartItems = shopGroups.flatMap((g) => g.items || [])
     let cartMilestoneProgress = { unlocked: null, next: null }
     let eligibleMilestoneTiers = []
     let cartMilestoneFreeDelivery = false
+    let cartMilestoneDiscount = 0
+    let cartMilestoneDiscountMeta = null
     try {
       const [progress, eligibleTiers] = await Promise.all([
         this.cartMilestonesService.getProgress(userId, itemTotalDiscounted, allCartItems),
@@ -175,11 +181,22 @@ export class BillSummaryService {
       if (progress.unlocked) {
         const reward = this.cartMilestonesService.computeReward(progress.unlocked, itemTotalDiscounted)
         cartMilestoneFreeDelivery = !!reward.freeDelivery
+        if (reward.discount && shopGroups.length === 1 && !firstTimeOfferDiscount) {
+          cartMilestoneDiscount = this._round(reward.discount)
+          cartMilestoneDiscountMeta = { id: progress.unlocked.id, name: progress.unlocked.name }
+        }
       }
     } catch (err) {
       logger.warn({ userId, err: err.message, action: 'bill_summary_milestone' }, 'Cart milestone progress failed')
     }
     const forceFreeDelivery = firstTimeOfferFreeDelivery || cartMilestoneFreeDelivery
+    // Combined "single discount slot" total — same convention
+    // OrdersService.placeOrder() uses (coupon/first-time-offer/cart-
+    // milestone discounts never stack; here only first-time-offer and
+    // cart-milestone can compete, since a manually-typed coupon code isn't
+    // known at cart-view time). Replaces the old bare `firstTimeOfferDiscount`
+    // everywhere below so a milestone discount reduces the shown total too.
+    const autoAppliedDiscount = this._round(firstTimeOfferDiscount + cartMilestoneDiscount)
 
     let deliveryFee = 0
     let deliveryFeeOriginal = 0
@@ -240,15 +257,16 @@ export class BillSummaryService {
     }
 
     // Build a single aggregate breakdown for the canonical response. The
-    // first-time-offer discount is fed through the engine's `couponDiscount`
-    // slot — the same "single discount slot" convention OrdersService.
-    // placeOrder() already uses (coupon and first-time-offer share one slot,
-    // never stack) — so totalPayable/totalSavings stay consistent.
+    // first-time-offer + cart-milestone discount is fed through the
+    // engine's `couponDiscount` slot — the same "single discount slot"
+    // convention OrdersService.placeOrder() already uses (coupon,
+    // first-time-offer, and cart-milestone discounts share one slot, never
+    // stack) — so totalPayable/totalSavings stay consistent.
     const aggregate = this.totalsEngine.computeBreakdown({
       config,
       itemsSubtotal: itemTotalDiscounted,
       itemDiscount: mrpDiscount,
-      couponDiscount: firstTimeOfferDiscount,
+      couponDiscount: autoAppliedDiscount,
       distanceKm: primaryDistanceKm,
       tipAmount,
       storeName: primaryStoreName,
@@ -286,7 +304,7 @@ export class BillSummaryService {
     // stale single-shop tax figure would under/over-charge on any
     // multi-shop cart.
     const preTaxTotal = this._round(
-      Math.max(0, itemTotalDiscounted - firstTimeOfferDiscount + feesTotal)
+      Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal)
     )
     const gstAmount = config.gst_enabled
       ? this._round((preTaxTotal * this._toNumber(config.gst_rate)) / 100)
@@ -294,7 +312,7 @@ export class BillSummaryService {
     aggregate.tax = gstAmount
 
     const toPayFinal = this._round(
-      Math.max(0, itemTotalDiscounted - firstTimeOfferDiscount + feesTotal + gstAmount + tipAmount)
+      Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal + gstAmount + tipAmount)
     )
     const toPayOriginal = this._round(
       itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + gstAmount + tipAmount
@@ -378,13 +396,13 @@ export class BillSummaryService {
         savedAmount: 0,
         isLateNight: false,
       },
-      // Auto-applied first-time-offer discount (backend-known at cart-view
-      // time — no customer action needed). A manually-typed coupon code
-      // lives entirely in client-side state and is NOT reflected here; the
-      // Flutter app overlays that discount on top of / in place of this one
-      // (single discount slot — a manual coupon takes priority, matching
-      // OrdersService.placeOrder()'s rule).
-      couponDiscount: firstTimeOfferDiscount,
+      // Auto-applied first-time-offer or cart-milestone discount (backend-
+      // known at cart-view time — no customer action needed; the two never
+      // stack, same single-discount-slot rule as OrdersService.placeOrder()).
+      // A manually-typed coupon code lives entirely in client-side state
+      // and is NOT reflected here; the Flutter app overlays that discount
+      // on top of / in place of this one (a manual coupon takes priority).
+      couponDiscount: autoAppliedDiscount,
       tipAmount,
       toPay: {
         original: toPayOriginal,
@@ -398,6 +416,9 @@ export class BillSummaryService {
             : []),
           ...(firstTimeOfferDiscount > 0
             ? [{ type: 'first_time_offer', label: firstTimeOfferMeta?.name || 'First order offer', amount: firstTimeOfferDiscount }]
+            : []),
+          ...(cartMilestoneDiscount > 0
+            ? [{ type: 'cart_milestone', label: cartMilestoneDiscountMeta?.name || 'Milestone discount', amount: cartMilestoneDiscount }]
             : []),
         ],
       },

@@ -237,8 +237,21 @@ export class CartMilestonesService {
     const amount = milestone.scopedSubtotal ?? cartTotal
     const freeDelivery = !!milestone.grantsFreeDelivery
     switch (milestone.rewardType) {
-      case 'FLAT_DISCOUNT':
-        return { discount: Math.min(milestone.rewardValue || 0, amount), freeDelivery }
+      case 'FLAT_DISCOUNT': {
+        // "Instant Discount" in the dashboard — same rewardPercent/
+        // maxDiscount convention as CASHBACK below: when rewardPercent is
+        // set it wins over the flat rewardValue, capped by maxDiscount, so
+        // an admin can configure "20% off, up to ₹50" instead of only a
+        // flat ₹X. Always clamped to the (scoped) cart amount either way —
+        // a discount can never exceed what's actually being bought.
+        let discount = milestone.rewardPercent
+          ? amount * (milestone.rewardPercent / 100)
+          : (milestone.rewardValue || 0)
+        if (milestone.maxDiscount) discount = Math.min(discount, milestone.maxDiscount)
+        discount = Math.min(discount, amount)
+        discount = Math.round(discount * 100) / 100
+        return { discount, freeDelivery }
+      }
       case 'CASHBACK': {
         // rewardPercent (when set) wins over the flat rewardValue — same
         // convention as payment_offers.cashback_percent — so an admin can
