@@ -3,7 +3,7 @@ import { query } from '../../config/database.js'
 const COLUMNS = `
   id, name, min_cart_amount, reward_type, reward_value, reward_percent, max_discount,
   unlock_coupon_id, message_before, message_after, icon_url, is_active,
-  applicable_user_type, applicable_segment_id, stackable_with_coupon,
+  applicable_user_type, applicable_segment_id, excluded_segment_id, stackable_with_coupon,
   priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
   applicable_category_ids, applicable_product_ids,
   created_by, created_at, updated_at
@@ -57,11 +57,11 @@ export class CartMilestonesRepository {
       `INSERT INTO cart_milestones (
          name, min_cart_amount, reward_type, reward_value, reward_percent, max_discount,
          unlock_coupon_id, message_before, message_after, icon_url,
-         applicable_user_type, applicable_segment_id, stackable_with_coupon,
+         applicable_user_type, applicable_segment_id, excluded_segment_id, stackable_with_coupon,
          priority, cashback_credit_trigger, usage_limit_per_user, grants_free_delivery,
          applicable_category_ids, applicable_product_ids,
          created_by
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
        RETURNING ${COLUMNS}`,
       [
         data.name,
@@ -76,6 +76,7 @@ export class CartMilestonesRepository {
         data.iconUrl ?? null,
         data.applicableUserType ?? 'ALL',
         data.applicableSegmentId ?? null,
+        data.excludedSegmentId ?? null,
         data.stackableWithCoupon ?? true,
         data.priority ?? 0,
         data.cashbackCreditTrigger ?? 'ORDER_DELIVERED',
@@ -107,6 +108,7 @@ export class CartMilestonesRepository {
       isActive: 'is_active',
       applicableUserType: 'applicable_user_type',
       applicableSegmentId: 'applicable_segment_id',
+      excludedSegmentId: 'excluded_segment_id',
       stackableWithCoupon: 'stackable_with_coupon',
       priority: 'priority',
       cashbackCreditTrigger: 'cashback_credit_trigger',
@@ -253,6 +255,7 @@ export class CartMilestonesRepository {
       isActive: row.is_active,
       applicableUserType: row.applicable_user_type,
       applicableSegmentId: row.applicable_segment_id,
+      excludedSegmentId: row.excluded_segment_id,
       stackableWithCoupon: row.stackable_with_coupon,
       priority: row.priority,
       cashbackCreditTrigger: row.cashback_credit_trigger,

@@ -137,6 +137,68 @@ describe('CartMilestonesService.getProgress — eligibility filtering (negative)
   })
 })
 
+describe('CartMilestonesService — "All users" milestone with an excluded segment (106_cart_milestone_excluded_segment, avoids double-dipping a segment that already has its own dedicated milestone)', () => {
+  it('excludes an ALL-users milestone for a member of the excluded segment (negative)', async () => {
+    const segmentsRepo = { isMember: vi.fn().mockResolvedValue(true) }
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludedSegmentId: 'seg-vip' }),
+      ]),
+    })
+    const service = new CartMilestonesService(repo, segmentsRepo)
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked).toBeNull()
+    expect(segmentsRepo.isMember).toHaveBeenCalledWith('seg-vip', USER_ID)
+  })
+
+  it('still includes an ALL-users milestone for a non-member of the excluded segment (positive)', async () => {
+    const segmentsRepo = { isMember: vi.fn().mockResolvedValue(false) }
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludedSegmentId: 'seg-vip' }),
+      ]),
+    })
+    const service = new CartMilestonesService(repo, segmentsRepo)
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+  })
+
+  it('never checks segment membership when no segment is excluded (unaffected default case)', async () => {
+    const segmentsRepo = makeSegmentsRepoMock()
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludedSegmentId: null }),
+      ]),
+    })
+    const service = new CartMilestonesService(repo, segmentsRepo)
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+    expect(segmentsRepo.isMember).not.toHaveBeenCalled()
+  })
+
+  it('a FIRST_TIME milestone ignores excludedSegmentId entirely — only ALL consults it', async () => {
+    const segmentsRepo = { isMember: vi.fn().mockResolvedValue(true) }
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'FIRST_TIME', excludedSegmentId: 'seg-vip' }),
+      ]),
+      hasPriorOrder: vi.fn().mockResolvedValue(false),
+    })
+    const service = new CartMilestonesService(repo, segmentsRepo)
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+    expect(segmentsRepo.isMember).not.toHaveBeenCalled()
+  })
+})
+
 describe('CartMilestonesService — per-user usage limit (2026-07-04, "reward every order forever" fix)', () => {
   it('excludes a milestone once the user has hit its usageLimitPerUser (negative)', async () => {
     const repo = makeRepoMock({

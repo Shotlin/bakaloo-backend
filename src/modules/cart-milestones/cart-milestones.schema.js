@@ -13,6 +13,7 @@ const milestoneProperties = {
   isActive:              { type: 'boolean' },
   applicableUserType:    { type: 'string' },
   applicableSegmentId:   { type: ['string', 'null'] },
+  excludedSegmentId:     { type: ['string', 'null'] },
   stackableWithCoupon:   { type: 'boolean' },
   priority:              { type: 'integer' },
   cashbackCreditTrigger: { type: 'string' },
@@ -76,6 +77,10 @@ export const createMilestoneSchema = {
       iconUrl:               { type: 'string', maxLength: 2000 },
       applicableUserType:    { type: 'string', enum: ['ALL', 'FIRST_TIME', 'SEGMENT'], default: 'ALL' },
       applicableSegmentId:   { type: 'string', format: 'uuid' },
+      // Only meaningful when applicableUserType is 'ALL' — see
+      // 106_cart_milestone_excluded_segment.sql. Nullable so the dashboard
+      // can explicitly clear it, same convention as the scope arrays below.
+      excludedSegmentId:     { type: ['string', 'null'], format: 'uuid' },
       stackableWithCoupon:   { type: 'boolean', default: true },
       priority:              { type: 'integer', default: 0 },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'], default: 'ORDER_DELIVERED' },
@@ -112,6 +117,7 @@ export const updateMilestoneSchema = {
       isActive:              { type: 'boolean' },
       applicableUserType:    { type: 'string', enum: ['ALL', 'FIRST_TIME', 'SEGMENT'] },
       applicableSegmentId:   { type: 'string', format: 'uuid' },
+      excludedSegmentId:     { type: ['string', 'null'], format: 'uuid' },
       stackableWithCoupon:   { type: 'boolean' },
       priority:              { type: 'integer' },
       cashbackCreditTrigger: { type: 'string', enum: ['PAYMENT_SUCCESS', 'ORDER_CONFIRMED', 'ORDER_DELIVERED'] },

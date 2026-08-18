@@ -37,6 +37,16 @@ export class CartMilestonesService {
         ? this.segmentsRepo.isMember(milestone.applicableSegmentId, userId)
         : false
     }
+    // ALL — optionally minus one excluded segment (106_cart_milestone_
+    // excluded_segment.sql). Lets an admin carve a segment that already has
+    // its own dedicated, segment-scoped milestone out of a broader "All
+    // users" one, so that segment doesn't double-dip on both rewards for
+    // the same purchase. FIRST_TIME/SEGMENT above never consult this —
+    // they already run their own single-audience rule.
+    if (milestone.excludedSegmentId) {
+      const isExcluded = await this.segmentsRepo.isMember(milestone.excludedSegmentId, userId)
+      if (isExcluded) return false
+    }
     return true
   }
 
