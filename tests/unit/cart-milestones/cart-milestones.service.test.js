@@ -199,6 +199,92 @@ describe('CartMilestonesService — "All users" milestone with an excluded segme
   })
 })
 
+describe('CartMilestonesService — "All users" milestone excluding first-time customers (107_cart_milestone_exclude_first_time, prevents a brand-new customer double-dipping on both the First-Time Offer AND this milestone)', () => {
+  it('excludes an ALL-users milestone for a first-time customer when the toggle is on (negative)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludeFirstTimeUsers: true }),
+      ]),
+      hasPriorOrder: vi.fn().mockResolvedValue(false), // no prior order = first-time
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked).toBeNull()
+    expect(repo.hasPriorOrder).toHaveBeenCalledWith(USER_ID)
+  })
+
+  it('still includes an ALL-users milestone for a returning customer even when the toggle is on (positive)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludeFirstTimeUsers: true }),
+      ]),
+      hasPriorOrder: vi.fn().mockResolvedValue(true), // has a prior order = not first-time
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+  })
+
+  it('never checks first-order status when the toggle is off (unaffected default case)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'ALL', excludeFirstTimeUsers: false }),
+      ]),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked?.id).toBe('m-1')
+    expect(repo.hasPriorOrder).not.toHaveBeenCalled()
+  })
+
+  it('a FIRST_TIME milestone ignores excludeFirstTimeUsers entirely — only ALL consults it (would otherwise exclude everyone it targets)', async () => {
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({ id: 'm-1', minCartAmount: 100, applicableUserType: 'FIRST_TIME', excludeFirstTimeUsers: true }),
+      ]),
+      hasPriorOrder: vi.fn().mockResolvedValue(false),
+    })
+    const service = new CartMilestonesService(repo, makeSegmentsRepoMock())
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    // hasPriorOrder is still called once here — but for the FIRST_TIME
+    // branch's own eligibility check, not the excludeFirstTimeUsers one.
+    expect(progress.unlocked?.id).toBe('m-1')
+    expect(repo.hasPriorOrder).toHaveBeenCalledTimes(1)
+  })
+
+  it('both exclusions can combine on the same ALL milestone — a first-time member of the excluded segment is blocked by either check', async () => {
+    const segmentsRepo = { isMember: vi.fn().mockResolvedValue(false) }
+    const repo = makeRepoMock({
+      findAllActive: vi.fn().mockResolvedValue([
+        tier({
+          id: 'm-1',
+          minCartAmount: 100,
+          applicableUserType: 'ALL',
+          excludeFirstTimeUsers: true,
+          excludedSegmentId: 'seg-vip',
+        }),
+      ]),
+      hasPriorOrder: vi.fn().mockResolvedValue(false),
+    })
+    const service = new CartMilestonesService(repo, segmentsRepo)
+
+    const progress = await service.getProgress(USER_ID, 500)
+
+    expect(progress.unlocked).toBeNull()
+    // Short-circuits on the first-time check — never even reaches the
+    // segment-membership lookup.
+    expect(segmentsRepo.isMember).not.toHaveBeenCalled()
+  })
+})
+
 describe('CartMilestonesService — per-user usage limit (2026-07-04, "reward every order forever" fix)', () => {
   it('excludes a milestone once the user has hit its usageLimitPerUser (negative)', async () => {
     const repo = makeRepoMock({

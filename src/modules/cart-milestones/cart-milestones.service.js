@@ -38,11 +38,17 @@ export class CartMilestonesService {
         : false
     }
     // ALL — optionally minus one excluded segment (106_cart_milestone_
-    // excluded_segment.sql). Lets an admin carve a segment that already has
-    // its own dedicated, segment-scoped milestone out of a broader "All
-    // users" one, so that segment doesn't double-dip on both rewards for
-    // the same purchase. FIRST_TIME/SEGMENT above never consult this —
-    // they already run their own single-audience rule.
+    // excluded_segment.sql) and/or minus first-time customers
+    // (107_cart_milestone_exclude_first_time.sql). Both let an admin carve
+    // a group that already has its own dedicated reward (a segment-scoped
+    // milestone, or the separate First-Time Offer feature) out of a
+    // broader "All users" one, so that group doesn't double-dip on both
+    // rewards for the same purchase. FIRST_TIME/SEGMENT above never
+    // consult either — they already run their own single-audience rule.
+    if (milestone.excludeFirstTimeUsers) {
+      const isFirstTime = !(await this.repo.hasPriorOrder(userId))
+      if (isFirstTime) return false
+    }
     if (milestone.excludedSegmentId) {
       const isExcluded = await this.segmentsRepo.isMember(milestone.excludedSegmentId, userId)
       if (isExcluded) return false
