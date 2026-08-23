@@ -132,7 +132,7 @@ export const markPickedUpSchema = {
 
 export const markDeliveredSchema = {
   tags: ['Delivery'],
-  summary: 'Mark order as delivered (OTP, proof URL, or demo mode)',
+  summary: 'Mark order as delivered — direct completion by default; OTP/proof URL/demo mode remain optional alternate paths',
   params: {
     type: 'object',
     required: ['id'],
@@ -143,6 +143,9 @@ export const markDeliveredSchema = {
   body: {
     type: 'object',
     properties: {
+      // otp is accepted (and, if sent, still verified) for backward
+      // compatibility with rider app builds that predate direct
+      // completion — no longer required to mark an order delivered.
       otp: { type: 'string', minLength: 4, maxLength: 6 },
       proofPhotoUrl: { type: 'string', format: 'uri' },
       demoMode: { type: 'boolean' },
@@ -152,16 +155,6 @@ export const markDeliveredSchema = {
       cashCollected: { type: 'number', minimum: 0 },
       upiCollected: { type: 'number', minimum: 0 },
     },
-    anyOf: [
-      { required: ['otp'] },
-      { required: ['proofPhotoUrl'] },
-      {
-        required: ['demoMode'],
-        properties: {
-          demoMode: { const: true },
-        },
-      },
-    ],
   },
 }
 

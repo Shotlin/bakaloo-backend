@@ -720,19 +720,11 @@ export class DeliveryService {
 
     const cleanOtp = `${otp || ''}`.trim()
     const cleanProof = `${proofPhotoUrl || ''}`.trim()
-    const allowDemoDelivery =
-      Boolean(demoMode) &&
-      (process.env.NODE_ENV !== 'production' ||
-        process.env.ALLOW_DEMO_DELIVERY_ACTIONS === 'true')
 
-    if (!allowDemoDelivery && !cleanOtp && !cleanProof) {
-      throw {
-        statusCode: 400,
-        message: 'OTP or delivery proof is required',
-        code: 'OTP_OR_PROOF_REQUIRED',
-      }
-    }
-
+    // Direct completion is the default now — the rider app no longer
+    // asks the customer for an OTP. otp/proofPhotoUrl remain accepted
+    // (and, if sent, still verified below) purely for backward
+    // compatibility with older rider app builds already in the field.
     if (cleanOtp) {
       const valid = await this.repository.verifyDeliveryOtp(orderId, cleanOtp)
       if (!valid) {
@@ -776,7 +768,7 @@ export class DeliveryService {
       riderId,
       assignmentId,
       assignmentStatus: assignment.status,
-      reason: allowDemoDelivery ? 'DEMO_MODE' : null,
+      reason: demoMode ? 'DEMO_MODE' : null,
     })
 
     const commissionEnabled = await this.commissionSettingsRepo.isCommissionEnabled()

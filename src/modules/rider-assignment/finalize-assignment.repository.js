@@ -80,6 +80,24 @@ export class FinalizeAssignmentRepository {
     )
   }
 
+  /**
+   * Clears the order's assigned rider once the order reaches a terminal
+   * state (DELIVERED/CANCELLED) from the admin dashboard. Without this,
+   * orders.rider_id stays set forever — delivery_assignments.status moves
+   * out of the open set so the rider's active-orders list stops showing
+   * it, but nothing ever nulled the order-level pointer, so any other
+   * screen/query keyed on orders.rider_id (e.g. admin's "already assigned"
+   * check) kept treating the order as still assigned to that rider.
+   */
+  async clearOrderAssignment(client, orderId) {
+    await client.query(
+      `UPDATE orders
+       SET rider_id = NULL, assignment_method = NULL, area_segment_id = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [orderId]
+    )
+  }
+
   async mintToken(client, { orderId, assignmentId, token, version, expiresAt }) {
     const { rows } = await client.query(
       `INSERT INTO order_pickup_tokens (order_id, delivery_assignment_id, token, version, status, expires_at)

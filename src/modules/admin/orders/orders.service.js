@@ -316,6 +316,19 @@ export class AdminOrdersService {
       })
     }
 
+    // orders.rider_id is never cleared by the DELIVERED/CANCELLED SQL above
+    // (that only flips delivery_assignments.status) — leaving it stale is
+    // what made a dashboard-driven status change leave the order looking
+    // permanently "assigned" to the rider. Once the order reaches either
+    // terminal state, the rider is done with it, so unassign for real.
+    if (newStatus === 'DELIVERED' || newStatus === 'CANCELLED') {
+      try {
+        await this.finalizeAssignmentRepo.clearOrderAssignment(pool, orderId)
+      } catch (err) {
+        console.error('Rider unassignment failed after status update (non-blocking):', err.message)
+      }
+    }
+
     return { orderId, oldStatus, newStatus }
   }
 
