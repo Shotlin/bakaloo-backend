@@ -89,6 +89,12 @@ async function socketioPlugin(fastify) {
   // deliver them to the real connected clients.
   const pubClient = redis.duplicate()
   const subClient = redis.duplicate()
+  // ioredis logs "missing 'error' handler on this Redis client" (and can
+  // crash the process on an unhandled error event) without these — a
+  // transient Redis blip on either duplicated client would otherwise be
+  // able to take a PM2 worker down.
+  pubClient.on('error', (err) => logger.warn({ err: err.message }, 'Socket.IO Redis adapter pub client error'))
+  subClient.on('error', (err) => logger.warn({ err: err.message }, 'Socket.IO Redis adapter sub client error'))
   io.adapter(createAdapter(pubClient, subClient))
 
   // ─── AUTH MIDDLEWARE ──────────────────────────────────
