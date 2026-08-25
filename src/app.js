@@ -181,6 +181,13 @@ export const buildApp = async () => {
     prefix: '/api/v1/theme',
   })
 
+  // Legal Pages (public) — Terms, Privacy, About; dashboard-editable
+  // (see src/modules/admin/legal-pages/), fetched by the website and,
+  // via its in-app WebView, the mobile apps.
+  await app.register(import('./modules/legal-pages/legal-pages.routes.js'), {
+    prefix: '/api/v1/legal-pages',
+  })
+
   // Wishlist — fully implemented
   await app.register(import('./modules/wishlist/wishlist.routes.js'), {
     prefix: '/api/v1/wishlist',
