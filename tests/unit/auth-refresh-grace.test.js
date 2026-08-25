@@ -21,6 +21,7 @@ vi.mock('../../src/utils/jwt.js', () => ({
     refreshToken: 'rotated.refresh.jwt',
   })),
   verifyToken: vi.fn(),
+  refreshTokenTtlSeconds: vi.fn(() => 7 * 24 * 60 * 60),
 }))
 
 vi.mock('../../src/utils/otp.js', () => ({

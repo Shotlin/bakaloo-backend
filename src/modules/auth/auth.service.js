@@ -1,6 +1,6 @@
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.js'
 import { sendSmsOtp, verifySmsOtp } from '../../utils/sms.js'
-import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken } from '../../utils/jwt.js'
+import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken, refreshTokenTtlSeconds } from '../../utils/jwt.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { redis } from '../../config/redis.js'
 import { env } from '../../config/env.js'
@@ -241,7 +241,7 @@ export class AuthService {
         `${REFRESH_TOKEN_PREFIX}${user.id}`,
         refreshToken,
         'EX',
-        7 * 24 * 60 * 60
+        refreshTokenTtlSeconds()
       )
 
       logger.info(
@@ -325,7 +325,7 @@ export class AuthService {
       `${REFRESH_TOKEN_PREFIX}${user.id}`,
       tokens.refreshToken,
       'EX',
-      7 * 24 * 60 * 60 // 7 days
+      refreshTokenTtlSeconds()
     )
 
     // For RIDER users, fetch rider_profile to get verification (approval) status
@@ -415,7 +415,7 @@ export class AuthService {
         `${REFRESH_TOKEN_PREFIX}${user.id}`,
         tokens.refreshToken,
         'EX',
-        7 * 24 * 60 * 60
+        refreshTokenTtlSeconds()
       )
 
       return {

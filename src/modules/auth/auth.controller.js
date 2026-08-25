@@ -1,5 +1,6 @@
 import { success, error } from '../../utils/apiResponse.js'
 import { env } from '../../config/env.js'
+import { refreshTokenTtlSeconds } from '../../utils/jwt.js'
 
 /**
  * Auth controller — thin HTTP layer
@@ -64,7 +65,7 @@ export class AuthController {
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       path: '/api/v1/auth',
-      maxAge: 7 * 24 * 60 * 60, // 7 days
+      maxAge: refreshTokenTtlSeconds(),
     })
 
     return reply.code(200).send(
@@ -135,7 +136,7 @@ export class AuthController {
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       path: '/api/v1/auth',
-      maxAge: 7 * 24 * 60 * 60,
+      maxAge: refreshTokenTtlSeconds(),
     })
 
     return reply.code(200).send(

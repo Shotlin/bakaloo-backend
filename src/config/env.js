@@ -28,7 +28,14 @@ const envSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(32),
   JWT_REFRESH_SECRET: z.string().min(32),
   JWT_ACCESS_EXPIRY: z.string().default('15m'),
-  JWT_REFRESH_EXPIRY: z.string().default('7d'),
+  // Long-lived on purpose (Blinkit/Zomato/Zepto-style "log in once"): this is
+  // a rolling window, not a fixed countdown — every successful refresh (see
+  // auth.service.js#refreshToken) reissues a new refresh token with a full
+  // fresh JWT_REFRESH_EXPIRY, so a user who opens the app at least once
+  // within this window never actually gets logged out. The session instead
+  // ends on an explicit event: logout, a new login elsewhere, or simply not
+  // opening the app for this entire duration.
+  JWT_REFRESH_EXPIRY: z.string().default('365d'),
   COOKIE_SECRET: z.string().min(16).optional(),
   // HMAC secret for signing order_pickup_tokens (QR pickup credentials).
   // Optional: falls back to JWT_ACCESS_SECRET when unset (see utils/qrToken.js).

@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken'
+import ms from 'ms'
 import { env } from '../config/env.js'
 
 /**
@@ -22,6 +23,18 @@ export function signRefreshToken(payload) {
   return jwt.sign(payload, env.JWT_REFRESH_SECRET, {
     expiresIn: env.JWT_REFRESH_EXPIRY,
   })
+}
+
+/**
+ * Seconds a refresh token session should live in Redis — derived from the
+ * same JWT_REFRESH_EXPIRY that signs the token's own `exp` claim, so the
+ * Redis-side session record and the JWT's signature never disagree about
+ * when the session actually ends (they used to: three call sites had this
+ * hardcoded to a literal 7 days regardless of what JWT_REFRESH_EXPIRY said).
+ * @returns {number}
+ */
+export function refreshTokenTtlSeconds() {
+  return Math.floor(ms(env.JWT_REFRESH_EXPIRY) / 1000)
 }
 
 /**
