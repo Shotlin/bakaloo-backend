@@ -181,6 +181,58 @@ export class AuthRepository {
   }
 
   /**
+   * Paginated version of {@link findActiveShopStaffByUserId} for
+   * `GET /api/v1/auth/my-shops` (Requirement R19.5, design §5.4). Same
+   * "active" definition and join shape as the admin module's
+   * `loadActiveShopAssignments` (src/modules/admin/auth/auth.repository.js),
+   * with `branch_code` added and results paged newest-shop-name-first.
+   *
+   * @param {string} userId
+   * @param {{ page: number, limit: number }} pagination - already clamped
+   *   by the caller (AuthService.getMyShops).
+   * @returns {Promise<{
+   *   items: Array<{shop_id, shop_name, branch_code, shop_role, permissions}>,
+   *   total: number,
+   * }>}
+   */
+  async loadActiveShopAssignmentsPaginated(userId, { page, limit }) {
+    const offset = (page - 1) * limit
+
+    const { rows: items } = await query(
+      `SELECT
+         ss.shop_id     AS shop_id,
+         s.name         AS shop_name,
+         s.branch_code  AS branch_code,
+         ss.role        AS shop_role,
+         ss.permissions AS permissions
+       FROM shop_staff ss
+       JOIN shops s ON s.id = ss.shop_id
+      WHERE ss.user_id    = $1
+        AND ss.is_active  = true
+        AND ss.deleted_at IS NULL
+        AND s.is_active   = true
+        AND s.deleted_at  IS NULL
+      ORDER BY s.name ASC
+      LIMIT $2 OFFSET $3`,
+      [userId, limit, offset]
+    )
+
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS total
+       FROM shop_staff ss
+       JOIN shops s ON s.id = ss.shop_id
+      WHERE ss.user_id    = $1
+        AND ss.is_active  = true
+        AND ss.deleted_at IS NULL
+        AND s.is_active   = true
+        AND s.deleted_at  IS NULL`,
+      [userId]
+    )
+
+    return { items, total: countRows[0].total }
+  }
+
+  /**
    * Find a single active shop_staff record for a (user_id, shop_id) pair.
    * Used by select-shop to validate a user's access to the requested shop.
    * Requirement 2.8, 13.2

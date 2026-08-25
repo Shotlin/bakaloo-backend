@@ -547,10 +547,13 @@ export class AuthService {
     )
 
     return {
-      items,
-      page: safePage,
-      limit: safeLimit,
-      total,
+      shops: items,
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+      },
     }
   }
 
