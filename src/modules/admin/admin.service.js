@@ -1,4 +1,8 @@
 import { notificationQueue } from '../../config/bullmq.js'
+import {
+  ORDER_NOTIFICATION_SETTING_KEYS,
+  invalidateOrderNotificationSettingsCache,
+} from '../notifications/order-notification-settings.js'
 
 /**
  * Admin service — business logic for admin operations
@@ -116,6 +120,15 @@ export class AdminService {
       if (!existing) throw { statusCode: 400, message: `Unknown setting: ${key}` }
       results[key] = await this.repository.updateSetting(key, value)
     }
+
+    // Order-event notification toggles are cached in-process (hot path: every
+    // order status change) — invalidate immediately so a saved toggle takes
+    // effect on the very next notification instead of waiting out the cache
+    // TTL. See order-notification-settings.js.
+    if (Object.keys(settings).some((key) => ORDER_NOTIFICATION_SETTING_KEYS.has(key))) {
+      invalidateOrderNotificationSettingsCache()
+    }
+
     return results
   }
 }

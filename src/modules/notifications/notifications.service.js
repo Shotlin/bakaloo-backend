@@ -1,5 +1,6 @@
 import { sendPush } from '../../utils/pushNotification.js'
 import { logger } from '../../config/logger.js'
+import { isOrderEventNotificationEnabled } from './order-notification-settings.js'
 
 /**
  * Notifications service — business logic for notifications
@@ -62,6 +63,23 @@ export class NotificationsService {
    * Called by other modules (orders, delivery, etc.)
    */
   async sendNotification(userId, { title, body, type = 'general', data = {} }) {
+    // Order-lifecycle notifications (placed/confirmed/preparing/.../
+    // delivered/cancelled/refunded) can be turned off per-event from
+    // Settings → Order Notifications on the dashboard. When disabled, skip
+    // entirely — no in-app row, no socket emit, no push — rather than
+    // suppressing just the push, since the whole point is fewer
+    // notifications, not just fewer banners.
+    if (type === 'ORDER_STATUS' && data?.timelineType) {
+      const enabled = await isOrderEventNotificationEnabled(data.timelineType)
+      if (!enabled) {
+        logger.info(
+          { userId, timelineType: data.timelineType, orderId: data.orderId },
+          'Order-event notification suppressed by admin setting'
+        )
+        return null
+      }
+    }
+
     // 1. Create in-app notification
     const notification = await this.repository.createNotification(userId, {
       title, body, type, data,
