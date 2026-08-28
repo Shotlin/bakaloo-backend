@@ -1,6 +1,9 @@
 import { sendPush } from '../../utils/pushNotification.js'
 import { logger } from '../../config/logger.js'
-import { isOrderEventNotificationEnabled } from './order-notification-settings.js'
+import {
+  isOrderEventNotificationEnabled,
+  getAllOrderEventFlags,
+} from './order-notification-settings.js'
 
 /**
  * Notifications service — business logic for notifications
@@ -113,5 +116,14 @@ export class NotificationsService {
   // Alias for backward compatibility
   async createNotification(userId, opts) {
     return this.sendNotification(userId, opts)
+  }
+
+  /**
+   * Public — no user context. Lets the customer app's own order-status UI
+   * (the home-screen tracking banner) skip announcing a status it knows the
+   * matching push/in-app notification was told to stay quiet about.
+   */
+  async getOrderEventFlags() {
+    return getAllOrderEventFlags()
   }
 }

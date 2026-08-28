@@ -71,4 +71,15 @@ export class NotificationsController {
     await this.service.registerToken(request.user.id, token, platform)
     return reply.code(200).send(success(null, 'Token registered successfully'))
   }
+
+  /**
+   * GET /event-flags — Public. Which order-lifecycle events currently send
+   * a customer notification, keyed by timeline type (ORDER_PLACED,
+   * CONFIRMED, PREPARING, PACKED, RIDER_ACCEPTED, PICKED_UP, OTP_RESENT,
+   * DELIVERED, CANCELLED, REFUNDED).
+   */
+  async getEventFlags(request, reply) {
+    const flags = await this.service.getOrderEventFlags()
+    return reply.code(200).send(success(flags, 'Order notification flags fetched'))
+  }
 }

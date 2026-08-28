@@ -61,4 +61,15 @@ export default async function notificationsRoutes(fastify) {
     schema: registerTokenSchema,
     preHandler: [fastify.authenticate],
   }, controller.registerToken.bind(controller))
+
+  // GET /event-flags — Public, no auth. Lets the customer app's own
+  // order-status UI (home-screen tracking banner) stay in sync with the
+  // same Settings → Order Notifications toggles that gate the push/in-app
+  // notification, matching the public /store/status pattern.
+  fastify.get('/event-flags', {
+    schema: {
+      tags: ['Notifications'],
+      summary: 'Get which order-lifecycle events currently notify customers',
+    },
+  }, controller.getEventFlags.bind(controller))
 }

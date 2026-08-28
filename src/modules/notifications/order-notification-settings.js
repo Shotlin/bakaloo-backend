@@ -146,3 +146,29 @@ export async function isOrderEventNotificationEnabled(timelineType) {
     return event.defaultEnabled
   }
 }
+
+/**
+ * Every event's current enabled/disabled flag, keyed by timelineType —
+ * consumed by the public GET /notifications/event-flags route so the
+ * customer app can keep its own order-status UI (the home-screen top
+ * tracking banner) in sync with the same toggles that gate the push/in-app
+ * notification, instead of the banner announcing a status change the
+ * notification was told to stay quiet about.
+ */
+export async function getAllOrderEventFlags() {
+  let settings
+  try {
+    const isStale = !cachedSettings || Date.now() - cachedAt > CACHE_TTL_MS
+    settings = isStale ? await loadSettings() : cachedSettings
+  } catch (err) {
+    logger.error({ err }, 'Failed to read order notification settings; using defaults')
+    settings = new Map()
+  }
+
+  const flags = {}
+  for (const event of ORDER_NOTIFICATION_EVENTS) {
+    const storedValue = settings.get(event.settingKey)
+    flags[event.timelineType] = storedValue === undefined ? event.defaultEnabled : storedValue === true
+  }
+  return flags
+}
