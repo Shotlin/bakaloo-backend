@@ -381,6 +381,7 @@ async function getTabManifestRows(storeKey) {
        tab.image_url AS tab_icon_url,
        tab.text_color AS tab_text_color,
        tab.sort_order AS tab_order,
+       tab.is_default AS is_default,
        theme_a.id AS theme_id,
        theme_a.ab_variant,
        theme_a.theme_data,
@@ -431,6 +432,7 @@ function buildTabManifestResponse(storeKey, rows) {
       tab_icon_url: row.tab_icon_url,
       tab_text_color: row.tab_text_color,
       tab_order: row.tab_order,
+      is_default: !!row.is_default,
       variant: row.ab_variant || 'A',
       theme_data: themeData,
       ...(variantBThemeData

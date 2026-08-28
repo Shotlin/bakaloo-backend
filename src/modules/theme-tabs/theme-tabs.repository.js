@@ -110,9 +110,10 @@ export class ThemeTabsRepository {
          text_color,
          sort_order,
          status,
+         is_default,
          merch_config
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
        RETURNING *`,
       [
         data.store_key,
@@ -122,6 +123,7 @@ export class ThemeTabsRepository {
         data.text_color || null,
         data.sort_order ?? 0,
         data.status || 'active',
+        !!data.is_default,
         JSON.stringify(data.merch_config),
       ]
     )
@@ -152,6 +154,11 @@ export class ThemeTabsRepository {
       params.push(Number(data.sort_order) || 0)
     }
 
+    if (data.is_default !== undefined) {
+      sets.push(`is_default = $${idx++}`)
+      params.push(!!data.is_default)
+    }
+
     if (data.merch_config !== undefined) {
       sets.push(`merch_config = $${idx++}::jsonb`)
       params.push(JSON.stringify(data.merch_config))
@@ -178,6 +185,17 @@ export class ThemeTabsRepository {
       params
     )
     return tab || null
+  }
+
+  async clearDefaultsExcept(storeKey, exceptId) {
+    await query(
+      `UPDATE theme_tabs
+       SET is_default = false, updated_at = NOW()
+       WHERE store_key = $1
+         AND is_default = true
+         AND ($2::uuid IS NULL OR id != $2)`,
+      [storeKey, exceptId]
+    )
   }
 
   async archive(id) {

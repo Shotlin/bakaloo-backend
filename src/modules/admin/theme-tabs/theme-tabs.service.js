@@ -112,6 +112,13 @@ export class ThemeTabsService {
       }
     }
 
+    // Only one tab per store can be the app's default landing tab. Clear any
+    // existing default before inserting the new row so the DB never has to
+    // reject a transient two-defaults state (idx_theme_tabs_one_default_per_store).
+    if (status === 'active' && data.is_default) {
+      await repo.clearDefaultsExcept(storeKey, null)
+    }
+
     let tab
     try {
       tab = await repo.create({
@@ -164,6 +171,11 @@ export class ThemeTabsService {
           `An active tab with key "${nextKey}" already exists for this store. Choose a different name or key.`
         )
       }
+    }
+
+    // Same "clear before write" rule as create() — only one default per store.
+    if (data.is_default === true) {
+      await repo.clearDefaultsExcept(storeKey, id)
     }
 
     let tab
@@ -228,6 +240,13 @@ export class ThemeTabsService {
 
     if (tab.status === 'active') {
       await rebalanceStoreTabs(tab.store_key, tab)
+
+      // The restored tab may have been the store's default before it was
+      // archived — reclaim that slot from whichever tab holds it now rather
+      // than risk two active defaults.
+      if (tab.is_default) {
+        await repo.clearDefaultsExcept(tab.store_key, tab.id)
+      }
     }
     await invalidateTabCaches()
     logAdminActivity(adminId, 'RESTORE_THEME_TAB', 'theme_tab', id, null, null, ip)
