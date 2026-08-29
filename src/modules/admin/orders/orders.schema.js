@@ -15,6 +15,12 @@ export const listOrdersSchema = {
       endDate: { type: 'string', format: 'date-time' },
       deliveryType: { type: 'string', enum: ['express', 'scheduled', 'standard'] },
       needsPaymentReview: { type: 'boolean' },
+      recoveredFromFailed: { type: 'boolean' },
+      paymentStatus: { type: 'string' },
+      riderId: { type: 'string', format: 'uuid' },
+      minAmount: { type: 'number' },
+      maxAmount: { type: 'number' },
+      area: { type: 'string' },
     },
   },
 }
@@ -179,6 +185,18 @@ export const razorpayDetailsSchema = {
   tags: ['Admin Orders'],
   summary: "Full payment detail fetched live from Razorpay's own record",
   params: uuidParam,
+}
+
+export const bulkReconcilePaymentsSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Bulk re-check a batch of orders directly against Razorpay (historical audit tool)',
+  body: {
+    type: 'object',
+    required: ['orderIds'],
+    properties: {
+      orderIds: { type: 'array', maxItems: 50, items: { type: 'string', format: 'uuid' } },
+    },
+  },
 }
 
 export const cancelOrderSchema = {

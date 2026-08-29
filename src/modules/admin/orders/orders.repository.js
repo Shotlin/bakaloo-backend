@@ -2,10 +2,12 @@ import { query, getClient } from '../../../config/database.js'
 import { revokeOrderPickupTokens } from '../../../utils/pickupTokens.js'
 
 export class AdminOrdersRepository {
-  async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate, deliveryType, needsPaymentReview }) {
-    // needsPaymentReview requires a join to payments — kept as a LEFT JOIN
-    // (not applied to the base query) so it costs nothing for the normal
-    // order list, and only filters rows when explicitly requested.
+  async findAll({ offset, limit, status, paymentMethod, paymentStatus, search, startDate, endDate, deliveryType, needsPaymentReview, recoveredFromFailed, riderId, minAmount, maxAmount, area }) {
+    // needsPaymentReview/recoveredFromFailed both key off payments.metadata,
+    // so they share one join — kept out of the base query (not a LEFT JOIN)
+    // so it costs nothing for the normal order list, and only applies when
+    // one of these two flags is actually requested.
+    const needsPaymentsJoin = needsPaymentReview || recoveredFromFailed
     let sql = `
       SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
              ru.name AS rider_name, sh.name AS shop_name,
@@ -18,7 +20,7 @@ export class AdminOrdersRepository {
       LEFT JOIN users u ON u.id = o.user_id
       LEFT JOIN users ru ON ru.id = o.rider_id
       LEFT JOIN shops sh ON sh.id = o.shop_id
-      ${needsPaymentReview ? 'JOIN payments p ON p.order_id = o.id' : ''}
+      ${needsPaymentsJoin ? 'JOIN payments p ON p.order_id = o.id' : ''}
       WHERE 1=1
     `
     const params = []
@@ -26,6 +28,7 @@ export class AdminOrdersRepository {
 
     if (status) { params.push(status); sql += ` AND o.status = $${idx++}` }
     if (paymentMethod) { params.push(paymentMethod); sql += ` AND o.payment_method = $${idx++}` }
+    if (paymentStatus) { params.push(paymentStatus); sql += ` AND o.payment_status = $${idx++}` }
     if (startDate) { params.push(startDate); sql += ` AND o.created_at >= $${idx++}` }
     if (endDate) { params.push(endDate); sql += ` AND o.created_at <= $${idx++}` }
     if (search) {
@@ -43,8 +46,25 @@ export class AdminOrdersRepository {
     if (needsPaymentReview) {
       sql += ` AND p.metadata->>'needs_manual_review' = 'true'`
     }
+    if (recoveredFromFailed) {
+      // Historical audit trail: a payment that was shown FAILED (and may
+      // already have been told to the customer) but Razorpay later
+      // confirmed was actually captured — auto-recovered by the payment
+      // recovery sweep or a manual "Re-check with Razorpay".
+      sql += ` AND p.metadata->>'recovered_from_failed' = 'true'`
+    }
+    if (riderId) { params.push(riderId); sql += ` AND o.rider_id = $${idx++}` }
+    if (minAmount != null) { params.push(minAmount); sql += ` AND o.total_amount >= $${idx++}` }
+    if (maxAmount != null) { params.push(maxAmount); sql += ` AND o.total_amount <= $${idx++}` }
+    if (area) {
+      // Free-text box on the UI ("Area / Pincode") — matches either the
+      // saved delivery pincode or city, whichever the admin typed.
+      params.push(`%${area}%`)
+      sql += ` AND (o.delivery_address->>'pincode' ILIKE $${idx} OR o.delivery_address->>'city' ILIKE $${idx})`
+      idx++
+    }
 
-    const countSql = (needsPaymentReview
+    const countSql = (needsPaymentsJoin
       ? `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id JOIN payments p ON p.order_id = o.id WHERE 1=1`
       : `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1`) +
       sql.split('WHERE 1=1')[1].replace(/ORDER BY.*$/, '').replace(/LIMIT.*$/, '')
@@ -73,6 +93,19 @@ export class AdminOrdersRepository {
        FROM orders o
        JOIN payments p ON p.order_id = o.id
        WHERE p.metadata->>'needs_manual_review' = 'true'`
+    )
+    return rows[0].count
+  }
+
+  /** Count of orders where a payment previously shown FAILED was later
+   *  confirmed captured by Razorpay — for the Orders page's "Recovered"
+   *  filter tab badge. */
+  async countRecoveredFromFailed() {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM orders o
+       JOIN payments p ON p.order_id = o.id
+       WHERE p.metadata->>'recovered_from_failed' = 'true'`
     )
     return rows[0].count
   }

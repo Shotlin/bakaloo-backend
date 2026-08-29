@@ -7,7 +7,7 @@ import {
   manualOrderSchema, invoiceSchema, packingSlipSchema, exportSchema,
   refundOrderSchema, cancelOrderSchema, bulkStatusSchema,
   rescheduleOrderSchema, orderNotesListSchema, addOrderNoteSchema,
-  reconcilePaymentSchema, razorpayDetailsSchema,
+  reconcilePaymentSchema, razorpayDetailsSchema, bulkReconcilePaymentsSchema,
 } from './orders.schema.js'
 
 /**
@@ -36,6 +36,7 @@ export default async function adminOrdersRoutes(fastify) {
   fastify.post('/:id/refund', { schema: refundOrderSchema, preHandler: adminAuth }, ctrl.refundOrder.bind(ctrl))
   fastify.post('/:id/reconcile-payment', { schema: reconcilePaymentSchema, preHandler: adminAuth }, ctrl.reconcilePayment.bind(ctrl))
   fastify.get('/:id/razorpay-details', { schema: razorpayDetailsSchema, preHandler: adminAuth }, ctrl.getRazorpayDetails.bind(ctrl))
+  fastify.post('/bulk-reconcile-payment', { schema: bulkReconcilePaymentsSchema, preHandler: adminAuth }, ctrl.bulkReconcilePayments.bind(ctrl))
   fastify.post('/:id/cancel', { schema: cancelOrderSchema, preHandler: adminAuth }, ctrl.cancelOrder.bind(ctrl))
   fastify.post('/bulk-status', { schema: bulkStatusSchema, preHandler: adminAuth }, ctrl.bulkUpdateStatus.bind(ctrl))
 }

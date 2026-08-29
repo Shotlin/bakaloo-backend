@@ -44,12 +44,76 @@ export function startPaymentExpiryWorker() {
     } catch (err) {
       logger.error({ err: err.message }, 'Payment expiry worker poll error')
     }
+    try {
+      await _processRecentlyFailedPayments()
+    } catch (err) {
+      logger.error({ err: err.message }, 'Payment expiry worker failed-payment recovery sweep error')
+    }
   }, POLL_INTERVAL_MS)
 
   // Also run immediately on startup
   _processExpiredPayments().catch(err =>
     logger.error({ err: err.message }, 'Payment expiry worker initial poll error')
   )
+  _processRecentlyFailedPayments().catch(err =>
+    logger.error({ err: err.message }, 'Payment expiry worker initial failed-payment recovery sweep error')
+  )
+}
+
+/**
+ * Recovery sweep for payments already marked FAILED — closes a real gap:
+ * once payment_status flips to FAILED (a signature mismatch on /verify, or
+ * a webhook payment.failed event), nothing ever re-checked it again, even
+ * if Razorpay's own record later shows it captured. That's exactly the
+ * "bank was slow, money arrived after we'd already given up" scenario —
+ * a delayed bank-side settlement completing after Razorpay had already
+ * told us (or we'd concluded) the attempt failed.
+ *
+ * Bounded to a recent window (48h) to keep the query cheap — real-world
+ * settlement delays resolve in minutes to a few hours, not days. Uses
+ * completeVerifiedPayment's allowRecoveryFromFailed flag, which still
+ * refuses to blindly trust this path: it independently re-verifies with
+ * Razorpay's API before ever touching the row (via reconcileWithRazorpay),
+ * and still won't auto-confirm an order that's already moved on — that
+ * case gets flagged needs_manual_review exactly like every other path.
+ */
+async function _processRecentlyFailedPayments() {
+  // status = 'FAILED' alone is sufficient to exclude already-recovered rows
+  // — completeVerifiedPayment always flips status to 'PAID' on recovery
+  // (success or needs_manual_review branch alike), so a recovered payment
+  // naturally drops out of this query on the very next sweep.
+  const { rows } = await query(
+    `SELECT id AS payment_id, order_id, razorpay_order_id
+     FROM payments
+     WHERE status = 'FAILED'
+       AND razorpay_order_id IS NOT NULL
+       AND updated_at >= NOW() - INTERVAL '48 hours'
+     LIMIT ${BATCH_LIMIT}`
+  )
+
+  if (rows.length === 0) return
+
+  logger.info({ count: rows.length }, 'Re-checking recently-FAILED payments against Razorpay')
+
+  for (const row of rows) {
+    try {
+      const result = await paymentsService.reconcileWithRazorpay(
+        row.razorpay_order_id,
+        'FAILED_PAYMENT_RECOVERY_SWEEP',
+        { allowRecoveryFromFailed: true }
+      )
+      if (result.captured && result.success) {
+        logger.warn(
+          { orderId: row.order_id, needsManualReview: !!result.needsManualReview },
+          'Payment previously marked FAILED was actually captured by Razorpay — recovered'
+        )
+      }
+    } catch (err) {
+      // Razorpay check failed (network/API) — leave it FAILED for now,
+      // next poll tries again within the 48h window.
+      logger.warn({ err: err.message, orderId: row.order_id }, 'Failed-payment recovery check errored, will retry next poll')
+    }
+  }
 }
 
 export function stopPaymentExpiryWorker() {

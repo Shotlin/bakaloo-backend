@@ -149,6 +149,15 @@ export class AdminOrdersController {
     }
   }
 
+  async bulkReconcilePayments(request, reply) {
+    try {
+      const data = await this.service.bulkReconcilePayments(request.body.orderIds, request.user.id, request.ip)
+      return reply.send(success(data, 'Bulk re-check complete'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
   async getRazorpayDetails(request, reply) {
     try {
       const data = await this.service.getRazorpayDetails(request.params.id)

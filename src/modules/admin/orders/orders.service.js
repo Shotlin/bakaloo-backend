@@ -181,15 +181,16 @@ export class AdminOrdersService {
   }
 
   async getStatsByStatus() {
-    const [statusCounts, needsPaymentReview] = await Promise.all([
+    const [statusCounts, needsPaymentReview, recoveredFromFailed] = await Promise.all([
       this.repository.getStatsByStatus(),
       this.repository.countNeedsPaymentReview(),
+      this.repository.countRecoveredFromFailed(),
     ])
-    // NEEDS_REVIEW isn't a real order_status — it's a payment-metadata flag
-    // spanning any order status — but bundled here so the Orders page's
-    // existing tab-badge hook (useOrderStatusCounts) surfaces it for free
-    // instead of needing a second round-trip.
-    return { ...statusCounts, NEEDS_REVIEW: needsPaymentReview }
+    // NEEDS_REVIEW/RECOVERED aren't real order_status values — they're
+    // payment-metadata flags spanning any order status — but bundled here
+    // so the Orders page's existing tab-badge hook (useOrderStatusCounts)
+    // surfaces them for free instead of needing extra round-trips.
+    return { ...statusCounts, NEEDS_REVIEW: needsPaymentReview, RECOVERED: recoveredFromFailed }
   }
 
   async findById(orderId) {
@@ -681,6 +682,32 @@ export class AdminOrdersService {
     const paymentsService = new PaymentsService(new PaymentsRepository())
 
     return paymentsService.getFullRazorpayDetails(payment.razorpay_payment_id)
+  }
+
+  /**
+   * Bulk "Re-check with Razorpay" — the historical-audit tool: select a
+   * batch of old orders already marked FAILED (or stuck PENDING) and
+   * re-verify each directly against Razorpay, recovering any that were
+   * actually captured. Sequential, not parallel — respects Razorpay's
+   * per-account rate limits rather than firing 50 requests at once.
+   */
+  async bulkReconcilePayments(orderIds, adminId, ip) {
+    if (orderIds.length > 50) throw { statusCode: 400, message: 'Max 50 orders at once' }
+
+    const results = []
+    for (const orderId of orderIds) {
+      try {
+        const result = await this.reconcilePayment(orderId, adminId, ip)
+        results.push({ orderId, captured: result.captured, needsManualReview: result.needsManualReview })
+      } catch (err) {
+        results.push({ orderId, error: err.message || 'Reconcile failed' })
+      }
+    }
+
+    logAdminActivity(adminId, `Bulk re-checked ${orderIds.length} orders against Razorpay`, 'order', null, null,
+      { count: orderIds.length, recovered: results.filter((r) => r.captured).length }, ip)
+
+    return results
   }
 
   async cancelOrder(orderId, body, adminId, ip) {

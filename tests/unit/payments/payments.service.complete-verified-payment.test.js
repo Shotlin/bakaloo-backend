@@ -226,3 +226,81 @@ describe('PaymentsService.completeVerifiedPayment — order-status guard against
     expect(queuedJobs).toHaveLength(0)
   })
 })
+
+describe('PaymentsService.completeVerifiedPayment — recovering a payment previously marked FAILED', () => {
+  beforeEach(() => {
+    queuedJobs.length = 0
+  })
+
+  it('leaves a FAILED payment alone when allowRecoveryFromFailed is not passed — the default for every ordinary caller', async () => {
+    const { service, calls } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'FAILED' },
+      orderRow: { id: ORDER_ID, status: 'PENDING' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'PAYMENT_WEBHOOK',
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.skipped).toBe(true)
+    expect(result.reason).toBe('FAILED')
+    // Never even looked at the orders table — bailed out before that.
+    expect(calls.some((c) => c.sql.includes('FROM orders'))).toBe(false)
+    expect(queuedJobs).toHaveLength(0)
+  })
+
+  it('recovers and confirms the order when allowRecoveryFromFailed is true and the order is still PENDING, tagging it recovered_from_failed', async () => {
+    const { service, calls, fastify } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'FAILED', amount: '127.00' },
+      orderRow: { id: ORDER_ID, status: 'PENDING', order_number: 'GRO-1002' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'FAILED_PAYMENT_RECOVERY_SWEEP',
+      allowRecoveryFromFailed: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.needsManualReview).toBeFalsy()
+    expect(calls.some((c) => c.sql.startsWith('UPDATE orders') && c.sql.includes("status = 'CONFIRMED'"))).toBe(true)
+    expect(queuedJobs).toHaveLength(1)
+
+    // Tagged distinctly so the dashboard's "Recovered" filter and count can
+    // find it later — the row's own `status` will read PAID by then, with
+    // no other trace of ever having been FAILED unless this is recorded.
+    const paymentUpdate = calls.find((c) => c.sql.startsWith('UPDATE payments'))
+    expect(paymentUpdate.sql).toContain('recovered_from_failed')
+
+    // This is exactly the "we told the customer it failed and we were
+    // wrong" case — worth its own notification even though it auto-healed.
+    expect(fastify.emitDashboardPayment).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: ORDER_ID, recoveredFromFailed: true, amount: 127 })
+    )
+  })
+
+  it('still flags for manual review (not blind auto-confirm) when a recovered FAILED payment belongs to an order that already moved on', async () => {
+    const { service, calls } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'FAILED', amount: '127.00' },
+      orderRow: { id: ORDER_ID, status: 'CANCELLED', order_number: 'GRO-1003' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'FAILED_PAYMENT_RECOVERY_SWEEP',
+      allowRecoveryFromFailed: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.needsManualReview).toBe(true)
+    // The recovery path doesn't bypass the resurrection guard — it's the
+    // same finalize function, same protections.
+    expect(calls.some((c) => c.sql.startsWith('UPDATE orders'))).toBe(false)
+    expect(queuedJobs).toHaveLength(0)
+  })
+})

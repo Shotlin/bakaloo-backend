@@ -158,7 +158,29 @@ export class PaymentsService {
       .digest('hex')
 
     if (expectedSignature !== razorpaySignature) {
-      logger.warn({ razorpayOrderId }, 'Payment signature verification failed')
+      logger.warn({ razorpayOrderId }, 'Payment signature verification failed — cross-checking with Razorpay directly before declaring failure')
+
+      // The signature is client-supplied — a network hiccup or client bug
+      // could corrupt it even when the payment genuinely succeeded. Never
+      // finalize FAILED on this alone: ask Razorpay directly first. Payment
+      // is still PENDING here (mismatch hasn't been persisted yet), so a
+      // real capture completes through the normal path, no special flag
+      // needed.
+      try {
+        const reconciled = await this.reconcileWithRazorpay(razorpayOrderId, 'PAYMENT_VERIFY_SIGNATURE_MISMATCH_RECHECK')
+        if (reconciled.captured && reconciled.success) {
+          logger.info(
+            { razorpayOrderId, needsManualReview: !!reconciled.needsManualReview },
+            'Signature mismatch, but Razorpay confirms this payment was actually captured — completed instead of failed'
+          )
+          return { success: true, payment: reconciled.payment, needsManualReview: reconciled.needsManualReview }
+        }
+      } catch (err) {
+        // Razorpay check itself failed (network/API) — fall through to
+        // marking FAILED below rather than leaving the payment stuck
+        // PENDING forever; the 48h recovery sweep will re-check it anyway.
+        logger.warn({ err: err.message, razorpayOrderId }, 'Razorpay cross-check during signature mismatch failed')
+      }
 
       await this.repo.updatePayment(payment.id, { status: 'FAILED' })
       await this.ordersRepo.updateStatus(payment.orderId, undefined, {
@@ -225,10 +247,22 @@ export class PaymentsService {
    * flagged `needs_manual_review` and none of the confirm cascade runs —
    * a human decides via the dashboard whether to re-confirm or refund.
    */
-  async completeVerifiedPayment(razorpayOrderId, { razorpayPaymentId, razorpaySignature, method, source = 'RECONCILIATION' } = {}) {
+  async completeVerifiedPayment(razorpayOrderId, {
+    razorpayPaymentId,
+    razorpaySignature,
+    method,
+    source = 'RECONCILIATION',
+    // Only the dedicated failed-payment recovery sweep passes this — it has
+    // ALREADY confirmed captured=true with Razorpay before ever calling
+    // here. Every other caller keeps the original behavior (a FAILED
+    // payment stays FAILED) so an arbitrary caller can never casually flip
+    // a declined payment back to PAID without independent verification.
+    allowRecoveryFromFailed = false,
+  } = {}) {
     const client = await getClient()
     let payment
     let needsManualReview = false
+    let wasRecoveredFromFailed = false
 
     try {
       await client.query('BEGIN')
@@ -241,13 +275,19 @@ export class PaymentsService {
         await client.query('ROLLBACK')
         return { success: false, message: 'Payment record not found' }
       }
-      payment = { id: paymentRow.id, orderId: paymentRow.order_id, userId: paymentRow.user_id }
+      payment = {
+        id: paymentRow.id,
+        orderId: paymentRow.order_id,
+        userId: paymentRow.user_id,
+        amount: paymentRow.amount != null ? parseFloat(paymentRow.amount) : null,
+      }
 
       if (paymentRow.status === 'PAID') {
         await client.query('ROLLBACK')
         return { success: true, skipped: true, payment: await this.repo.findById(payment.id) }
       }
-      if (paymentRow.status !== 'PENDING') {
+      wasRecoveredFromFailed = allowRecoveryFromFailed && paymentRow.status === 'FAILED'
+      if (paymentRow.status !== 'PENDING' && !wasRecoveredFromFailed) {
         await client.query('ROLLBACK')
         return { success: true, skipped: true, reason: paymentRow.status, payment: await this.repo.findById(payment.id) }
       }
@@ -271,8 +311,9 @@ export class PaymentsService {
             method || null,
             JSON.stringify({
               needs_manual_review: true,
-              reason: 'captured_after_cancel',
+              reason: wasRecoveredFromFailed ? 'recovered_from_failed_but_order_moved_on' : 'captured_after_cancel',
               order_status_at_capture: orderRow?.status || 'UNKNOWN',
+              ...(wasRecoveredFromFailed && { recovered_from_failed: true }),
             }),
             payment.id,
           ]
@@ -304,9 +345,11 @@ export class PaymentsService {
 
       await client.query(
         `UPDATE payments SET
-           razorpay_payment_id = $1, razorpay_signature = $2, status = 'PAID', method = $3, updated_at = NOW()
-         WHERE id = $4`,
-        [razorpayPaymentId || null, razorpaySignature || null, method || null, payment.id]
+           razorpay_payment_id = $1, razorpay_signature = $2, status = 'PAID', method = $3,
+           metadata = CASE WHEN $4 THEN COALESCE(metadata, '{}'::jsonb) || '{"recovered_from_failed":true}'::jsonb ELSE metadata END,
+           updated_at = NOW()
+         WHERE id = $5`,
+        [razorpayPaymentId || null, razorpaySignature || null, method || null, wasRecoveredFromFailed, payment.id]
       )
       await client.query(
         `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
@@ -338,6 +381,24 @@ export class PaymentsService {
       status: 'CONFIRMED',
       paymentStatus: 'PAID',
     })
+
+    if (wasRecoveredFromFailed) {
+      // This order previously showed FAILED to the customer and on the
+      // dashboard — Razorpay has now confirmed the money actually arrived
+      // (a delayed bank-side settlement, most commonly). Worth a
+      // notification even though the order auto-confirmed cleanly, since
+      // "we told you it failed and it didn't" is exactly the trust problem
+      // this whole fix exists to close.
+      logger.warn(
+        { paymentId: payment.id, orderId: payment.orderId, source },
+        'Payment previously marked FAILED was actually captured by Razorpay — auto-recovered and order confirmed'
+      )
+      this.fastify?.emitDashboardPayment?.({
+        orderId: payment.orderId,
+        recoveredFromFailed: true,
+        amount: payment.amount,
+      })
+    }
 
     // Credit any cashback whose trigger is PAYMENT_SUCCESS or
     // ORDER_CONFIRMED — this call also confirms the order, so both
@@ -465,7 +526,7 @@ export class PaymentsService {
    * (cancel, expire, etc). Throws on a Razorpay API/network failure —
    * callers must fail safe (never treat a failed check as "not captured").
    */
-  async reconcileWithRazorpay(razorpayOrderId, source = 'RECONCILIATION') {
+  async reconcileWithRazorpay(razorpayOrderId, source = 'RECONCILIATION', { allowRecoveryFromFailed = false } = {}) {
     if (!razorpay || !razorpayOrderId) {
       return { captured: false }
     }
@@ -480,6 +541,7 @@ export class PaymentsService {
       razorpayPaymentId: captured.id,
       method: captured.method,
       source,
+      allowRecoveryFromFailed,
     })
 
     return { captured: true, ...result }
