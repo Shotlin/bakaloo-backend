@@ -48,9 +48,14 @@ export default async function paymentsRoutes(fastify) {
   // ─── Webhook (NO AUTH — verified by Razorpay signature) ────────────
 
   // POST /webhook — Razorpay event webhook
-  // Raw body must be preserved for signature verification.
+  // Raw body must be preserved for signature verification. rateLimit:
+  // false for defensive symmetry with the /api/webhook/razorpay
+  // registration in app.js (Razorpay retries failed webhook deliveries —
+  // this endpoint must never silently rate-limit a legitimate retry).
+  // Not currently reachable in practice (global rate limiting is off), but
+  // kept explicit so it stays true if that ever changes.
   fastify.post('/webhook', {
-    config: { rawBody: true },
+    config: { rawBody: true, rateLimit: false },
     schema: {
       body: { type: 'object', additionalProperties: true },
     },

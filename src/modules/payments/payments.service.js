@@ -75,7 +75,7 @@ export class PaymentsService {
     try {
       rzpOrder = await razorpay.orders.create({
         amount: Math.round(order.totalAmount * 100), // paise
-        currency: 'INR',
+        currency: env.RAZORPAY_CURRENCY,
         receipt: order.orderNumber,
         notes: {
           orderId: order.id,
@@ -100,7 +100,7 @@ export class PaymentsService {
       userId,
       razorpayOrderId: rzpOrder.id,
       amount: order.totalAmount,
-      currency: 'INR',
+      currency: env.RAZORPAY_CURRENCY,
       status: 'PENDING',
       expiresAt,
       metadata: { receipt: order.orderNumber },
@@ -122,7 +122,7 @@ export class PaymentsService {
         paymentId: payment.id,
         razorpayOrderId: rzpOrder.id,
         amount: order.totalAmount,
-        currency: 'INR',
+        currency: env.RAZORPAY_CURRENCY,
         keyId: env.RAZORPAY_KEY_ID,
       },
     }
@@ -151,13 +151,22 @@ export class PaymentsService {
       return { success: true, payment }
     }
 
-    // HMAC-SHA256 verification
+    // HMAC-SHA256 verification. Constant-time comparison (matches the
+    // convention already used for QR pickup signatures in utils/qrToken.js)
+    // — a plain !== leaks how many leading characters matched via response
+    // timing, in theory letting an attacker guess a valid signature one
+    // byte at a time rather than needing the full secret.
     const expectedSignature = crypto
       .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
       .update(`${razorpayOrderId}|${razorpayPaymentId}`)
       .digest('hex')
 
-    if (expectedSignature !== razorpaySignature) {
+    const providedSignature = String(razorpaySignature || '')
+    const signatureMatches =
+      expectedSignature.length === providedSignature.length &&
+      crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(providedSignature))
+
+    if (!signatureMatches) {
       logger.warn({ razorpayOrderId }, 'Payment signature verification failed — cross-checking with Razorpay directly before declaring failure')
 
       // The signature is client-supplied — a network hiccup or client bug

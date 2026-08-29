@@ -147,7 +147,7 @@ export class WalletService {
 
     const razorpayOrder = await razorpay.orders.create({
       amount: Math.round(normalizedAmount * 100),
-      currency: 'INR',
+      currency: env.RAZORPAY_CURRENCY,
       receipt: `topup_${Date.now()}`,
       notes: {
         userId,
@@ -168,7 +168,7 @@ export class WalletService {
       data: {
         razorpayOrderId: razorpayOrder.id,
         amount: normalizedAmount,
-        currency: 'INR',
+        currency: env.RAZORPAY_CURRENCY,
         keyId: env.RAZORPAY_KEY_ID,
       },
     }
@@ -209,12 +209,20 @@ export class WalletService {
         return { success: false, message: 'Top-up already marked as failed' }
       }
 
+      // Constant-time comparison — matches the convention already used for
+      // QR pickup signatures in utils/qrToken.js. See payments.service.js's
+      // verifyPayment for the same fix and reasoning.
       const expectedSignature = crypto
         .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
         .update(`${orderId}|${paymentId}`)
         .digest('hex')
 
-      if (expectedSignature !== signature) {
+      const providedSignature = String(signature || '')
+      const signatureMatches =
+        expectedSignature.length === providedSignature.length &&
+        crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(providedSignature))
+
+      if (!signatureMatches) {
         await this.repo.markTopUpFailed(client, topup.id)
         await client.query('COMMIT')
         logger.warn({ userId, orderId }, 'Wallet top-up signature verification failed')
