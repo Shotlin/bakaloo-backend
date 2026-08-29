@@ -14,6 +14,7 @@ export const listOrdersSchema = {
       startDate: { type: 'string', format: 'date-time' },
       endDate: { type: 'string', format: 'date-time' },
       deliveryType: { type: 'string', enum: ['express', 'scheduled', 'standard'] },
+      needsPaymentReview: { type: 'boolean' },
     },
   },
 }
@@ -166,6 +167,18 @@ export const refundOrderSchema = {
       refundTo: { type: 'string', enum: ['wallet', 'original', 'none'], default: 'wallet' },
     },
   },
+}
+
+export const reconcilePaymentSchema = {
+  tags: ['Admin Orders'],
+  summary: "Re-check an order's payment directly against Razorpay (manual reconciliation)",
+  params: uuidParam,
+}
+
+export const razorpayDetailsSchema = {
+  tags: ['Admin Orders'],
+  summary: "Full payment detail fetched live from Razorpay's own record",
+  params: uuidParam,
 }
 
 export const cancelOrderSchema = {

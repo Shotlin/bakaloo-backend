@@ -88,6 +88,30 @@ export class PaymentsRepository {
       sets.push(`metadata = $${idx++}`)
       params.push(JSON.stringify(data.metadata))
     }
+    // Undefined-checked (not truthy-checked) like the fields above would
+    // ideally be too — a genuinely empty error_description should still be
+    // settable rather than silently dropped, unlike the required-looking
+    // fields above where "falsy" and "absent" mean the same thing.
+    if (data.errorCode !== undefined) {
+      sets.push(`error_code = $${idx++}`)
+      params.push(data.errorCode)
+    }
+    if (data.errorDescription !== undefined) {
+      sets.push(`error_description = $${idx++}`)
+      params.push(data.errorDescription)
+    }
+    if (data.errorSource !== undefined) {
+      sets.push(`error_source = $${idx++}`)
+      params.push(data.errorSource)
+    }
+    if (data.errorStep !== undefined) {
+      sets.push(`error_step = $${idx++}`)
+      params.push(data.errorStep)
+    }
+    if (data.errorReason !== undefined) {
+      sets.push(`error_reason = $${idx++}`)
+      params.push(data.errorReason)
+    }
 
     params.push(id)
 
@@ -157,6 +181,11 @@ export class PaymentsRepository {
       refundId: row.refund_id,
       refundAmount: row.refund_amount ? parseFloat(row.refund_amount) : null,
       refundStatus: row.refund_status,
+      errorCode: row.error_code || null,
+      errorDescription: row.error_description || null,
+      errorSource: row.error_source || null,
+      errorStep: row.error_step || null,
+      errorReason: row.error_reason || null,
       metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

@@ -1158,20 +1158,15 @@ export class OrdersService {
       return null
     }
 
-    const payments = await razorpay.orders.fetchPayments(payment.razorpayOrderId)
-    const captured = (payments.items || []).find((p) => p.status === 'captured')
-    if (!captured) return null
+    const result = await this.paymentsService.reconcileWithRazorpay(
+      payment.razorpayOrderId,
+      'ORDER_CANCEL_RECONCILE'
+    )
 
-    const result = await this.paymentsService.completeVerifiedPayment(payment.razorpayOrderId, {
-      razorpayPaymentId: captured.id,
-      method: captured.method,
-      source: 'ORDER_CANCEL_RECONCILE',
-    })
-
-    if (!result.success) return null
+    if (!result.captured || !result.success) return null
 
     logger.info(
-      { orderId: order.id, paymentId: captured.id },
+      { orderId: order.id, needsManualReview: !!result.needsManualReview },
       'Order cancel blocked: Razorpay shows the payment was actually captured — order confirmed instead of cancelled'
     )
 

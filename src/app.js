@@ -45,6 +45,18 @@ export const buildApp = async () => {
   await app.register(import('./plugins/multipart.plugin.js'))
   await app.register(import('./plugins/compress.plugin.js'))
   await app.register(import('./plugins/socketio.plugin.js'))
+  // Registered at root scope (not inside payments.routes.js) so it covers
+  // BOTH Razorpay webhook routes — /api/v1/payments/webhook and
+  // /api/webhook/razorpay — which are sibling plugins off this same `app`,
+  // not nested under each other. global:false means it only captures the
+  // raw body for routes that opt in via `config: { rawBody: true }` (both
+  // webhook routes already declare this — it was set up for exactly this
+  // plugin but the plugin itself was never installed, so it was inert).
+  await app.register(import('fastify-raw-body'), {
+    field: 'rawBody',
+    global: false,
+    runFirst: true,
+  })
 
   // ─── GLOBAL HOOKS ──────────────────────────────────────
   app.addHook('onRequest', sanitize)
@@ -459,7 +471,14 @@ export const buildApp = async () => {
     const { PaymentsController } = await import('./modules/payments/payments.controller.js')
 
     const repo = new PaymentsRepository()
-    const service = new PaymentsService(repo)
+    // `fastify` must be passed here (it wasn't before) — without it,
+    // PaymentsService.completeVerifiedPayment()'s optional-chained
+    // this.fastify?.emitDashboardNewOrder?.(...)/emitOrderUpdate?.(...)
+    // calls silently no-op, so a payment confirmed through THIS route
+    // never pinged the live admin dashboard or the customer's socket —
+    // specifically for async-confirmed payments, which is exactly the
+    // population this whole fix grows.
+    const service = new PaymentsService(repo, fastify)
     const controller = new PaymentsController(service)
 
     fastify.post('/razorpay', {

@@ -1,6 +1,8 @@
 import crypto from 'node:crypto'
+import Razorpay from 'razorpay'
 import { logger } from '../../config/logger.js'
 import { env } from '../../config/env.js'
+import { getClient } from '../../config/database.js'
 import { razorpay } from '../../config/razorpay.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
@@ -198,35 +200,144 @@ export class PaymentsService {
    *     the exact same class of bug.
    *
    * Idempotent: only acts on a payment still PENDING. Already-PAID (another
-   * caller won the race) or FAILED/EXPIRED rows are left alone.
+   * caller won the race) or FAILED/EXPIRED rows are left alone. The
+   * PENDING-check-and-transition happens inside a single transaction with
+   * a `SELECT ... FOR UPDATE` row lock, so two callers racing on the same
+   * payment (e.g. the webhook and the client's /verify call landing within
+   * milliseconds of each other) serialize instead of both reading PENDING
+   * and both running the cascade below (duplicate notification, duplicate
+   * cashback credit — cashback's own row has no equivalent lock, so it was
+   * relying entirely on this method to not call it twice). Mirrors
+   * WalletService.completeVerifiedTopUp's transaction shape. No network
+   * calls happen inside the transaction — same reasoning as
+   * payment-expiry.worker.js's header comment: never hold a DB lock across
+   * a Razorpay round-trip.
+   *
+   * Also guards against re-confirming an order that has moved on (almost
+   * always CANCELLED) since the payment was created. This closes a real
+   * hole: orders.service.js's cancel() restores stock the moment its own
+   * live Razorpay check comes back empty, but that check can miss a
+   * capture that posts a few seconds later — exactly this bug's timing.
+   * Without this guard, a delayed webhook/reconciliation would silently
+   * flip that order back to CONFIRMED and queue a rider to fetch stock
+   * that's already back on the shelf (and may already be sold to someone
+   * else). Instead, the payment is marked PAID (the money is tracked) but
+   * flagged `needs_manual_review` and none of the confirm cascade runs —
+   * a human decides via the dashboard whether to re-confirm or refund.
    */
   async completeVerifiedPayment(razorpayOrderId, { razorpayPaymentId, razorpaySignature, method, source = 'RECONCILIATION' } = {}) {
-    const payment = await this.repo.findByRazorpayOrderId(razorpayOrderId)
-    if (!payment) {
-      return { success: false, message: 'Payment record not found' }
+    const client = await getClient()
+    let payment
+    let needsManualReview = false
+
+    try {
+      await client.query('BEGIN')
+
+      const { rows: [paymentRow] } = await client.query(
+        `SELECT id, order_id, user_id, status, amount FROM payments WHERE razorpay_order_id = $1 FOR UPDATE`,
+        [razorpayOrderId]
+      )
+      if (!paymentRow) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Payment record not found' }
+      }
+      payment = { id: paymentRow.id, orderId: paymentRow.order_id, userId: paymentRow.user_id }
+
+      if (paymentRow.status === 'PAID') {
+        await client.query('ROLLBACK')
+        return { success: true, skipped: true, payment: await this.repo.findById(payment.id) }
+      }
+      if (paymentRow.status !== 'PENDING') {
+        await client.query('ROLLBACK')
+        return { success: true, skipped: true, reason: paymentRow.status, payment: await this.repo.findById(payment.id) }
+      }
+
+      const { rows: [orderRow] } = await client.query(
+        `SELECT id, status, order_number FROM orders WHERE id = $1 FOR UPDATE`,
+        [payment.orderId]
+      )
+      const orderStillPending = orderRow?.status === 'PENDING'
+
+      if (!orderStillPending) {
+        needsManualReview = true
+        await client.query(
+          `UPDATE payments SET
+             razorpay_payment_id = $1, razorpay_signature = $2, status = 'PAID', method = $3,
+             metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+           WHERE id = $5`,
+          [
+            razorpayPaymentId || null,
+            razorpaySignature || null,
+            method || null,
+            JSON.stringify({
+              needs_manual_review: true,
+              reason: 'captured_after_cancel',
+              order_status_at_capture: orderRow?.status || 'UNKNOWN',
+            }),
+            payment.id,
+          ]
+        )
+        await client.query('COMMIT')
+
+        logger.warn(
+          { paymentId: payment.id, orderId: payment.orderId, orderStatus: orderRow?.status, source },
+          'Payment captured for an order that is no longer PENDING — flagged for manual review, NOT auto-confirmed'
+        )
+
+        // Ping the admin dashboard live — this is the one outcome of this
+        // whole reconciliation flow that genuinely needs a human, so it's
+        // the only case that raises a notification (a routine successful
+        // payment doesn't need anyone's attention and isn't emitted here).
+        this.fastify?.emitDashboardPayment?.({
+          orderId: payment.orderId,
+          orderNumber: orderRow?.order_number,
+          orderStatus: orderRow?.status,
+          amount: paymentRow.amount ? parseFloat(paymentRow.amount) : null,
+        })
+
+        return {
+          success: true,
+          needsManualReview: true,
+          payment: await this.repo.findById(payment.id),
+        }
+      }
+
+      await client.query(
+        `UPDATE payments SET
+           razorpay_payment_id = $1, razorpay_signature = $2, status = 'PAID', method = $3, updated_at = NOW()
+         WHERE id = $4`,
+        [razorpayPaymentId || null, razorpaySignature || null, method || null, payment.id]
+      )
+      await client.query(
+        `UPDATE orders SET status = 'CONFIRMED', payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
+        [payment.orderId]
+      )
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      logger.error({ err, razorpayOrderId }, 'Payment finalize transaction failed')
+      return { success: false, message: 'Payment finalize failed: ' + err.message }
+    } finally {
+      client.release()
     }
 
-    if (payment.status === 'PAID') {
-      return { success: true, skipped: true, payment }
+    if (needsManualReview) {
+      // Unreachable (the branch above already returned) — guard kept only
+      // so a future refactor that reorders this function fails loudly
+      // instead of silently running the cascade on a flagged payment.
+      return { success: true, needsManualReview: true, payment: await this.repo.findById(payment.id) }
     }
 
-    if (payment.status !== 'PENDING') {
-      return { success: true, skipped: true, reason: payment.status, payment }
-    }
+    // Everything below only runs once the transaction above has committed
+    // the order to CONFIRMED — never for the manual-review branch, which
+    // already returned above without reaching here.
+    await this._queueAutoAssign(payment.orderId, source)
 
-    // Update payment record
-    const updated = await this.repo.updatePayment(payment.id, {
-      razorpayPaymentId,
-      razorpaySignature,
-      status: 'PAID',
-      method,
-    })
-
-    // Update order payment status
-    await this.ordersRepo.updateStatus(payment.orderId, 'CONFIRMED', {
+    this.fastify?.emitOrderUpdate?.(payment.orderId, [payment.userId], {
+      status: 'CONFIRMED',
       paymentStatus: 'PAID',
     })
-    await this._queueAutoAssign(payment.orderId, source)
 
     // Credit any cashback whose trigger is PAYMENT_SUCCESS or
     // ORDER_CONFIRMED — this call also confirms the order, so both
@@ -296,25 +407,113 @@ export class PaymentsService {
       'Payment finalized'
     )
 
-    return { success: true, payment: updated }
+    return { success: true, payment: await this.repo.findById(payment.id) }
+  }
+
+  /**
+   * Full payment detail straight from Razorpay's own record — everything
+   * they track that this app doesn't keep a column for (UPI VPA, bank/card
+   * used, wallet name, Razorpay's fee + tax, the acquirer reference number
+   * banks ask for in disputes, capture timestamps, refund status). Fetched
+   * live on demand rather than mirrored into our own schema ahead of time,
+   * so it's always complete and current — including anything Razorpay adds
+   * later — instead of us guessing which fields matter.
+   */
+  async getFullRazorpayDetails(razorpayPaymentId) {
+    if (!razorpay || !razorpayPaymentId) {
+      return null
+    }
+    const p = await razorpay.payments.fetch(razorpayPaymentId, { expand: ['card'] })
+    return {
+      id: p.id,
+      status: p.status,
+      method: p.method,
+      amount: p.amount / 100,
+      amountRefunded: p.amount_refunded ? p.amount_refunded / 100 : 0,
+      refundStatus: p.refund_status || null,
+      currency: p.currency,
+      fee: p.fee != null ? p.fee / 100 : null,
+      tax: p.tax != null ? p.tax / 100 : null,
+      international: !!p.international,
+      email: p.email || null,
+      contact: p.contact || null,
+      vpa: p.vpa || null,
+      bank: p.bank || null,
+      wallet: p.wallet || null,
+      card: p.card
+        ? { last4: p.card.last4, network: p.card.network, type: p.card.type, issuer: p.card.issuer }
+        : null,
+      acquirerReference: p.acquirer_data?.rrn || p.acquirer_data?.bank_transaction_id || null,
+      upiTransactionId: p.acquirer_data?.upi_transaction_id || null,
+      createdAt: p.created_at ? new Date(p.created_at * 1000).toISOString() : null,
+      errorCode: p.error_code || null,
+      errorDescription: p.error_description || null,
+      errorReason: p.error_reason || null,
+      notes: p.notes || null,
+    }
+  }
+
+  /**
+   * Poll Razorpay directly for a captured payment on this order and, if
+   * found, run it through completeVerifiedPayment(). Shared by the
+   * payment-expiry worker, the cancel-time reconciliation check, and the
+   * admin "re-check with Razorpay" action — previously three independent
+   * copies of the same fetchPayments-then-finalize sequence.
+   *
+   * Returns { captured: false } when Razorpay shows no captured payment —
+   * safe for the caller to proceed with whatever it was about to do
+   * (cancel, expire, etc). Throws on a Razorpay API/network failure —
+   * callers must fail safe (never treat a failed check as "not captured").
+   */
+  async reconcileWithRazorpay(razorpayOrderId, source = 'RECONCILIATION') {
+    if (!razorpay || !razorpayOrderId) {
+      return { captured: false }
+    }
+
+    const payments = await razorpay.orders.fetchPayments(razorpayOrderId)
+    const captured = (payments.items || []).find((p) => p.status === 'captured')
+    if (!captured) {
+      return { captured: false }
+    }
+
+    const result = await this.completeVerifiedPayment(razorpayOrderId, {
+      razorpayPaymentId: captured.id,
+      method: captured.method,
+      source,
+    })
+
+    return { captured: true, ...result }
   }
 
   /**
    * Handle Razorpay webhook events
    */
-  async handleWebhook(body, signature) {
+  async handleWebhook(body, signature, rawBody) {
     if (!env.RAZORPAY_WEBHOOK_SECRET) {
       logger.warn('Razorpay webhook secret not configured')
       return { success: false }
     }
 
-    // Verify webhook signature
-    const expectedSignature = crypto
-      .createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET)
-      .update(JSON.stringify(body))
-      .digest('hex')
+    // Verify webhook signature against the RAW bytes Razorpay signed — NOT
+    // a re-serialized copy of the parsed body. JSON.stringify(JSON.parse(raw))
+    // is not guaranteed to reproduce `raw` (₹ symbols, accented names, URLs
+    // with escaped slashes, or certain numeric-looking keys all break the
+    // round-trip), so the previous version of this check silently rejected
+    // real deliveries. `rawBody` is populated by the fastify-raw-body plugin
+    // registered at the root app scope (see app.js) for any route whose
+    // config declares `{ rawBody: true }` — both webhook routes already do.
+    if (!rawBody) {
+      logger.error('Razorpay webhook: raw body unavailable — cannot verify signature, rejecting')
+      return { success: false }
+    }
 
-    if (expectedSignature !== signature) {
+    const validSignature = Razorpay.validateWebhookSignature(
+      rawBody,
+      signature,
+      env.RAZORPAY_WEBHOOK_SECRET
+    )
+
+    if (!validSignature) {
       logger.warn('Webhook signature mismatch')
       return { success: false }
     }
@@ -325,6 +524,8 @@ export class PaymentsService {
     logger.info({ event }, 'Razorpay webhook received')
 
     switch (event) {
+      case 'payment.authorized':
+      case 'order.paid':
       case 'payment.captured': {
         const rzpPaymentId = payload.payment?.entity?.id
         const rzpOrderId = payload.payment?.entity?.order_id
@@ -361,14 +562,28 @@ export class PaymentsService {
 
       case 'payment.failed': {
         const rzpOrderId = payload.payment?.entity?.order_id
+        const entity = payload.payment?.entity || {}
         if (rzpOrderId) {
           const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
-          if (payment) {
-            await this.repo.updatePayment(payment.id, { status: 'FAILED' })
+          // Only act on a payment still PENDING — mirrors completeVerifiedPayment's
+          // own guard, so a failed-payment webhook arriving after this
+          // order was already confirmed by some other signal (client
+          // verify, a different reconciliation pass) can't undo a real
+          // success. Razorpay does not retry a captured payment as failed,
+          // but nothing stops a slow/duplicate webhook delivery.
+          if (payment && payment.status === 'PENDING') {
+            await this.repo.updatePayment(payment.id, {
+              status: 'FAILED',
+              errorCode: entity.error_code || null,
+              errorDescription: entity.error_description || null,
+              errorSource: entity.error_source || null,
+              errorStep: entity.error_step || null,
+              errorReason: entity.error_reason || null,
+            })
             await this.ordersRepo.updateStatus(payment.orderId, undefined, {
               paymentStatus: 'FAILED',
             })
-            logger.info({ paymentId: payment.id }, 'Payment failed via webhook')
+            logger.info({ paymentId: payment.id, errorReason: entity.error_reason }, 'Payment failed via webhook')
           }
         }
         break
@@ -376,8 +591,37 @@ export class PaymentsService {
 
       case 'refund.processed': {
         const rzpPaymentId = payload.refund?.entity?.payment_id
-        // Handle refund event if needed
-        logger.info({ razorpayPaymentId: rzpPaymentId }, 'Refund processed via webhook')
+        const refundEntity = payload.refund?.entity || {}
+        if (rzpPaymentId) {
+          try {
+            const { query } = await import('../../config/database.js')
+            const { rows } = await query(
+              `SELECT id, order_id, status FROM payments WHERE razorpay_payment_id = $1`,
+              [rzpPaymentId]
+            )
+            const paymentRow = rows[0]
+            // Only act once — a payment already REFUNDED here means our own
+            // admin-initiated refund() already handled this (and already
+            // updated the order), so this webhook is just Razorpay's async
+            // confirmation of an action we took ourselves, not new
+            // information from the dashboard.
+            if (paymentRow && paymentRow.status !== 'REFUNDED') {
+              await this.repo.updateRefund(paymentRow.id, {
+                refundId: refundEntity.id || null,
+                refundAmount: refundEntity.amount ? refundEntity.amount / 100 : null,
+                refundStatus: 'PROCESSED',
+              })
+              await this.ordersRepo.updateStatus(paymentRow.order_id, 'REFUNDED', {
+                paymentStatus: 'REFUNDED',
+              })
+              logger.info({ paymentId: paymentRow.id, razorpayPaymentId: rzpPaymentId }, 'Refund processed via webhook')
+            } else if (!paymentRow) {
+              logger.warn({ razorpayPaymentId: rzpPaymentId }, 'Refund webhook: no matching payment found')
+            }
+          } catch (err) {
+            logger.warn({ err: err.message, razorpayPaymentId: rzpPaymentId }, 'Refund webhook persistence failed')
+          }
+        }
         break
       }
 
@@ -386,6 +630,32 @@ export class PaymentsService {
     }
 
     return { success: true }
+  }
+
+  /**
+   * Current status of a Razorpay order, for the client to poll after an
+   * ambiguous checkout result (Razorpay SDK error that isn't a genuine
+   * user cancellation) instead of assuming failure and cancelling blind.
+   */
+  async getPaymentStatus(userId, razorpayOrderId) {
+    const payment = await this.repo.findByRazorpayOrderId(razorpayOrderId)
+    if (!payment) {
+      return { success: false, message: 'Payment record not found' }
+    }
+    if (payment.userId !== userId) {
+      return { success: false, message: 'Unauthorized' }
+    }
+
+    return {
+      success: true,
+      data: {
+        status: payment.status,
+        orderId: payment.orderId,
+        errorCode: payment.errorCode,
+        errorDescription: payment.errorDescription,
+        errorReason: payment.errorReason,
+      },
+    }
   }
 
   /**

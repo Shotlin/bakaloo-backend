@@ -181,7 +181,15 @@ export class AdminOrdersService {
   }
 
   async getStatsByStatus() {
-    return this.repository.getStatsByStatus()
+    const [statusCounts, needsPaymentReview] = await Promise.all([
+      this.repository.getStatsByStatus(),
+      this.repository.countNeedsPaymentReview(),
+    ])
+    // NEEDS_REVIEW isn't a real order_status — it's a payment-metadata flag
+    // spanning any order status — but bundled here so the Orders page's
+    // existing tab-badge hook (useOrderStatusCounts) surfaces it for free
+    // instead of needing a second round-trip.
+    return { ...statusCounts, NEEDS_REVIEW: needsPaymentReview }
   }
 
   async findById(orderId) {
@@ -608,6 +616,71 @@ export class AdminOrdersService {
     this._emitOrderStatus(order, 'REFUNDED')
 
     return { orderId, refundAmount, refundTo, status: 'REFUNDED' }
+  }
+
+  /**
+   * Manually re-check a single order's payment against Razorpay directly —
+   * the dashboard's "Re-check with Razorpay" action, for a payment stuck
+   * PENDING (or one the customer/support suspects was actually captured).
+   * Shares the exact fetchPayments-then-finalize path as the payment-expiry
+   * worker and the customer cancel-time check
+   * (PaymentsService.reconcileWithRazorpay) rather than a fourth
+   * independent copy of the same logic.
+   */
+  async reconcilePayment(orderId, adminId, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+
+    const payment = await this.repository.getOrderPayment(orderId)
+    if (!payment || !payment.razorpay_order_id) {
+      throw { statusCode: 400, message: 'No online Razorpay payment on this order to reconcile' }
+    }
+
+    const { PaymentsService } = await import('../../payments/payments.service.js')
+    const { PaymentsRepository } = await import('../../payments/payments.repository.js')
+    const paymentsService = new PaymentsService(new PaymentsRepository(), this.fastify)
+
+    const result = await paymentsService.reconcileWithRazorpay(
+      payment.razorpay_order_id,
+      'ADMIN_MANUAL_RECONCILE'
+    )
+
+    logAdminActivity(
+      adminId,
+      `Manually re-checked Razorpay payment for order ${order.order_number}`,
+      'order',
+      orderId,
+      { paymentStatus: payment.status },
+      { captured: result.captured, needsManualReview: !!result.needsManualReview },
+      ip
+    )
+
+    return {
+      captured: result.captured,
+      needsManualReview: !!result.needsManualReview,
+      order: await this.repository.findById(orderId),
+    }
+  }
+
+  /**
+   * Full Razorpay payment detail for the order's payment, fetched live —
+   * the dashboard's "Razorpay Details" panel, so support/finance never has
+   * to leave the order drawer to see the VPA/bank/fee/ARN Razorpay tracks.
+   */
+  async getRazorpayDetails(orderId) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+
+    const payment = await this.repository.getOrderPayment(orderId)
+    if (!payment || !payment.razorpay_payment_id) {
+      throw { statusCode: 404, message: 'No captured Razorpay payment on this order yet' }
+    }
+
+    const { PaymentsService } = await import('../../payments/payments.service.js')
+    const { PaymentsRepository } = await import('../../payments/payments.repository.js')
+    const paymentsService = new PaymentsService(new PaymentsRepository())
+
+    return paymentsService.getFullRazorpayDetails(payment.razorpay_payment_id)
   }
 
   async cancelOrder(orderId, body, adminId, ip) {

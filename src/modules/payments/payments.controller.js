@@ -38,9 +38,29 @@ export class PaymentsController {
    */
   async webhook(request, reply) {
     const signature = request.headers['x-razorpay-signature']
-    const result = await this.service.handleWebhook(request.body, signature)
-    // Always return 200 to Razorpay
-    return reply.send({ status: result.success ? 'ok' : 'error' })
+    const result = await this.service.handleWebhook(request.body, signature, request.rawBody)
+    // Previously always returned 200 regardless of outcome, which meant a
+    // bad/unverifiable signature was invisible to Razorpay — its own
+    // automatic retry-on-failure only engages on a non-2xx response. Only
+    // a genuine processing error after a *verified* signature still
+    // returns 200 (Razorpay's own docs recommend not retrying event
+    // types we intentionally ignore).
+    if (!result.success) {
+      return reply.code(400).send({ status: 'error' })
+    }
+    return reply.send({ status: 'ok' })
+  }
+
+  /**
+   * Current status of a Razorpay order — polled by the client after an
+   * ambiguous checkout result instead of assuming failure.
+   */
+  async status(request, reply) {
+    const result = await this.service.getPaymentStatus(request.user.id, request.params.razorpayOrderId)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'PAYMENT_NOT_FOUND'))
+    }
+    return reply.send(success(result.data, 'Payment status fetched'))
   }
 
   /**

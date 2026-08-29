@@ -2,7 +2,10 @@ import { query, getClient } from '../../../config/database.js'
 import { revokeOrderPickupTokens } from '../../../utils/pickupTokens.js'
 
 export class AdminOrdersRepository {
-  async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate, deliveryType }) {
+  async findAll({ offset, limit, status, paymentMethod, search, startDate, endDate, deliveryType, needsPaymentReview }) {
+    // needsPaymentReview requires a join to payments — kept as a LEFT JOIN
+    // (not applied to the base query) so it costs nothing for the normal
+    // order list, and only filters rows when explicitly requested.
     let sql = `
       SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
              ru.name AS rider_name, sh.name AS shop_name,
@@ -15,6 +18,7 @@ export class AdminOrdersRepository {
       LEFT JOIN users u ON u.id = o.user_id
       LEFT JOIN users ru ON ru.id = o.rider_id
       LEFT JOIN shops sh ON sh.id = o.shop_id
+      ${needsPaymentReview ? 'JOIN payments p ON p.order_id = o.id' : ''}
       WHERE 1=1
     `
     const params = []
@@ -36,8 +40,13 @@ export class AdminOrdersRepository {
     } else if (deliveryType === 'scheduled') {
       sql += ` AND o.delivery_mode = 'SCHEDULED'`
     }
+    if (needsPaymentReview) {
+      sql += ` AND p.metadata->>'needs_manual_review' = 'true'`
+    }
 
-    const countSql = `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1` +
+    const countSql = (needsPaymentReview
+      ? `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id JOIN payments p ON p.order_id = o.id WHERE 1=1`
+      : `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1`) +
       sql.split('WHERE 1=1')[1].replace(/ORDER BY.*$/, '').replace(/LIMIT.*$/, '')
     const countRes = await query(countSql, params)
     const total = parseInt(countRes.rows[0].count)
@@ -54,6 +63,18 @@ export class AdminOrdersRepository {
       `SELECT status, COUNT(*)::int AS count FROM orders GROUP BY status`
     )
     return rows.reduce((acc, r) => { acc[r.status] = r.count; return acc }, {})
+  }
+
+  /** Count of orders currently flagged needs_manual_review — for the
+   *  Orders page's "Needs Review" tab badge. */
+  async countNeedsPaymentReview() {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM orders o
+       JOIN payments p ON p.order_id = o.id
+       WHERE p.metadata->>'needs_manual_review' = 'true'`
+    )
+    return rows[0].count
   }
 
   async findById(orderId) {

@@ -136,6 +136,28 @@ export class AdminOrdersController {
     }
   }
 
+  async reconcilePayment(request, reply) {
+    try {
+      const data = await this.service.reconcilePayment(
+        request.params.id,
+        request.user.id,
+        request.ip
+      )
+      return reply.send(success(data, 'Payment re-checked against Razorpay'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
+  async getRazorpayDetails(request, reply) {
+    try {
+      const data = await this.service.getRazorpayDetails(request.params.id)
+      return reply.send(success(data, 'Razorpay payment details fetched'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
   async cancelOrder(request, reply) {
     try {
       const data = await this.service.cancelOrder(

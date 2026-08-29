@@ -60,6 +60,19 @@ export class OrdersController {
       request.body?.reason
     )
     if (!result.success) {
+      // The service already declined to cancel here because it just
+      // confirmed (via a live Razorpay check) that the payment actually
+      // went through — the request wasn't malformed, the world changed
+      // under it, hence 409 rather than 400. Previously this branch
+      // discarded `paymentConfirmed`/`order` entirely, so a client had no
+      // way to distinguish this from a genuine failure without inspecting
+      // the message string.
+      if (result.paymentConfirmed) {
+        const payload = error(result.message, 'PAYMENT_ALREADY_CONFIRMED')
+        payload.paymentConfirmed = true
+        payload.order = result.order
+        return reply.code(409).send(payload)
+      }
       return reply.code(400).send(error(result.message, 'CANCEL_FAILED'))
     }
     return reply.send(success(result.order, 'Order cancelled'))

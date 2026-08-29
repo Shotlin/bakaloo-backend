@@ -42,9 +42,16 @@ vi.mock('../../../src/config/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }))
 
-const fetchPayments = vi.fn()
+// _reconcileBeforeCancel no longer calls razorpay.orders.fetchPayments or
+// paymentsService.completeVerifiedPayment directly — both were extracted
+// into PaymentsService.reconcileWithRazorpay(), shared with
+// payment-expiry.worker.js and the admin "re-check with Razorpay" action.
+// This module-level mock only needs to satisfy the `if (!razorpay) return
+// null` truthiness guard still in orders.service.js; the real
+// fetchPayments-then-finalize behavior is exercised in
+// payments.service.test.js, not here.
 vi.mock('../../../src/config/razorpay.js', () => ({
-  razorpay: { orders: { fetchPayments: (...args) => fetchPayments(...args) } },
+  razorpay: { orders: { fetchPayments: vi.fn() } },
 }))
 
 import { OrdersRepository } from '../../../src/modules/orders/orders.repository.js'
@@ -53,15 +60,15 @@ import { OrdersService } from '../../../src/modules/orders/orders.service.js'
 const USER_ID = '11111111-1111-1111-1111-111111111111'
 const ORDER_ID = '33333333-3333-3333-3333-333333333333'
 
-function makeService({ order, paymentRow, completeVerifiedPaymentResult }) {
+function makeService({ order, paymentRow, reconcileWithRazorpayResult }) {
   const repository = Object.assign(new OrdersRepository(), {
     findByIdAndUser: vi.fn(async () => order),
     updateStatus: vi.fn(async (id, status, extra) => ({ ...order, status, ...extra })),
   })
   const paymentsRepo = { findByOrderId: vi.fn(async () => paymentRow ?? null) }
   const paymentsService = {
-    completeVerifiedPayment: vi.fn(
-      async () => completeVerifiedPaymentResult ?? { success: true, payment: {} }
+    reconcileWithRazorpay: vi.fn(
+      async () => reconcileWithRazorpayResult ?? { captured: false }
     ),
   }
   const shopProductsRepo = { restoreStockForCancelledOrder: vi.fn(async () => {}) }
@@ -82,7 +89,6 @@ function makeService({ order, paymentRow, completeVerifiedPaymentResult }) {
 
 describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLINE orders', () => {
   beforeEach(() => {
-    fetchPayments.mockReset()
     mockClient.query.mockClear()
     mockClient.release.mockClear()
   })
@@ -99,9 +105,7 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
     const { service, repository, paymentsService } = makeService({
       order,
       paymentRow: { razorpayOrderId: 'order_rzp_1', status: 'PENDING' },
-    })
-    fetchPayments.mockResolvedValue({
-      items: [{ id: 'pay_1', status: 'captured', method: 'upi' }],
+      reconcileWithRazorpayResult: { captured: true, success: true, payment: {} },
     })
     repository.findByIdAndUser.mockResolvedValueOnce(order).mockResolvedValueOnce({
       ...order,
@@ -111,11 +115,10 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
 
     const result = await service.cancel(USER_ID, ORDER_ID, 'Payment cancelled by user')
 
-    expect(paymentsService.completeVerifiedPayment).toHaveBeenCalledWith('order_rzp_1', {
-      razorpayPaymentId: 'pay_1',
-      method: 'upi',
-      source: 'ORDER_CANCEL_RECONCILE',
-    })
+    expect(paymentsService.reconcileWithRazorpay).toHaveBeenCalledWith(
+      'order_rzp_1',
+      'ORDER_CANCEL_RECONCILE'
+    )
     expect(result.success).toBe(false)
     expect(result.paymentConfirmed).toBe(true)
     expect(result.order.status).toBe('CONFIRMED')
@@ -136,12 +139,15 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
     const { service, repository, paymentsService } = makeService({
       order,
       paymentRow: { razorpayOrderId: 'order_rzp_2', status: 'PENDING' },
+      reconcileWithRazorpayResult: { captured: false },
     })
-    fetchPayments.mockResolvedValue({ items: [] })
 
     const result = await service.cancel(USER_ID, ORDER_ID, 'Payment cancelled by user')
 
-    expect(paymentsService.completeVerifiedPayment).not.toHaveBeenCalled()
+    expect(paymentsService.reconcileWithRazorpay).toHaveBeenCalledWith(
+      'order_rzp_2',
+      'ORDER_CANCEL_RECONCILE'
+    )
     expect(result.success).toBe(true)
     expect(repository.updateStatus).toHaveBeenCalledWith(
       ORDER_ID,
@@ -159,11 +165,11 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
       paymentStatus: 'PENDING',
       items: [],
     }
-    const { service, repository } = makeService({
+    const { service, repository, paymentsService } = makeService({
       order,
       paymentRow: { razorpayOrderId: 'order_rzp_3', status: 'PENDING' },
     })
-    fetchPayments.mockRejectedValue(new Error('Razorpay API timeout'))
+    paymentsService.reconcileWithRazorpay.mockRejectedValue(new Error('Razorpay API timeout'))
 
     const result = await service.cancel(USER_ID, ORDER_ID, 'Payment cancelled by user')
 
@@ -185,8 +191,7 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
 
     const result = await service.cancel(USER_ID, ORDER_ID, 'Cancelled by customer')
 
-    expect(fetchPayments).not.toHaveBeenCalled()
-    expect(paymentsService.completeVerifiedPayment).not.toHaveBeenCalled()
+    expect(paymentsService.reconcileWithRazorpay).not.toHaveBeenCalled()
     expect(result.success).toBe(true)
     expect(repository.updateStatus).toHaveBeenCalled()
   })
@@ -200,11 +205,11 @@ describe('OrdersService.cancel — Razorpay reconciliation guard on unpaid ONLIN
       paymentStatus: 'PAID',
       items: [],
     }
-    const { service, repository } = makeService({ order })
+    const { service, repository, paymentsService } = makeService({ order })
 
     const result = await service.cancel(USER_ID, ORDER_ID, 'Cancelled by customer')
 
-    expect(fetchPayments).not.toHaveBeenCalled()
+    expect(paymentsService.reconcileWithRazorpay).not.toHaveBeenCalled()
     expect(result.success).toBe(true)
     expect(repository.updateStatus).toHaveBeenCalled()
   })

@@ -61,7 +61,14 @@ export function stopPaymentExpiryWorker() {
 }
 
 async function _processExpiredPayments() {
-  // 1. Expired pending payments (new flow with expires_at)
+  // 1. Expired pending payments (new flow with expires_at).
+  // Deliberately NOT filtered on o.status = 'PENDING' — a customer/admin
+  // cancel does not touch orders.payment_status (only orders.status), so a
+  // payment Razorpay captures a few seconds after a cancel already went
+  // through would otherwise become permanently invisible to this sweep the
+  // instant it's needed most. o.payment_status = 'PENDING' is the correct,
+  // narrower signal: the money side of this order was never resolved,
+  // regardless of what happened to its fulfillment status.
   const { rows: expired } = await query(
     `SELECT p.id AS payment_id, p.order_id, p.razorpay_order_id
      FROM payments p
@@ -69,20 +76,18 @@ async function _processExpiredPayments() {
      WHERE p.status = 'PENDING'
        AND p.expires_at IS NOT NULL
        AND p.expires_at <= NOW()
-       AND o.status = 'PENDING'
        AND o.payment_status = 'PENDING'
      LIMIT ${BATCH_LIMIT}`
   )
 
   // 2. Legacy ONLINE PENDING orders without expires_at older than 30 min —
   // left-joined to any PENDING payment row so we can still check Razorpay
-  // when one exists.
+  // when one exists. Same reasoning as above for dropping o.status = 'PENDING'.
   const { rows: legacy } = await query(
     `SELECT o.id AS order_id, p.id AS payment_id, p.razorpay_order_id
      FROM orders o
      LEFT JOIN payments p ON p.order_id = o.id AND p.status = 'PENDING'
-     WHERE o.status = 'PENDING'
-       AND o.payment_method = 'ONLINE'
+     WHERE o.payment_method = 'ONLINE'
        AND o.payment_status = 'PENDING'
        AND o.payment_expires_at IS NULL
        AND o.created_at < NOW() - INTERVAL '30 minutes'
@@ -110,19 +115,18 @@ async function _processExpiredPayments() {
 async function _processOneExpiredPayment(row) {
   if (razorpay && row.razorpayOrderId) {
     try {
-      const payments = await razorpay.orders.fetchPayments(row.razorpayOrderId)
-      const captured = (payments.items || []).find((p) => p.status === 'captured')
+      const result = await paymentsService.reconcileWithRazorpay(
+        row.razorpayOrderId,
+        'PAYMENT_EXPIRY_RECONCILE'
+      )
 
-      if (captured) {
-        const result = await paymentsService.completeVerifiedPayment(row.razorpayOrderId, {
-          razorpayPaymentId: captured.id,
-          method: captured.method,
-          source: 'PAYMENT_EXPIRY_RECONCILE',
-        })
-        if (result.success && !result.skipped) {
+      if (result.captured) {
+        if (result.success) {
           logger.info(
-            { orderId: row.orderId, paymentId: captured.id },
-            'Payment expiry: payment was actually captured, order confirmed instead of cancelled'
+            { orderId: row.orderId, needsManualReview: !!result.needsManualReview },
+            result.needsManualReview
+              ? 'Payment expiry: payment was captured for an order that already moved on — flagged for manual review'
+              : 'Payment expiry: payment was actually captured, order confirmed instead of cancelled'
           )
         }
         return
@@ -158,12 +162,38 @@ async function _cancelExpiredOrder(row) {
       return
     }
 
-    // Only cancel truly PENDING orders — idempotent guard against double-processing
-    if (orderRow.status !== 'PENDING' || orderRow.payment_status !== 'PENDING') {
+    // payment_status already resolved (PAID/FAILED/REFUNDED/EXPIRED) —
+    // some other path already handled this, nothing left to do.
+    if (orderRow.payment_status !== 'PENDING') {
       await client.query('ROLLBACK')
       logger.info(
         { orderId: row.orderId, status: orderRow.status, paymentStatus: orderRow.payment_status },
         'Payment expiry: order already processed, skipping'
+      )
+      return
+    }
+
+    // Order already left PENDING (almost always CANCELLED, via the
+    // customer/admin cancel flow, which does not touch payment_status) but
+    // Razorpay showed no captured payment for it either — a genuinely
+    // abandoned payment on an order that's already been dealt with. Stock
+    // was already restored when it was cancelled; don't restore it again
+    // or touch order status a second time. Just close out the dangling
+    // PENDING payment row so it stops being re-swept every 2 minutes forever.
+    if (orderRow.status !== 'PENDING') {
+      await client.query(
+        `UPDATE payments SET status = 'EXPIRED', updated_at = NOW()
+         WHERE order_id = $1 AND status = 'PENDING'`,
+        [row.orderId]
+      )
+      await client.query(
+        `UPDATE orders SET payment_status = 'EXPIRED', updated_at = NOW() WHERE id = $1`,
+        [row.orderId]
+      )
+      await client.query('COMMIT')
+      logger.info(
+        { orderId: row.orderId, orderStatus: orderRow.status },
+        'Payment expiry: order already left PENDING with no Razorpay capture found — closed out the dangling payment, no stock/order changes'
       )
       return
     }
