@@ -31,6 +31,7 @@ import adminThemeRoutes from './themes/themes.routes.js'
 import adminThemeTabRoutes from './theme-tabs/theme-tabs.routes.js'
 import adminSectionRoutes from './sections/sections.routes.js'
 import adminLegalPagesRoutes from './legal-pages/legal-pages.routes.js'
+import adminBrandingRoutes from './branding/branding.routes.js'
 
 /**
  * Admin routes plugin
@@ -95,4 +96,5 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminThemeTabRoutes, { prefix: '/theme-tabs' })
   fastify.register(adminSectionRoutes, { prefix: '/sections' })
   fastify.register(adminLegalPagesRoutes, { prefix: '/legal-pages' })
+  fastify.register(adminBrandingRoutes, { prefix: '/branding' })
 }

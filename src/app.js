@@ -212,6 +212,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/legal-pages',
   })
 
+  // Branding (public) — dashboard-editable splash image + logo, with the
+  // Flutter app falling back to its bundled defaults when unset.
+  await app.register(import('./modules/branding/public.routes.js'), {
+    prefix: '/api/v1/branding',
+  })
+
   // Wishlist — fully implemented
   await app.register(import('./modules/wishlist/wishlist.routes.js'), {
     prefix: '/api/v1/wishlist',
