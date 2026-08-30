@@ -586,7 +586,11 @@ export class WalletService {
       amount,
       `Wallet payment for order ${orderNumber || orderId}`,
       orderId,
-      { subType: 'ORDER_PAYMENT', orderId }
+      // 'ORDER' is the only order-related value wallet_transactions'
+      // chk_wallet_tx_sub_type CHECK constraint allows (migration
+      // 068_first_time_offers_and_cashback.sql) — 'ORDER_PAYMENT' isn't in
+      // that list and made every real debit through this method fail.
+      { subType: 'ORDER', orderId }
     )
   }
 

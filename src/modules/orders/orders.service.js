@@ -1241,7 +1241,12 @@ export class OrdersService {
         amount: order.walletAmountUsed,
         description: `Refund of wallet payment for cancelled order ${order.orderNumber}`,
         referenceId: orderId,
-        subType: 'ORDER_CANCEL_REFUND',
+        // 'REFUND' is the only value wallet_transactions' chk_wallet_tx_sub_type
+        // CHECK constraint allows for this (migration
+        // 068_first_time_offers_and_cashback.sql) — 'ORDER_CANCEL_REFUND'
+        // isn't in that list and would fail this credit the same way
+        // 'ORDER_PAYMENT' failed the debit in wallet.service.js#debitForOrder.
+        subType: 'REFUND',
         orderId,
       }).catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Wallet refund on cancel failed (customer cancel)')
