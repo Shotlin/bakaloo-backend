@@ -87,6 +87,11 @@ const envSchema = z.object({
   // fallback). Get a free key at https://openrouteservice.org/dev/#/signup
   ORS_API_KEY: z.string().optional(),
 
+  // Ola Maps (https://maps.olakrutrim.com) — the API key is admin-managed
+  // via the dashboard (Settings -> Maps), stored in the `ola_maps_settings`
+  // table (migration 115), not an env var — see src/modules/ola-maps and
+  // src/modules/ola-maps-settings.
+
   // Cloudinary
   CLOUDINARY_CLOUD_NAME: z.string().optional(),
   CLOUDINARY_API_KEY: z.string().optional(),

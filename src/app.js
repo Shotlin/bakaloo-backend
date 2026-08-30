@@ -173,6 +173,18 @@ export const buildApp = async () => {
     prefix: '/api/v1/addresses',
   })
 
+  // Ola Maps — Beta/test module, proxies maps.olakrutrim.com so the API
+  // key stays server-side (see src/modules/ola-maps)
+  await app.register(import('./modules/ola-maps/ola-maps.routes.js'), {
+    prefix: '/api/v1/maps/ola',
+  })
+
+  // Ola Maps settings [ADMIN] — dashboard-managed key (paste, test, save),
+  // source of truth for the module above (see src/modules/ola-maps-settings)
+  await app.register(import('./modules/ola-maps-settings/ola-maps-settings.routes.js'), {
+    prefix: '/api/v1/admin/ola-maps-settings',
+  })
+
   // Admin — fully implemented
   await app.register(import('./modules/admin/admin.routes.js'), {
     prefix: '/api/v1/admin',
