@@ -8,6 +8,17 @@ export const styleUrlSchema = {
   security: [{ bearerAuth: [] }],
 }
 
+export const styleJsonSchema = {
+  tags: ['Maps'],
+  summary: 'Self-contained, key-stitched Ola Maps style document (public, no app auth)',
+  querystring: {
+    type: 'object',
+    properties: {
+      style: { type: 'string', minLength: 1, maxLength: 100 },
+    },
+  },
+}
+
 export const geocodeSchema = {
   tags: ['Maps'],
   summary: 'Forward geocode via Ola Maps (Beta/test module)',

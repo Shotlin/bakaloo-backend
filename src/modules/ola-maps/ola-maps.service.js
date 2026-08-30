@@ -8,6 +8,19 @@
  * Test module: sits alongside the mobile app's existing free
  * OSM/Nominatim setup while accuracy is evaluated, before deciding
  * whether to switch.
+ *
+ * Style rewriting (buildProxiedStyle): Ola's style.json only carries
+ * api_key on itself — the `glyphs`/`sprite` templates and each vector
+ * source's external TileJSON (and THAT TileJSON's own `tiles` array) come
+ * back with no key on them at all, so a MapLibreMap pointed straight at
+ * Ola's style.json loads a blank map — every actual tile/glyph/sprite
+ * request 401s. Confirmed by hand: `.../data/planet.json` (a source's
+ * TileJSON) returns 401 with no key, 200 with one appended, and neither
+ * the style.json nor that TileJSON embed the key on their own.
+ * `buildProxiedStyle` fetches the style once, resolves each vector
+ * source's TileJSON server-side, and inlines the key into every nested
+ * URL template before handing the whole thing back — see
+ * ola-maps.controller.js#styleJson for the public route that serves this.
  */
 import { logger } from '../../config/logger.js'
 import { OlaMapsSettingsRepository } from '../ola-maps-settings/ola-maps-settings.repository.js'
@@ -26,18 +39,77 @@ export class OlaMapsService {
   }
 
   /**
-   * A ready-to-use MapLibre style URL (API key already embedded in the
-   * query string) plus whether one could be issued. One settings read for
-   * both, so the controller doesn't pay for it twice.
+   * Whether a style can be served, plus the URL to fetch it from — our
+   * own public style.json passthrough (see styleJson below), not Ola's
+   * URL directly, since only our route does the key-stitching rewrite.
    */
-  async getStyleInfo(styleName = DEFAULT_STYLE_NAME) {
+  async getStyleInfo(publicBaseUrl, styleName = DEFAULT_STYLE_NAME) {
     const apiKey = await this._getApiKey()
     if (!apiKey) {
       return { configured: false, styleUrl: null }
     }
-    const url = new URL(`${BASE_URL}/tiles/vector/v1/styles/${styleName}/style.json`)
-    url.searchParams.set('api_key', apiKey)
-    return { configured: true, styleUrl: url.toString() }
+    return {
+      configured: true,
+      styleUrl: `${publicBaseUrl}/api/v1/maps/ola/style.json?style=${encodeURIComponent(styleName)}`,
+    }
+  }
+
+  /**
+   * Fetches Ola's style.json plus every vector source's TileJSON
+   * (server-side, using our stored key) and returns a single
+   * self-contained style document with the key stitched into every
+   * nested URL — glyphs, sprite, and each source's tile template.
+   * Public route, no app auth: the native map engine that consumes this
+   * can't attach our bearer token, so protection here is the same as any
+   * client-embedded map key (see the security note in this repo's
+   * discussion of this module) — rotate the key from the dashboard if
+   * it's ever abused.
+   */
+  async buildProxiedStyle(styleName = DEFAULT_STYLE_NAME) {
+    const apiKey = await this._getApiKey()
+    if (!apiKey) {
+      return null
+    }
+
+    const style = await this._fetchJson(
+      `${BASE_URL}/tiles/vector/v1/styles/${styleName}/style.json`,
+      apiKey
+    )
+    if (!style) {
+      return null
+    }
+
+    if (style.glyphs) {
+      style.glyphs = this._withApiKey(style.glyphs, apiKey)
+    }
+    if (style.sprite) {
+      style.sprite = this._withApiKey(style.sprite, apiKey)
+    }
+
+    const sources = style.sources || {}
+    for (const [name, source] of Object.entries(sources)) {
+      if (source?.type !== 'vector' || !source.url) {
+        continue
+      }
+
+      const tileJson = await this._fetchJson(this._withApiKey(source.url, apiKey), apiKey)
+      if (!tileJson || !Array.isArray(tileJson.tiles)) {
+        logger.warn({ name, url: source.url }, 'Ola Maps source TileJSON unavailable, dropping source')
+        delete sources[name]
+        continue
+      }
+
+      sources[name] = {
+        type: 'vector',
+        tiles: tileJson.tiles.map((tileUrl) => this._withApiKey(tileUrl, apiKey)),
+        minzoom: tileJson.minzoom,
+        maxzoom: tileJson.maxzoom,
+        ...(tileJson.bounds ? { bounds: tileJson.bounds } : {}),
+        ...(tileJson.attribution ? { attribution: tileJson.attribution } : {}),
+      }
+    }
+
+    return style
   }
 
   async geocode(address) {
@@ -62,6 +134,29 @@ export class OlaMapsService {
   async _getApiKey() {
     const row = await this.settingsRepository.get()
     return row?.is_enabled && row?.api_key ? row.api_key : null
+  }
+
+  /** @private Appends api_key to a URL (template placeholders like {z} are left untouched). */
+  _withApiKey(rawUrl, apiKey) {
+    const [base, query] = rawUrl.split('?')
+    const params = new URLSearchParams(query || '')
+    params.set('api_key', apiKey)
+    return `${base}?${params.toString()}`
+  }
+
+  /** @private GET a URL (already carrying its own auth) and parse the JSON body, or null on any failure. */
+  async _fetchJson(url) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+      if (!res.ok) {
+        logger.warn({ status: res.status, url }, 'Ola Maps request failed')
+        return null
+      }
+      return await res.json()
+    } catch (err) {
+      logger.warn({ err: err.message, url }, 'Ola Maps request errored')
+      return null
+    }
   }
 
   async _get(path, params, apiKey) {

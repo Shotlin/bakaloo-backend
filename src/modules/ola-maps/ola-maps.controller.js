@@ -8,10 +8,26 @@ export class OlaMapsController {
     this.service = service
   }
 
-  /** GET /style-url */
+  /** GET /style-url [AUTH] */
   async getStyleUrl(request, reply) {
-    const { configured, styleUrl } = await this.service.getStyleInfo()
+    const publicBaseUrl = `${request.protocol}://${request.hostname}`
+    const { configured, styleUrl } = await this.service.getStyleInfo(publicBaseUrl)
     return reply.code(200).send(success({ configured, styleUrl }))
+  }
+
+  /**
+   * GET /style.json [PUBLIC] — the URL getStyleUrl hands back. No app auth:
+   * the native map engine that fetches this can't attach our bearer token,
+   * same constraint every client-embedded map key lives with. Returns the
+   * raw MapLibre style document, not the {success,data} envelope — this is
+   * fetched directly by MapLibreMap's native styleString loader.
+   */
+  async styleJson(request, reply) {
+    const style = await this.service.buildProxiedStyle(request.query.style)
+    if (!style) {
+      return reply.code(503).send({ error: 'Ola Maps style unavailable' })
+    }
+    return reply.code(200).send(style)
   }
 
   /** GET /geocode */
