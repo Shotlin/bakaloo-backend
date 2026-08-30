@@ -8,7 +8,7 @@ export const listRefundRequestsSchema = {
     properties: {
       page: { type: 'integer', default: 1 },
       limit: { type: 'integer', default: 20, maximum: 100 },
-      status: { type: 'string', enum: ['PENDING', 'APPROVED', 'REJECTED'] },
+      status: { type: 'string', enum: ['PENDING', 'APPROVED', 'REJECTED', 'CANCELLED'] },
       search: { type: 'string' },
       startDate: { type: 'string', format: 'date-time' },
       endDate: { type: 'string', format: 'date-time' },

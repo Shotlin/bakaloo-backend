@@ -25,9 +25,18 @@ export class RefundRequestsService {
       }
     }
 
-    const existing = await this.repository.findPendingByOrder(orderId)
-    if (existing) {
-      throw { statusCode: 400, message: 'A refund request is already pending for this order' }
+    // Only a request the customer themselves cancelled leaves the order
+    // eligible for a fresh submission — an APPROVED order was already
+    // refunded, and a REJECTED one was already reviewed and denied, so
+    // resubmitting the same complaint isn't allowed either.
+    const existing = await this.repository.findLatestByOrder(orderId)
+    if (existing && existing.status !== 'CANCELLED') {
+      const messages = {
+        PENDING: 'A refund request is already pending for this order',
+        APPROVED: 'This order has already been refunded',
+        REJECTED: 'A refund request for this order was already reviewed and rejected',
+      }
+      throw { statusCode: 400, message: messages[existing.status] || 'A refund request already exists for this order' }
     }
 
     let items = null
@@ -78,5 +87,38 @@ export class RefundRequestsService {
   async getUserRequests(userId, { page, limit }) {
     const offset = (page - 1) * limit
     return await this.repository.getUserRequests(userId, { offset, limit })
+  }
+
+  /** Latest refund request for one order — powers the order-detail screen's status card. */
+  async getByOrder(userId, orderId) {
+    const order = await this.ordersRepository.findByIdAndUser(orderId, userId)
+    if (!order) {
+      throw { statusCode: 404, message: 'Order not found' }
+    }
+    return await this.repository.findLatestByOrder(orderId)
+  }
+
+  async cancelRequest(userId, requestId) {
+    const request = await this.repository.findByIdAndUser(requestId, userId)
+    if (!request) {
+      throw { statusCode: 404, message: 'Refund request not found' }
+    }
+    if (request.status !== 'PENDING') {
+      throw { statusCode: 400, message: `Cannot cancel a request that is already ${request.status.toLowerCase()}` }
+    }
+
+    const cancelled = await this.repository.cancel(requestId)
+
+    try {
+      this.fastify?.emitDashboardRefundRequest?.({
+        id: requestId,
+        orderId: request.order_id,
+        status: 'CANCELLED',
+      })
+    } catch (_) {
+      // Keep cancellation non-blocking if the realtime emit fails.
+    }
+
+    return cancelled
   }
 }

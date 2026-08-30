@@ -1,9 +1,16 @@
 import { query } from '../../config/database.js'
 
 export class RefundRequestsRepository {
-  async findPendingByOrder(orderId) {
+  /**
+   * The most recent refund request for this order, regardless of status —
+   * used both to block a new submission while one is already
+   * pending/decided, and to show the order-detail screen's status card.
+   * Only a CANCELLED latest request leaves the order eligible for a fresh
+   * submission.
+   */
+  async findLatestByOrder(orderId) {
     const { rows } = await query(
-      `SELECT id FROM refund_requests WHERE order_id = $1 AND status = 'PENDING'`,
+      `SELECT * FROM refund_requests WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [orderId]
     )
     return rows[0] || null
@@ -37,6 +44,14 @@ export class RefundRequestsRepository {
       [id, userId]
     )
     return rows[0] || null
+  }
+
+  async cancel(id) {
+    const { rows } = await query(
+      `UPDATE refund_requests SET status = 'CANCELLED', updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [id]
+    )
+    return rows[0]
   }
 
   async getUserRequests(userId, { offset, limit }) {

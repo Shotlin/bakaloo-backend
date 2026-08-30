@@ -24,3 +24,27 @@ export const getMyRefundRequestsSchema = {
     },
   },
 }
+
+export const getRefundRequestByOrderSchema = {
+  tags: ['Refund Requests'],
+  summary: 'Get the latest refund request for one order (order-detail status card)',
+  params: {
+    type: 'object',
+    required: ['orderId'],
+    properties: {
+      orderId: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
+export const cancelRefundRequestSchema = {
+  tags: ['Refund Requests'],
+  summary: 'Cancel your own pending refund request',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+    },
+  },
+}

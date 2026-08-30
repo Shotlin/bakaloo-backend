@@ -1,7 +1,12 @@
 import { RefundRequestsController } from './refund-requests.controller.js'
 import { RefundRequestsService } from './refund-requests.service.js'
 import { RefundRequestsRepository } from './refund-requests.repository.js'
-import { createRefundRequestSchema, getMyRefundRequestsSchema } from './refund-requests.schema.js'
+import {
+  createRefundRequestSchema,
+  getMyRefundRequestsSchema,
+  getRefundRequestByOrderSchema,
+  cancelRefundRequestSchema,
+} from './refund-requests.schema.js'
 
 /**
  * Refund requests routes plugin
@@ -21,4 +26,14 @@ export default async function refundRequestsRoutes(fastify) {
     schema: getMyRefundRequestsSchema,
     preHandler: [fastify.authenticate],
   }, controller.getMyRequests.bind(controller))
+
+  fastify.get('/order/:orderId', {
+    schema: getRefundRequestByOrderSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.getByOrder.bind(controller))
+
+  fastify.post('/:id/cancel', {
+    schema: cancelRefundRequestSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.cancelRequest.bind(controller))
 }
