@@ -136,7 +136,7 @@ export class DeliveryRepository {
   async getAssignmentByOrderAndRider(orderId, riderId) {
     const { rows } = await query(
       `SELECT da.id as assignment_id, da.*, o.order_number, o.user_id as customer_id, o.status as order_status,
-              o.shop_id, o.total_amount, o.payment_method,
+              o.shop_id, o.total_amount, o.payment_method, o.wallet_amount_used,
               ru.name as rider_name, ru.phone as rider_phone,
               rp.current_lat as rider_lat, rp.current_lng as rider_lng
        FROM delivery_assignments da

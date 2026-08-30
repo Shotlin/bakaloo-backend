@@ -32,6 +32,8 @@ import { BillSummaryService } from '../cart/bill-summary.service.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
+import { WalletService } from '../wallet/wallet.service.js'
+import { WalletRepository } from '../wallet/wallet.repository.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
 import { PaymentOffersService } from '../payment-offers/payment-offers.service.js'
 import { PurchaseLimitsService } from '../purchase-limits/purchase-limits.service.js'
@@ -132,6 +134,12 @@ export class OrdersService {
     this.firstTimeOffersService =
       options.firstTimeOffersService || new FirstTimeOffersService()
     this.cashbackService = options.cashbackService || new CashbackService()
+    // Wallet-balance-toggle checkout feature — offsets an order's total
+    // regardless of paymentMethod (COD/ONLINE). See placeOrder() step 4b
+    // and cancel()'s wallet-refund-on-self-cancel block.
+    this.walletRepo = options.walletRepository || new WalletRepository()
+    this.walletService =
+      options.walletService || new WalletService(this.walletRepo, fastify)
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService()
     this.paymentOffersService =
@@ -191,6 +199,10 @@ export class OrdersService {
       scheduledSlotLabel,
       // Quick Delivery — explicit opt-in only, never a silent default fee.
       quickDeliverySelected,
+      // Wallet-balance-toggle — explicit opt-in only, same convention as
+      // Quick Delivery above. Ignored for the legacy paymentMethod:'WALLET'
+      // (old published app), which keeps its own separate full-payment flow.
+      useWallet,
     } = body
 
     // Validate delivery slot
@@ -558,6 +570,12 @@ export class OrdersService {
     // 5. Transaction: split + create orders + decrement stock atomically
     const client = await getClient()
     let createdOrders = []
+    // Wallet-balance-toggle checkout feature — set inside the transaction
+    // below, read afterward by the post-commit gates (cart-clear, coupon
+    // usage, notification) so a fully-wallet-covered order is treated
+    // exactly like a COD order (already confirmed, nothing deferred).
+    let walletAmountUsed = 0
+    let walletFullyCoversOrder = false
     try {
       await client.query('BEGIN')
 
@@ -581,6 +599,66 @@ export class OrdersService {
           scheduledSlotLabel: resolvedDeliveryMode === 'SCHEDULED' ? (scheduledSlotLabel || null) : null,
         },
       })
+
+      // Wallet-balance-toggle — applies on top of COD or ONLINE, replacing
+      // the old exclusive paymentMethod:'WALLET'. Restricted to single-shop
+      // carts, same as coupons/tip/Quick Delivery above (see method
+      // docstring) — no new multi-shop-splitting complexity introduced.
+      // Skipped entirely for the legacy paymentMethod:'WALLET' (old
+      // published app), which keeps using its own full-payment
+      // payFromWallet() flow untouched.
+      if (useWallet && groupedByShop.size === 1 && normalizedPaymentMethod !== 'WALLET' && createdOrders.length === 1) {
+        const orderId = createdOrders[0].id
+        const orderTotal = createdOrders[0].totalAmount
+        // FOR UPDATE lock taken here, inside this same transaction — the
+        // amount below is capped to the balance we just locked, so the
+        // debit a few lines down can never race or fail against a balance
+        // that's changed since.
+        const wallet = await this.walletRepo.getForUpdate(client, userId)
+        walletAmountUsed = Math.round(Math.min(wallet?.balance || 0, orderTotal) * 100) / 100
+        walletFullyCoversOrder = walletAmountUsed > 0 && walletAmountUsed >= orderTotal
+
+        if (walletFullyCoversOrder) {
+          // Full coverage regardless of the chosen method — confirmed
+          // immediately, nothing left to collect via COD cash or Razorpay.
+          await this.walletService.debitForOrder(client, userId, {
+            amount: walletAmountUsed, orderId, orderNumber: createdOrders[0].orderNumber,
+          })
+          await client.query(
+            `UPDATE orders SET wallet_amount_used = $1, payment_status = 'PAID', status = 'CONFIRMED', updated_at = NOW() WHERE id = $2`,
+            [walletAmountUsed, orderId]
+          )
+          createdOrders[0].walletAmountUsed = walletAmountUsed
+          createdOrders[0].paymentStatus = 'PAID'
+          createdOrders[0].status = 'CONFIRMED'
+        } else if (walletAmountUsed > 0 && normalizedPaymentMethod === 'COD') {
+          // COD partial — debit now (real money moves immediately, no
+          // async gateway step to wait for); the remainder stays due in
+          // cash at delivery (see delivery.service.js's collection-amount
+          // validation, updated to account for wallet_amount_used).
+          await this.walletService.debitForOrder(client, userId, {
+            amount: walletAmountUsed, orderId, orderNumber: createdOrders[0].orderNumber,
+          })
+          await client.query(
+            `UPDATE orders SET wallet_amount_used = $1, updated_at = NOW() WHERE id = $2`,
+            [walletAmountUsed, orderId]
+          )
+          createdOrders[0].walletAmountUsed = walletAmountUsed
+        } else if (walletAmountUsed > 0) {
+          // ONLINE with a remainder — persist the intended amount only.
+          // The actual debit is deliberately deferred to
+          // PaymentsService#completeVerifiedPayment, atomically alongside
+          // confirming the order, so a Razorpay payment that's abandoned
+          // or fails never touches the wallet at all — no compensating
+          // refund is ever needed. createPaymentOrder() reads this field
+          // back to charge Razorpay only the remainder.
+          await client.query(
+            `UPDATE orders SET wallet_amount_used = $1, updated_at = NOW() WHERE id = $2`,
+            [walletAmountUsed, orderId]
+          )
+          createdOrders[0].walletAmountUsed = walletAmountUsed
+        }
+      }
 
       await client.query('COMMIT')
     } catch (err) {
@@ -631,6 +709,16 @@ export class OrdersService {
         'Post-order follow-through step failed'
       )
 
+    // True for COD (always — no async gateway step ever sits between
+    // creation and confirmation) and for an ONLINE order the wallet toggle
+    // happened to cover in full (equally nothing left to wait on). False
+    // for a genuine ONLINE payment (with or without a partial wallet
+    // offset) and for the legacy paymentMethod:'WALLET', both of which
+    // still defer cart-clear/coupon-usage/notification to their own
+    // payment-confirmation step.
+    const paymentAlreadyConfirmedAtCreation =
+      normalizedPaymentMethod === 'COD' || walletFullyCoversOrder
+
     // Abandoned-cart conversion: fires the moment order rows exist,
     // regardless of payment method. Cart-clearing itself is deferred for
     // ONLINE/WALLET (see below) and for those methods happens later in
@@ -646,7 +734,7 @@ export class OrdersService {
     // For ONLINE and WALLET payments, do NOT clear cart yet — cart is only
     // cleared after successful payment verification / wallet deduction.
     // This prevents the "cart disappeared but payment failed" bug.
-    if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+    if (paymentAlreadyConfirmedAtCreation) {
       try {
         await this.cartService.clearCart(userId)
       } catch (err) {
@@ -665,8 +753,7 @@ export class OrdersService {
     if (
       appliedCouponCode &&
       createdOrders.length === 1 &&
-      normalizedPaymentMethod !== 'ONLINE' &&
-      normalizedPaymentMethod !== 'WALLET'
+      paymentAlreadyConfirmedAtCreation
     ) {
       try {
         await this.couponsService.recordUsage(
@@ -821,7 +908,7 @@ export class OrdersService {
       // - ONLINE: notification sent after Razorpay payment verification
       // - WALLET: notification sent after wallet deduction succeeds
       // This prevents false "Order placed" notifications when payment fails.
-      if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
+      if (paymentAlreadyConfirmedAtCreation) {
         await this._sendCustomerOrderNotification(
           userId,
           buildCustomerOrderEventNotification({
@@ -1134,6 +1221,32 @@ export class OrdersService {
     this.cashbackService.cancelForOrder(orderId).catch((err) => {
       logger.warn({ err: err.message, orderId }, 'Cashback cancellation failed (customer cancel)')
     })
+
+    // Refund the wallet-balance-toggle portion of this order, if any and if
+    // it was actually taken. This deliberately does NOT attempt to fix the
+    // pre-existing, separate gap where a self-cancel never refunds COD cash
+    // or a Razorpay remainder (out of scope here) — it only closes the
+    // regression this feature would otherwise introduce: a COD order's
+    // wallet portion is debited immediately at creation (see placeOrder),
+    // so without this, cancelling before delivery would silently forfeit
+    // that money. The condition excludes an ONLINE order whose wallet
+    // portion was only ever *planned*, never actually debited — for
+    // ONLINE, paymentStatus === 'PAID' is exactly when
+    // completeVerifiedPayment ran and the debit actually happened.
+    if (
+      order.walletAmountUsed > 0 &&
+      (order.paymentMethod === 'COD' || order.paymentStatus === 'PAID')
+    ) {
+      this.walletService.addMoney(userId, {
+        amount: order.walletAmountUsed,
+        description: `Refund of wallet payment for cancelled order ${order.orderNumber}`,
+        referenceId: orderId,
+        subType: 'ORDER_CANCEL_REFUND',
+        orderId,
+      }).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Wallet refund on cancel failed (customer cancel)')
+      })
+    }
 
     logger.info({ orderId, userId }, 'Order cancelled')
     return { success: true, order: updated }

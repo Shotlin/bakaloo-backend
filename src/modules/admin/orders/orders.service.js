@@ -553,7 +553,15 @@ export class AdminOrdersService {
     }
 
     const payment = await this.repository.getOrderPayment(orderId)
-    const paidAmount = payment ? parseFloat(payment.amount) : parseFloat(order.total_amount)
+    // The `payment.amount` branch (a genuine gateway payment) already
+    // excludes any wallet-toggle offset — payments.service.js#createPaymentOrder
+    // only ever charges Razorpay the remainder after wallet_amount_used.
+    // The `order.total_amount` fallback (COD, no gateway row) must
+    // subtract it explicitly, or a wallet-partial COD refund would refund
+    // the wallet-covered portion too, as if it were cash the customer paid.
+    const paidAmount = payment
+      ? parseFloat(payment.amount)
+      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
     const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
     const refundAmount = paidAmount
 
@@ -754,7 +762,11 @@ export class AdminOrdersService {
     let appliedRefundTo = 'none'
     if (refundTo && refundTo !== 'none' && order.payment_status === 'PAID') {
       const payment = await this.repository.getOrderPayment(orderId)
-      const paidAmount = payment ? parseFloat(payment.amount) : parseFloat(order.total_amount)
+      // See refundOrder()'s identical computation above for why the COD
+      // fallback branch subtracts wallet_amount_used.
+      const paidAmount = payment
+        ? parseFloat(payment.amount)
+        : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
       const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
 
       if (refundTo === 'original' && hasGatewayPayment) {

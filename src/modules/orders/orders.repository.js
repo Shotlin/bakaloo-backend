@@ -43,7 +43,7 @@ export class OrdersRepository {
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
                 delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
                 fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount,
-                created_at, updated_at`,
+                wallet_amount_used, created_at, updated_at`,
       [
         orderData.orderNumber,
         orderData.userId,
@@ -590,6 +590,7 @@ export class OrdersRepository {
       platformFee: parseFloat(row.platform_fee),
       taxAmount: parseFloat(row.tax_amount),
       totalAmount: parseFloat(row.total_amount),
+      walletAmountUsed: parseFloat(row.wallet_amount_used || 0),
       paymentMethod: row.payment_method,
       paymentStatus: row.payment_status,
       couponCode: row.coupon_code,

@@ -565,6 +565,32 @@ export class WalletService {
   }
 
   /**
+   * Transaction-scoped debit for the wallet-balance-toggle checkout
+   * feature. Unlike payFromWallet() above (which owns its own
+   * BEGIN/COMMIT and runs the full order-confirmation cascade), this is a
+   * narrow primitive: the caller already holds an open transaction and a
+   * FOR UPDATE lock context (orders.service.js#placeOrder for the
+   * immediate-debit case, payments.service.js#completeVerifiedPayment for
+   * the deferred-remainder case) and is responsible for everything else.
+   * Throws on missing wallet / insufficient balance — callers decide how
+   * to handle that in their own transaction.
+   */
+  async debitForOrder(client, userId, { amount, orderId, orderNumber }) {
+    const wallet = await this.repo.getForUpdate(client, userId)
+    if (!wallet) {
+      throw new Error('Wallet not found')
+    }
+    return this.repo.debit(
+      client,
+      wallet.id,
+      amount,
+      `Wallet payment for order ${orderNumber || orderId}`,
+      orderId,
+      { subType: 'ORDER_PAYMENT', orderId }
+    )
+  }
+
+  /**
    * Transfer money to another user by phone number
    */
   async transfer(userId, { phone, amount, description }) {

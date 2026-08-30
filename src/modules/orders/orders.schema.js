@@ -99,6 +99,7 @@ const orderResponseSchema = {
     platformFee: { type: 'number' },
     taxAmount: { type: 'number' },
     totalAmount: { type: 'number' },
+    walletAmountUsed: { type: 'number' },
     paymentMethod: { type: 'string' },
     paymentStatus: { type: 'string' },
     couponCode: { type: ['string', 'null'] },
@@ -158,6 +159,10 @@ export const placeOrderSchema = {
       scheduledSlotLabel: { type: ['string', 'null'], maxLength: 100 },
       // Quick Delivery — explicit opt-in only; only meaningful for ASAP orders.
       quickDeliverySelected: { type: 'boolean', default: false },
+      // Wallet-balance-toggle checkout feature — explicit opt-in only.
+      // Ignored when paymentMethod is the legacy 'WALLET' (old published
+      // app), which keeps using its own separate full-payment flow.
+      useWallet: { type: 'boolean', default: false },
     },
   },
   response: {

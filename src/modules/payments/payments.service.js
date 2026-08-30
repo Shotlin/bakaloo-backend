@@ -61,6 +61,15 @@ export class PaymentsService {
       return { success: false, message: 'Payment already completed' }
     }
 
+    // The wallet-balance-toggle checkout feature may have already reserved
+    // part of this order's total against the customer's wallet (persisted
+    // on the order at creation, not yet debited — see
+    // OrdersService#placeOrder and completeVerifiedPayment below). Razorpay
+    // must only ever be charged the remainder; a fully-wallet-covered order
+    // is already paymentStatus 'PAID' by the time it could reach here, so
+    // it's already rejected by the guard above.
+    const remainder = Math.round((order.totalAmount - (order.walletAmountUsed || 0)) * 100) / 100
+
     // Create Razorpay order. The razorpay SDK throws errors carrying a
     // `statusCode` mirrored from Razorpay's own API response (e.g. 401
     // when our API credentials are rejected) — left uncaught, that
@@ -74,7 +83,7 @@ export class PaymentsService {
     let rzpOrder
     try {
       rzpOrder = await razorpay.orders.create({
-        amount: Math.round(order.totalAmount * 100), // paise
+        amount: Math.round(remainder * 100), // paise
         currency: env.RAZORPAY_CURRENCY,
         receipt: order.orderNumber,
         notes: {
@@ -99,7 +108,7 @@ export class PaymentsService {
       orderId: order.id,
       userId,
       razorpayOrderId: rzpOrder.id,
-      amount: order.totalAmount,
+      amount: remainder,
       currency: env.RAZORPAY_CURRENCY,
       status: 'PENDING',
       expiresAt,
@@ -121,7 +130,7 @@ export class PaymentsService {
       data: {
         paymentId: payment.id,
         razorpayOrderId: rzpOrder.id,
-        amount: order.totalAmount,
+        amount: remainder,
         currency: env.RAZORPAY_CURRENCY,
         keyId: env.RAZORPAY_KEY_ID,
       },
@@ -302,7 +311,7 @@ export class PaymentsService {
       }
 
       const { rows: [orderRow] } = await client.query(
-        `SELECT id, status, order_number FROM orders WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, order_number, wallet_amount_used FROM orders WHERE id = $1 FOR UPDATE`,
         [payment.orderId]
       )
       const orderStillPending = orderRow?.status === 'PENDING'
@@ -349,6 +358,36 @@ export class PaymentsService {
           success: true,
           needsManualReview: true,
           payment: await this.repo.findById(payment.id),
+        }
+      }
+
+      // Wallet-balance-toggle checkout feature: this order may carry an
+      // intended wallet_amount_used reserved at creation time but
+      // deliberately never debited until now (see OrdersService#placeOrder)
+      // — debiting it here, atomically with confirming the order, means a
+      // Razorpay payment that never completes never touches the wallet at
+      // all, so no compensating refund logic is ever needed.
+      let walletAmountUsed = orderRow.wallet_amount_used ? parseFloat(orderRow.wallet_amount_used) : 0
+      if (walletAmountUsed > 0) {
+        try {
+          await this.walletService.debitForOrder(client, payment.userId, {
+            amount: walletAmountUsed,
+            orderId: payment.orderId,
+            orderNumber: orderRow.order_number,
+          })
+        } catch (err) {
+          // Money is already captured by Razorpay — never refuse to
+          // confirm an already-paid order over a wallet-side problem
+          // (mirrors this file's existing philosophy elsewhere). This
+          // should be rare: the balance was only just reserved at order
+          // creation, so it can only fail if the same wallet was drained
+          // by something else in between (e.g. an admin debit).
+          logger.warn(
+            { err: err.message, orderId: payment.orderId, walletAmountUsed },
+            'Wallet remainder debit failed at payment confirmation — confirming order without it'
+          )
+          walletAmountUsed = 0
+          await client.query(`UPDATE orders SET wallet_amount_used = 0 WHERE id = $1`, [payment.orderId])
         }
       }
 

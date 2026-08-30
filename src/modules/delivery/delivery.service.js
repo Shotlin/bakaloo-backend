@@ -748,7 +748,11 @@ export class DeliveryService {
     if (isCod && (cashCollected != null || upiCollected != null)) {
       normalizedCashCollected = Number(cashCollected) || 0
       normalizedUpiCollected = Number(upiCollected) || 0
-      const orderTotal = Number(assignment.total_amount) || 0
+      // The wallet-balance-toggle checkout feature may have already
+      // offset part of this COD order's total at creation time (debited
+      // immediately — see OrdersService#placeOrder) — the amount actually
+      // due at the door is only the remainder, not the full order total.
+      const orderTotal = (Number(assignment.total_amount) || 0) - (Number(assignment.wallet_amount_used) || 0)
       const collectedTotal = normalizedCashCollected + normalizedUpiCollected
       // Small tolerance for paise-level rounding, not a strict equality —
       // the rider is hand-entering these from what the customer actually

@@ -77,8 +77,9 @@ vi.mock('../../../src/modules/notifications/notifications.service.js', () => ({
 vi.mock('../../../src/modules/notifications/customer-order-event.helper.js', () => ({
   buildCustomerOrderEventNotification: vi.fn().mockReturnValue({}),
 }))
+const debitForOrderMock = vi.fn().mockResolvedValue({ wallet: {}, transaction: {} })
 vi.mock('../../../src/modules/wallet/wallet.service.js', () => ({
-  WalletService: vi.fn().mockImplementation(() => ({})),
+  WalletService: vi.fn().mockImplementation(() => ({ debitForOrder: debitForOrderMock })),
 }))
 vi.mock('../../../src/modules/wallet/wallet.repository.js', () => ({
   WalletRepository: vi.fn().mockImplementation(() => ({})),
@@ -224,6 +225,90 @@ describe('PaymentsService.completeVerifiedPayment — order-status guard against
     // Never even looked at the orders table — already resolved.
     expect(calls.some((c) => c.sql.includes('FROM orders'))).toBe(false)
     expect(queuedJobs).toHaveLength(0)
+  })
+})
+
+describe('PaymentsService.completeVerifiedPayment — wallet-balance-toggle deferred debit', () => {
+  beforeEach(() => {
+    queuedJobs.length = 0
+    debitForOrderMock.mockClear()
+    debitForOrderMock.mockResolvedValue({ wallet: {}, transaction: {} })
+  })
+
+  it('does not touch the wallet at all when the order carries no wallet_amount_used', async () => {
+    const { service } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'PENDING' },
+      orderRow: { id: ORDER_ID, status: 'PENDING' },
+    })
+
+    await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'PAYMENT_WEBHOOK',
+    })
+
+    expect(debitForOrderMock).not.toHaveBeenCalled()
+  })
+
+  it('debits the reserved wallet amount atomically, in the same transaction, when confirming the order', async () => {
+    const { service, calls } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-42', status: 'PENDING' },
+      orderRow: { id: ORDER_ID, status: 'PENDING', order_number: 'GRO-2001', wallet_amount_used: '50.00' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'PAYMENT_WEBHOOK',
+    })
+
+    expect(result.success).toBe(true)
+    expect(debitForOrderMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'user-42',
+      expect.objectContaining({ amount: 50, orderId: ORDER_ID, orderNumber: 'GRO-2001' })
+    )
+    // The order still confirms in the very same call — the debit rides
+    // inside the existing transaction rather than a separate one.
+    expect(calls.some((c) => c.sql.startsWith('UPDATE orders') && c.sql.includes("status = 'CONFIRMED'"))).toBe(true)
+  })
+
+  it('never debits the wallet for an order flagged needs-manual-review — money is never pulled for an order that moved on', async () => {
+    const { service } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'PENDING', amount: '80.00' },
+      orderRow: { id: ORDER_ID, status: 'CANCELLED', order_number: 'GRO-2002', wallet_amount_used: '30.00' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'PAYMENT_WEBHOOK',
+    })
+
+    expect(result.needsManualReview).toBe(true)
+    expect(debitForOrderMock).not.toHaveBeenCalled()
+  })
+
+  it('still confirms the already-captured payment even if the wallet debit fails, and zeroes wallet_amount_used instead of losing the payment', async () => {
+    debitForOrderMock.mockRejectedValueOnce(new Error('Insufficient wallet balance'))
+    const { service, calls } = await buildService({
+      paymentRow: { id: PAYMENT_ID, order_id: ORDER_ID, user_id: 'user-1', status: 'PENDING' },
+      orderRow: { id: ORDER_ID, status: 'PENDING', order_number: 'GRO-2003', wallet_amount_used: '20.00' },
+    })
+
+    const result = await service.completeVerifiedPayment(RZP_ORDER_ID, {
+      razorpayPaymentId: 'pay_1',
+      method: 'upi',
+      source: 'PAYMENT_WEBHOOK',
+    })
+
+    // Money was already captured by Razorpay — a wallet-side failure must
+    // never roll that back.
+    expect(result.success).toBe(true)
+    expect(result.needsManualReview).toBeFalsy()
+    expect(calls.some((c) => c.sql.startsWith('UPDATE orders') && c.sql.includes("status = 'CONFIRMED'"))).toBe(true)
+    expect(calls.some((c) => c.sql.includes('wallet_amount_used = 0'))).toBe(true)
+    expect(queuedJobs).toHaveLength(1)
   })
 })
 
