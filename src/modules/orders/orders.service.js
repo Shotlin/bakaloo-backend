@@ -1200,8 +1200,14 @@ export class OrdersService {
       logger.warn({ err: err.message, orderId }, 'Cache invalidation failed after cancel (non-blocking)')
     }
 
+    // Defense in depth against a non-Flutter API consumer sending a
+    // whitespace-only reason — the Flutter datasource already trims and
+    // omits empty reasons itself, but the schema alone (maxLength only,
+    // kept optional for the currently-published app that never sends this
+    // field at all) wouldn't catch "   ".
+    const normalizedReason = typeof reason === 'string' ? reason.trim() : null
     const updated = await this.repo.updateStatus(orderId, ORDER_STATUS.CANCELLED, {
-      cancelledReason: reason || 'Cancelled by customer',
+      cancelledReason: normalizedReason || 'Cancelled by customer',
     })
 
     // A rider can already be assigned by the time the order is cancelled

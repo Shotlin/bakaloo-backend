@@ -265,7 +265,10 @@ export const cancelOrderSchema = {
   body: {
     type: 'object',
     properties: {
-      reason: { type: 'string', maxLength: 500 },
+      // Kept optional — the currently-published app never sends this field
+      // at all. minLength guards only against an explicitly-sent empty
+      // string; absence remains valid for backward compatibility.
+      reason: { type: 'string', maxLength: 500, minLength: 1 },
     },
   },
   response: {

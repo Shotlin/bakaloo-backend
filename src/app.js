@@ -210,6 +210,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/reviews',
   })
 
+  // Refund Requests — structured post-delivery refund flow
+  await app.register(import('./modules/refund-requests/refund-requests.routes.js'), {
+    prefix: '/api/v1/refund-requests',
+  })
+
   // Delivery — fully implemented
   await app.register(import('./modules/delivery/delivery.routes.js'), {
     prefix: '/api/v1/delivery',

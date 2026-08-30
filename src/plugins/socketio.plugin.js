@@ -308,6 +308,12 @@ async function socketioPlugin(fastify) {
     io.to('admin:dashboard').emit('dashboard:payment_received', payment)
   })
 
+  // Helper: emit a new/updated refund request to the admin dashboard so an
+  // open Refund Requests page updates live without polling.
+  fastify.decorate('emitDashboardRefundRequest', (payload) => {
+    io.to('admin:dashboard').emit('dashboard:refund_request', payload)
+  })
+
   // Helper: emit an abandoned-cart status transition (RECOVERED/CONVERTED)
   // to the admin dashboard so an open Abandoned Carts list updates live
   // without polling. The live "elapsed since X" timer itself is pure
