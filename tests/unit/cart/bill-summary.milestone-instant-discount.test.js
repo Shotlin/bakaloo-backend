@@ -161,5 +161,30 @@ describe('BillSummaryService — cart milestone instant discount (reported gap: 
 
     expect(result.couponDiscount).toBe(0)
     expect(result.toPay.final).toBe(100 + 30)
+    // The reward amount is still surfaced on the unlocked tier itself — the
+    // customer needs to see what they'll actually earn, even though it
+    // never reduces what's payable now.
+    expect(result.cartMilestone.unlocked.cashbackAmount).toBe(20)
+  })
+
+  it('a multi-shop cart still surfaces the CASHBACK amount — unlike the discount slot, cashback is not single-shop-restricted', async () => {
+    const milestone = { id: 'm-1', name: 'Cashback tier', rewardType: 'CASHBACK', rewardValue: 20, minCartAmount: 49 }
+    const cartMilestonesService = {
+      getProgress: vi.fn().mockResolvedValue({ unlocked: { ...milestone, message: 'unlocked' }, next: null }),
+      getEligibleTiers: vi.fn().mockResolvedValue([milestone]),
+      computeReward: vi.fn().mockReturnValue({ cashbackAmount: 20, freeDelivery: false }),
+    }
+    const multiShopCart = cart({
+      subtotal: 100,
+      shopGroups: [
+        { shopId: 'shop-1', subtotal: 50, shopName: 'Shop A', items: [] },
+        { shopId: 'shop-2', subtotal: 50, shopName: 'Shop B', items: [] },
+      ],
+    })
+    const svc = buildService({ cartData: multiShopCart, cartMilestonesService })
+
+    const result = await svc.getBillSummary('user-1')
+
+    expect(result.cartMilestone.unlocked.cashbackAmount).toBe(20)
   })
 })

@@ -102,6 +102,32 @@ describe('BillSummaryService — first-time offer auto-applies in the cart previ
     })
   })
 
+  it('a WALLET_CASHBACK-type offer surfaces cashbackAmount without touching the discount slot', async () => {
+    const firstTimeOffersService = {
+      resolveForCheckout: vi.fn().mockResolvedValue({
+        id: 'offer-5',
+        name: 'Welcome cashback',
+        rewardType: 'WALLET_CASHBACK',
+        rewardValue: 25,
+        autoApply: true,
+      }),
+      computeReward: vi.fn().mockReturnValue({ cashbackAmount: 25, freeDelivery: false }),
+    }
+    const svc = buildService({ cartData: cart({ subtotal: 100 }), firstTimeOffersService })
+
+    const result = await svc.getBillSummary('user-1')
+
+    expect(result.firstTimeOffer).toMatchObject({
+      id: 'offer-5',
+      name: 'Welcome cashback',
+      rewardType: 'WALLET_CASHBACK',
+      discount: 0,
+      cashbackAmount: 25,
+    })
+    expect(result.couponDiscount).toBe(0)
+    expect(result.totalPayable).toBe(100)
+  })
+
   it('a FREE_DELIVERY-type offer waives the delivery fee via forceFreeDelivery', async () => {
     const firstTimeOffersService = {
       resolveForCheckout: vi.fn().mockResolvedValue({

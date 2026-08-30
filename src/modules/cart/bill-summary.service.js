@@ -114,6 +114,11 @@ export class BillSummaryService {
     // the offer against the real payment method regardless.
     let firstTimeOfferDiscount = 0
     let firstTimeOfferFreeDelivery = false
+    // WALLET_CASHBACK reward — computed here alongside discount/freeDelivery
+    // (same reward object, just a different field) so the bill summary can
+    // tell the customer what they'll actually earn once the offer's already
+    // applied, not just that it applied.
+    let firstTimeOfferCashback = 0
     let firstTimeOfferMeta = null
     let firstTimeOfferTeaser = null
     if (shopGroups.length === 1) {
@@ -125,9 +130,10 @@ export class BillSummaryService {
         )
         if (resolvedOffer?.autoApply) {
           const reward = this.firstTimeOffersService.computeReward(resolvedOffer, itemTotalDiscounted)
-          if (reward.discount || reward.freeDelivery) {
+          if (reward.discount || reward.freeDelivery || reward.cashbackAmount) {
             firstTimeOfferDiscount = this._round(reward.discount || 0)
             firstTimeOfferFreeDelivery = !!reward.freeDelivery
+            firstTimeOfferCashback = this._round(reward.cashbackAmount || 0)
             firstTimeOfferMeta = {
               id: resolvedOffer.id,
               name: resolvedOffer.name,
@@ -214,6 +220,19 @@ export class BillSummaryService {
         if (reward.discount && shopGroups.length === 1 && !firstTimeOfferDiscount) {
           cartMilestoneDiscount = this._round(reward.discount)
           cartMilestoneDiscountMeta = { id: progress.unlocked.id, name: progress.unlocked.name }
+        }
+        // CASHBACK reward — previously computed here and silently
+        // discarded, so an unlocked cashback milestone looked identical to
+        // any other unlocked milestone in the response: the customer had
+        // no way to see what they'd actually earn. Unlike the discount
+        // portion above, cashback isn't a single-shop-only slot — it's
+        // paid out to the wallet after delivery, independent of how the
+        // order gets split across shops — so no shopGroups.length gate here.
+        if (reward.cashbackAmount) {
+          cartMilestoneProgress = {
+            ...progress,
+            unlocked: { ...progress.unlocked, cashbackAmount: this._round(reward.cashbackAmount) },
+          }
         }
       }
     } catch (err) {
@@ -541,6 +560,7 @@ export class BillSummaryService {
             rewardType: firstTimeOfferMeta.rewardType,
             discount: firstTimeOfferDiscount,
             freeDelivery: firstTimeOfferFreeDelivery,
+            cashbackAmount: firstTimeOfferCashback,
           }
         : null,
       // Positive nudge shown instead of firstTimeOffer when nothing
