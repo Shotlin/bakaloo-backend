@@ -30,7 +30,9 @@ describe('QR pickup token revocation on order-terminal transitions', () => {
 
   it('AdminOrdersRepository.updateStatus revokes pickup tokens on CANCELLED', async () => {
     client.query.mockImplementation((sql) => {
-      if (sql.includes('SELECT status FROM orders')) return Promise.resolve({ rows: [{ status: 'PACKED' }] })
+      if (sql.includes('FROM orders') && sql.includes('FOR UPDATE')) {
+        return Promise.resolve({ rows: [{ status: 'PACKED', payment_method: 'COD', payment_status: 'PENDING' }] })
+      }
       return Promise.resolve({ rows: [] })
     })
     const repo = new AdminOrdersRepository()
@@ -44,7 +46,9 @@ describe('QR pickup token revocation on order-terminal transitions', () => {
 
   it('AdminOrdersRepository.updateStatus revokes pickup tokens on DELIVERED', async () => {
     client.query.mockImplementation((sql) => {
-      if (sql.includes('SELECT status FROM orders')) return Promise.resolve({ rows: [{ status: 'OUT_FOR_DELIVERY' }] })
+      if (sql.includes('FROM orders') && sql.includes('FOR UPDATE')) {
+        return Promise.resolve({ rows: [{ status: 'OUT_FOR_DELIVERY', payment_method: 'ONLINE', payment_status: 'PAID' }] })
+      }
       return Promise.resolve({ rows: [] })
     })
     const repo = new AdminOrdersRepository()
@@ -58,7 +62,9 @@ describe('QR pickup token revocation on order-terminal transitions', () => {
 
   it('AdminOrdersRepository.updateStatus does not touch pickup tokens for a non-terminal transition', async () => {
     client.query.mockImplementation((sql) => {
-      if (sql.includes('SELECT status FROM orders')) return Promise.resolve({ rows: [{ status: 'PENDING' }] })
+      if (sql.includes('FROM orders') && sql.includes('FOR UPDATE')) {
+        return Promise.resolve({ rows: [{ status: 'PENDING', payment_method: 'COD', payment_status: 'PENDING' }] })
+      }
       return Promise.resolve({ rows: [] })
     })
     const repo = new AdminOrdersRepository()

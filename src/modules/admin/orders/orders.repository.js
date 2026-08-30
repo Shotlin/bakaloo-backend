@@ -214,7 +214,7 @@ export class AdminOrdersRepository {
       await client.query('BEGIN')
 
       const { rows: [order] } = await client.query(
-        'SELECT status FROM orders WHERE id = $1 FOR UPDATE', [orderId]
+        'SELECT status, payment_method, payment_status FROM orders WHERE id = $1 FOR UPDATE', [orderId]
       )
       if (!order) throw { statusCode: 404, message: 'Order not found' }
 
@@ -227,9 +227,22 @@ export class AdminOrdersRepository {
       // shop_transactions forever, even though status correctly read
       // DELIVERED everywhere else in the dashboard.
       if (newStatus === 'DELIVERED') {
+        // COD cash is collected at the door the moment the rider's own app
+        // marks a delivery complete — that flow sets payment_status='PAID'
+        // as the single source of truth for "money actually changed
+        // hands" (see refundOrder/cancelOrder's identical assumption).
+        // This admin-manual path (support closing an order out-of-band
+        // from the rider app) never did the same, so a COD order marked
+        // DELIVERED here got stuck showing payment PENDING forever — which
+        // then also incorrectly blocked refundOrder/cancelOrder/refund
+        // requests with "this order was never paid".
+        const markCodPaid = order.payment_method === 'COD' && order.payment_status !== 'PAID'
         await client.query(
-          `UPDATE orders SET status = $1, delivered_at = COALESCE(delivered_at, NOW()), updated_at = NOW() WHERE id = $2`,
-          [newStatus, orderId]
+          `UPDATE orders SET status = $1, delivered_at = COALESCE(delivered_at, NOW()),
+                  payment_status = CASE WHEN $3 THEN 'PAID' ELSE payment_status END,
+                  updated_at = NOW()
+           WHERE id = $2`,
+          [newStatus, orderId, markCodPaid]
         )
       } else {
         await client.query(
