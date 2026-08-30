@@ -556,8 +556,8 @@ describe('CartMilestonesService — category/product scope (103_cart_milestone_s
   })
 })
 
-describe('CartMilestonesService.getProgress — scoped "next" message names the required category (reported bug: generic "Add ₹X more" read as broken when unrelated items didn\'t move the gap)', () => {
-  it('appends the resolved category names to the next-tier message for a scoped milestone', async () => {
+describe('CartMilestonesService.getProgress — scoped "next" message stays plain (product decision: no auto-generated scope breakdown in the message)', () => {
+  it('does not append resolved category names to the next-tier message for a scoped milestone', async () => {
     const repo = makeRepoMock({
       findAllActive: vi.fn().mockResolvedValue([
         tier({ id: 'm-veg', name: 'FREE DELIVERY', minCartAmount: 30, applicableCategoryIds: ['cat-veg'], messageBefore: null }),
@@ -569,7 +569,8 @@ describe('CartMilestonesService.getProgress — scoped "next" message names the 
 
     const progress = await service.getProgress(USER_ID, 110, cartItems)
 
-    expect(progress.next.message).toBe('Add ₹30 more to unlock FREE DELIVERY — only Fresh Vegetables count toward this')
+    expect(progress.next.message).toBe('Add ₹30 more to unlock FREE DELIVERY')
+    expect(repo.getCategoryNames).not.toHaveBeenCalled()
   })
 
   it('the shown amount never moves for out-of-scope items — matches the reported "adding ₹20/30/40 does nothing" behavior (by design)', async () => {

@@ -180,35 +180,22 @@ export class CartMilestonesService {
   }
 
   /**
-   * The "next milestone" teaser message — same {amount}/{name} template
-   * substitution as _renderMessage, but for a scoped milestone (103_cart_
-   * milestone_scope.sql) it also names the actual category/bundle/products
-   * that count, mirroring FirstTimeOffersService#describeUpcoming.
+   * The "next milestone" teaser message — {amount}/{name} template
+   * substitution via _renderMessage.
    *
-   * Reported bug: the plain "Add ₹30 more to unlock FREE DELIVERY" text
-   * (admin's default template, unaware of scope) reads as a promise that
-   * ANY ₹30 unlocks it — a customer who then added ₹30 of a category
-   * outside the milestone's scope (e.g. dairy, when the milestone is
-   * scoped to vegetables) saw the amount never move and understandably
-   * read that as the feature being broken, when the underlying gating was
-   * actually correct. Naming the required category here — entirely
-   * backend-rendered text the app already displays verbatim — fixes the
-   * confusing copy without needing a mobile app release.
+   * Used to also append "— only X, Y count toward this" for a scoped
+   * milestone (103_cart_milestone_scope.sql), naming the actual matching
+   * category/bundle/products — deliberately dropped per product decision:
+   * the admin wants the smart bar to show just the milestone's own message/
+   * name, not an auto-generated scope breakdown alongside it. That
+   * clarification was originally added because the plain "Add ₹30 more to
+   * unlock FREE DELIVERY" text read as a broken promise when unrelated
+   * items didn't move the gap — if that confusion resurfaces, the fix is a
+   * clearer admin-authored messageBefore for that milestone, not this
+   * backend-generated suffix.
    */
   async _renderNextMessage(milestone) {
-    const base = this._renderMessage(milestone, milestone.scopedSubtotal)
-    if (!milestone.hasScope) return base
-
-    const [categoryNames, productNames] = await Promise.all([
-      this.repo.getCategoryNames(milestone.applicableCategoryIds || []),
-      this.repo.getProductNames(milestone.applicableProductIds || []),
-    ])
-    const names = [...categoryNames, ...productNames]
-    if (names.length === 0) return base
-
-    const shown = names.slice(0, 3).join(', ')
-    const label = names.length > 3 ? `${shown} & more` : shown
-    return `${base} — only ${label} count toward this`
+    return this._renderMessage(milestone, milestone.scopedSubtotal)
   }
 
   /**
