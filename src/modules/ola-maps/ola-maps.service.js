@@ -72,8 +72,7 @@ export class OlaMapsService {
     }
 
     const style = await this._fetchJson(
-      `${BASE_URL}/tiles/vector/v1/styles/${styleName}/style.json`,
-      apiKey
+      this._withApiKey(`${BASE_URL}/tiles/vector/v1/styles/${styleName}/style.json`, apiKey)
     )
     if (!style) {
       return null
@@ -92,7 +91,7 @@ export class OlaMapsService {
         continue
       }
 
-      const tileJson = await this._fetchJson(this._withApiKey(source.url, apiKey), apiKey)
+      const tileJson = await this._fetchJson(this._withApiKey(source.url, apiKey))
       if (!tileJson || !Array.isArray(tileJson.tiles)) {
         logger.warn({ name, url: source.url }, 'Ola Maps source TileJSON unavailable, dropping source')
         delete sources[name]
