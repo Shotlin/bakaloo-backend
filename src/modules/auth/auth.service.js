@@ -140,7 +140,23 @@ export class AuthService {
     const sessionId = otpValid ? null : await redis.get(`${SMS_SESSION_PREFIX}${phone}`)
 
     if (sessionId) {
-      const smsResult = await verifySmsOtp(sessionId, otp)
+      let smsResult = await verifySmsOtp(sessionId, otp)
+
+      if (!smsResult.success) {
+        // 2Factor.in's VERIFY endpoint can reject a genuinely-correct OTP
+        // when it's checked within roughly a second of the SMS session
+        // being created (AUTOGEN) — their side hasn't always finished
+        // propagating the session as verify-ready yet. Users who paste the
+        // code the instant the SMS lands hit this: the first verify fails,
+        // the exact same code succeeds moments later. We don't delete the
+        // Redis session key below on failure specifically so a retry with
+        // the same OTP still works — do that retry here automatically
+        // instead of forcing the user to notice the failure and resubmit.
+        // A genuinely wrong OTP just fails the same way, ~700ms later.
+        await new Promise((resolve) => setTimeout(resolve, 700))
+        smsResult = await verifySmsOtp(sessionId, otp)
+      }
+
       if (smsResult.success) {
         otpValid = true
         await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
