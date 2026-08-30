@@ -68,30 +68,41 @@ export class DeliveryCalendarService {
     const materializedDays = await this.repo.getDaysInRange(fromDateStr, toDateStr)
     const byDate = new Map(materializedDays.map((d) => [this._dateKey(d.calendar_date), d]))
 
-    // Closed-store override: a manually-closed store blocks TODAY's ASAP
-    // ordering (enforced in orders.service.js), but scheduled delivery for
-    // FUTURE days should still be bookable — so this only ever suppresses
-    // today's slots, not the whole calendar.
-    const { isOpen } = await this.storeStatusService.isOpen(atUtc)
-
     const days = []
     for (let dayOffset = 0; dayOffset < numDays; dayOffset++) {
       const dayStartUtcMs = istMidnightUtcMs(nowMs, dayOffset)
       const dateStr = toDateString(dayStartUtcMs)
       const dayLabel = dayLabelFor(dayOffset, dayStartUtcMs)
       const materialized = byDate.get(dateStr)
-
       const dayClosed = materialized ? !materialized.is_available : false
-      const slots = (materialized?.slots || []).map((slot) => {
+      const rawSlots = materialized?.slots || []
+
+      // Today needs to know whether the store will be open AT EACH SLOT'S
+      // OWN START TIME, not just right now — "now" might be before opening,
+      // after closing, or mid-way through the day, but a slot later today
+      // (once the store opens) should still be bookable. A manual
+      // force-close override isn't time-bound, so it naturally comes back
+      // closed for every slot the same way regardless of which start time
+      // it's evaluated at — see StoreStatusService#isOpenAtEach. Every
+      // other day already gets its own open/closed state purely from the
+      // delivery calendar's own admin-managed template (dayClosed above),
+      // independent of store_status entirely.
+      const openStatuses = dayOffset === 0 && rawSlots.length > 0
+        ? await this.storeStatusService.isOpenAtEach(
+            rawSlots.map((slot) => new Date(dayStartUtcMs + this._timeToMs(slot.start_time)))
+          )
+        : null
+
+      const slots = rawSlots.map((slot, i) => {
         const slotStartUtcMs = dayStartUtcMs + this._timeToMs(slot.start_time)
         const slotEndUtcMs = dayStartUtcMs + this._timeToMs(slot.end_time)
         const pastCutoff = slotStartUtcMs <= nowMs + MIN_NOTICE_MS
-        const storeClosedToday = dayOffset === 0 && !isOpen
-        const available = slot.is_active && !dayClosed && !pastCutoff && !storeClosedToday
+        const storeClosedAtSlot = openStatuses ? !openStatuses[i].isOpen : false
+        const available = slot.is_active && !dayClosed && !pastCutoff && !storeClosedAtSlot
 
         let reason = null
         if (!slot.is_active || dayClosed) reason = materialized?.note || 'Not available on this date'
-        else if (storeClosedToday) reason = 'Store is currently closed'
+        else if (storeClosedAtSlot) reason = 'Store is closed at this time'
         else if (pastCutoff) reason = 'This time slot has passed'
 
         return {

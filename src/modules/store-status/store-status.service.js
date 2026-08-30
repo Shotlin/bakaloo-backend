@@ -36,23 +36,40 @@ export class StoreStatusService {
    * @returns {Promise<{isOpen: boolean, source: string, reason: string|null}>}
    */
   async isOpen(atUtc = new Date()) {
+    const [result] = await this.isOpenAtEach([atUtc])
+    return result
+  }
+
+  /**
+   * Evaluate open/closed status against several instants at once, using a
+   * single DB read — for callers that need to know whether the store will
+   * be open at each of several future moments (e.g. the delivery calendar
+   * checking each of today's remaining slot start times), not just "right
+   * now". A manual override isn't time-bound, so every instant naturally
+   * evaluates the same way in that case; only the WEEKLY_SCHEDULE path
+   * actually varies per instant.
+   * @param {Date[]} instants
+   * @returns {Promise<Array<{isOpen: boolean, source: string, reason: string|null}>>}
+   */
+  async isOpenAtEach(instants) {
     const row = await this.repo.getStatus()
     if (!row) {
       // Table should always have exactly one seeded row (migration 071) —
       // this branch is defensive only. Fail-open per the confirmed default.
       logger.warn('store_status row missing — failing open')
-      return { isOpen: true, source: 'DEFAULT', reason: null }
+      return instants.map(() => ({ isOpen: true, source: 'DEFAULT', reason: null }))
     }
 
     if (row.manual_override_status) {
-      return {
+      const result = {
         isOpen: row.manual_override_status === 'OPEN',
         source: 'MANUAL_OVERRIDE',
         reason: row.manual_override_note || null,
       }
+      return instants.map(() => result)
     }
 
-    return this._evaluateWeeklySchedule(row.weekly_hours, atUtc)
+    return instants.map((atUtc) => this._evaluateWeeklySchedule(row.weekly_hours, atUtc))
   }
 
   /**

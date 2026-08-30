@@ -40,7 +40,11 @@ function makeRepo(overrides = {}) {
 }
 
 function makeStoreStatus(isOpen = true) {
-  return { isOpen: vi.fn().mockResolvedValue({ isOpen, source: 'DEFAULT', reason: null }) }
+  const status = { isOpen, source: 'DEFAULT', reason: null }
+  return {
+    isOpen: vi.fn().mockResolvedValue(status),
+    isOpenAtEach: vi.fn().mockImplementation((instants) => Promise.resolve(instants.map(() => status))),
+  }
 }
 
 // A fixed "now" so date-math is deterministic: 2026-07-06 10:00 IST (Monday).
@@ -166,8 +170,47 @@ describe('DeliveryCalendarService.getAvailableDays — closed-store + unavailabl
 
     const result = await svc.getAvailableDays(2, NOW)
 
-    expect(result.days[0].slots[0]).toMatchObject({ available: false, reason: 'Store is currently closed' })
+    expect(result.days[0].slots[0]).toMatchObject({ available: false, reason: 'Store is closed at this time' })
     expect(result.days[1].slots[0]).toMatchObject({ available: true, reason: null })
+  })
+
+  it('evaluates each of today\'s slots at its OWN start time, not just "right now" — a slot later today stays bookable before the store has opened yet', async () => {
+    const repo = makeRepo({
+      getDaysInRange: vi.fn().mockResolvedValue([
+        {
+          id: 'day-today',
+          calendar_date: '2026-07-06',
+          is_available: true,
+          slots: [
+            { start_time: '09:30:00', end_time: '11:00:00', label: 'morning', is_active: true }, // before the store opens right now (10:00 IST)
+            { start_time: '14:00:00', end_time: '16:00:00', label: 'afternoon', is_active: true }, // after it opens
+          ],
+        },
+      ]),
+    })
+    // Simulates the store opening at 11:00 IST — closed at NOW (10:00 IST,
+    // so the 09:30 slot is still before opening even at its own start
+    // time), but open by the time the 14:00 slot itself arrives.
+    const storeStatus = {
+      isOpen: vi.fn(),
+      isOpenAtEach: vi.fn().mockImplementation((instants) =>
+        Promise.resolve(
+          instants.map((atUtc) => {
+            const istHour = new Date(atUtc.getTime() + 5.5 * 60 * 60 * 1000).getUTCHours()
+            const open = istHour >= 11
+            return { isOpen: open, source: 'WEEKLY_SCHEDULE', reason: open ? null : 'Outside hours' }
+          })
+        )
+      ),
+    }
+    const svc = new DeliveryCalendarService(repo, storeStatus)
+
+    const result = await svc.getAvailableDays(1, NOW)
+
+    expect(storeStatus.isOpen).not.toHaveBeenCalled()
+    const [morning, afternoon] = result.days[0].slots
+    expect(morning).toMatchObject({ available: false, reason: 'Store is closed at this time' })
+    expect(afternoon).toMatchObject({ available: true, reason: null })
   })
 
   it('marks every slot on a date the admin overrode as unavailable, with the override note as the reason', async () => {
