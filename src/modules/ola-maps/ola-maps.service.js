@@ -130,6 +130,91 @@ export class OlaMapsService {
     }, apiKey)
   }
 
+  /**
+   * Driving route between two points — replaces the OpenRouteService/OSRM
+   * lookup the mobile app used to do itself. Ola's response shape mirrors
+   * Google's Directions API: total distance/duration live on `legs[0]`
+   * (single leg, no intermediate waypoints here), and the route geometry
+   * comes back as a Google-encoded polyline string (`overview_polyline`,
+   * precision 5) rather than GeoJSON — verified by hand: decoding it at
+   * precision 5 reproduces the requested origin/destination almost
+   * exactly. Returns null (never throws) on any failure, matching the
+   * other methods here — callers should fall back to a straight line.
+   */
+  async directions(originLat, originLng, destLat, destLng) {
+    const apiKey = await this._getApiKey()
+    if (!apiKey) {
+      return null
+    }
+
+    const url = new URL(`${BASE_URL}/routing/v1/directions/basic`)
+    url.searchParams.set('origin', `${originLat},${originLng}`)
+    url.searchParams.set('destination', `${destLat},${destLng}`)
+    url.searchParams.set('api_key', apiKey)
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      })
+      const body = await res.json().catch(() => null)
+
+      if (!res.ok || body?.status !== 'SUCCESS') {
+        logger.warn({ status: res.status, body: body?.status }, 'Ola Maps directions request failed')
+        return null
+      }
+
+      const route = body?.routes?.[0]
+      const leg = route?.legs?.[0]
+      if (!route?.overview_polyline || !leg) {
+        return null
+      }
+
+      return {
+        points: this._decodePolyline(route.overview_polyline),
+        distanceMeters: Math.round(leg.distance),
+        durationSeconds: Math.round(leg.duration),
+      }
+    } catch (err) {
+      logger.warn({ err: err.message }, 'Ola Maps directions request errored')
+      return null
+    }
+  }
+
+  /** @private Google/Ola encoded-polyline decoder (precision 5). */
+  _decodePolyline(encoded) {
+    const factor = 1e5
+    let index = 0
+    let lat = 0
+    let lng = 0
+    const points = []
+
+    while (index < encoded.length) {
+      let shift = 0
+      let result = 0
+      let byte
+      do {
+        byte = encoded.charCodeAt(index++) - 63
+        result |= (byte & 0x1f) << shift
+        shift += 5
+      } while (byte >= 0x20)
+      lat += result & 1 ? ~(result >> 1) : result >> 1
+
+      shift = 0
+      result = 0
+      do {
+        byte = encoded.charCodeAt(index++) - 63
+        result |= (byte & 0x1f) << shift
+        shift += 5
+      } while (byte >= 0x20)
+      lng += result & 1 ? ~(result >> 1) : result >> 1
+
+      points.push({ lat: lat / factor, lng: lng / factor })
+    }
+
+    return points
+  }
+
   async _getApiKey() {
     const row = await this.settingsRepository.get()
     return row?.is_enabled && row?.api_key ? row.api_key : null

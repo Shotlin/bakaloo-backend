@@ -45,3 +45,19 @@ export const reverseGeocodeSchema = {
     },
   },
 }
+
+export const directionsSchema = {
+  tags: ['Maps'],
+  summary: 'Driving route + distance/duration via Ola Maps (Beta/test module)',
+  security: [{ bearerAuth: [] }],
+  querystring: {
+    type: 'object',
+    required: ['originLat', 'originLng', 'destLat', 'destLng'],
+    properties: {
+      originLat: { type: 'number', minimum: -90, maximum: 90 },
+      originLng: { type: 'number', minimum: -180, maximum: 180 },
+      destLat: { type: 'number', minimum: -90, maximum: 90 },
+      destLng: { type: 'number', minimum: -180, maximum: 180 },
+    },
+  },
+}

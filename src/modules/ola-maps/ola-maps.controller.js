@@ -44,4 +44,14 @@ export class OlaMapsController {
     const result = configured ? await this.service.reverseGeocode(lat, lng) : null
     return reply.code(200).send(success({ configured, result }))
   }
+
+  /** GET /directions */
+  async directions(request, reply) {
+    const { originLat, originLng, destLat, destLng } = request.query
+    const configured = await this.service.isConfigured()
+    const result = configured
+      ? await this.service.directions(originLat, originLng, destLat, destLng)
+      : null
+    return reply.code(200).send(success({ configured, result }))
+  }
 }

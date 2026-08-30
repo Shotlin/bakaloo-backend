@@ -5,6 +5,7 @@ import {
   styleJsonSchema,
   geocodeSchema,
   reverseGeocodeSchema,
+  directionsSchema,
 } from './ola-maps.schema.js'
 
 /**
@@ -44,4 +45,10 @@ export default async function olaMapsRoutes(fastify) {
     schema: reverseGeocodeSchema,
     preHandler: [fastify.authenticate],
   }, controller.reverseGeocode.bind(controller))
+
+  // GET /directions — driving route + distance/duration [AUTH]
+  fastify.get('/directions', {
+    schema: directionsSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.directions.bind(controller))
 }
