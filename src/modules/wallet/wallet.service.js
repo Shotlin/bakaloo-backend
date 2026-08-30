@@ -524,6 +524,15 @@ export class WalletService {
         logger.warn({ err: couponErr.message, orderId }, 'Coupon usage recording after wallet pay failed (non-critical)')
       }
 
+      // Same deferred-confirmation reasoning for a matched payment offer's
+      // per-user usage cap — see PaymentOffersService.recordUsageForOrder().
+      try {
+        const { PaymentOffersService } = await import('../payment-offers/payment-offers.service.js')
+        await new PaymentOffersService().recordUsageForOrder(orderId)
+      } catch (offerErr) {
+        logger.warn({ err: offerErr.message, orderId }, 'Payment offer usage recording after wallet pay failed (non-critical)')
+      }
+
       // Send "Order placed" notification only after confirmed payment
       try {
         const { NotificationsRepository } = await import('../notifications/notifications.repository.js')

@@ -118,7 +118,20 @@ export class FirstTimeOffersService {
    * Translate an offer + cart total into a concrete reward effect.
    * Mirrors the coupon discount calculation (Math.min cap, maxDiscount cap,
    * scopedSubtotal in place of the raw cart total when the offer has a
-   * category/product scope) for consistency between the two systems.
+   * category/product scope) for consistency between the two systems —
+   * including coupons.service.js's `parseFloat(x.toFixed(2))` rounding on
+   * every computed discount, which this previously omitted. A PERCENTAGE_
+   * DISCOUNT reward on a non-round scopedSubtotal (e.g. 10% of ₹333.33 =
+   * 33.33000000000001, or a value like 49.9995 that only rounds cleanly to
+   * ₹50 once explicitly rounded) was handed to callers un-rounded: bill-
+   * summary.service.js's own `_round()` masked it in the cart-preview
+   * total, but orders.service.js adds this raw value straight into
+   * appliedCouponDiscount with no rounding step of its own — so the actual
+   * charged total could drift from the previewed total by a paisa,
+   * reported as "calculation not working" / inconsistent totals. Rounding
+   * here, at the source, keeps every caller in sync. cart-milestones.
+   * service.js#computeReward already rounds its own discount/cashbackAmount
+   * for the same reason.
    */
   computeReward(offer, cartTotal) {
     const amount = offer.scopedSubtotal ?? cartTotal
@@ -132,11 +145,11 @@ export class FirstTimeOffersService {
       case 'FREE_DELIVERY':
         return { freeDelivery }
       case 'FLAT_DISCOUNT':
-        return { discount: Math.min(offer.rewardValue || 0, amount), freeDelivery }
+        return { discount: parseFloat(Math.min(offer.rewardValue || 0, amount).toFixed(2)), freeDelivery }
       case 'PERCENTAGE_DISCOUNT': {
         let discount = (amount * (offer.rewardValue || 0)) / 100
         if (offer.maxDiscount) discount = Math.min(discount, offer.maxDiscount)
-        return { discount: Math.min(discount, amount), freeDelivery }
+        return { discount: parseFloat(Math.min(discount, amount).toFixed(2)), freeDelivery }
       }
       case 'WALLET_CASHBACK':
         return { cashbackAmount: offer.rewardValue || 0, freeDelivery }

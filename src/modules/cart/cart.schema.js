@@ -204,6 +204,14 @@ export const getCartSummarySchema = {
     type: 'object',
     properties: {
       quickDeliverySelected: { type: 'boolean', default: false },
+      // Which saved address to price delivery against — omitted, this
+      // falls back to the customer's default address (see
+      // BillSummaryService#_resolveAddress). Must be sent whenever the
+      // customer has a non-default address selected for this order, or the
+      // previewed delivery fee/free-delivery threshold is computed against
+      // the wrong address while checkout (which always sends the real
+      // selected addressId) charges against the right one.
+      addressId: { type: 'string', format: 'uuid' },
     },
   },
   response: {

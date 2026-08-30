@@ -74,6 +74,22 @@ export class BillSummaryService {
     const shopGroups = cart.shopGroups || []
     const shopIds = shopGroups.map((g) => g.shopId)
 
+    // BUG FIX: tip and Quick Delivery are both assigned to exactly one shop
+    // at actual order placement — `feeContext.tipShopId`/`quickDeliveryShopId`
+    // in orders.service.js#placeOrder are only ever set when
+    // `groupedByShop.size === 1`, and OrderSplitterService#computeShopFees
+    // charges tip/the surcharge to NO shop at all otherwise (its `=== shopId`
+    // match is against `null`, which never matches). So a multi-shop cart's
+    // tip (or Quick Delivery surcharge) was previously included in this
+    // preview's totalPayable/toPay.final unconditionally, promising a total
+    // that checkout would silently under-charge (tip/surcharge dropped) —
+    // the "shown one total, charged another" divergence. Chargeable* mirrors
+    // that same single-shop-only restriction so the preview only ever
+    // promises what checkout will actually collect.
+    const isSingleShopCart = shopGroups.length === 1
+    const chargeableTipAmount = isSingleShopCart ? tipAmount : 0
+    const chargeableQuickDeliverySelected = isSingleShopCart && quickDeliverySelected
+
     // Delivery coordinates, shop lat/lng, and the aggregate fee config are
     // all independent lookups (none depends on another's result) — run them
     // together. For a single-shop cart (the common case) this resolved
@@ -180,7 +196,21 @@ export class BillSummaryService {
       eligibleMilestoneTiers = eligibleTiers
       if (progress.unlocked) {
         const reward = this.cartMilestonesService.computeReward(progress.unlocked, itemTotalDiscounted)
-        cartMilestoneFreeDelivery = !!reward.freeDelivery
+        // BUG FIX: mirror OrdersService.placeOrder()'s explicit, documented
+        // restriction on the FREE_DELIVERY portion of a cart-milestone
+        // reward — order-splitter.service.js's waiver mechanism targets
+        // exactly one shop (`feeContext.freeDeliveryShopId`), so a
+        // milestone's free delivery can only ever be honored on a
+        // single-shop cart at checkout (see orders.service.js's
+        // `freeDeliveryApplied = isSingleShop && reward.freeDelivery`).
+        // Previously this was unconditional here, so a multi-shop cart's
+        // live preview showed "Free delivery unlocked" / ₹0 delivery fee
+        // for every shop once a milestone was crossed, while checkout then
+        // silently charged the FULL delivery fee on every shop's split
+        // order — the exact "shown one total, charged another" divergence
+        // reported by customers. The DISCOUNT portion already had this
+        // same single-shop gate (below); free delivery was the gap.
+        cartMilestoneFreeDelivery = shopGroups.length === 1 && !!reward.freeDelivery
         if (reward.discount && shopGroups.length === 1 && !firstTimeOfferDiscount) {
           cartMilestoneDiscount = this._round(reward.discount)
           cartMilestoneDiscountMeta = { id: progress.unlocked.id, name: progress.unlocked.name }
@@ -209,6 +239,10 @@ export class BillSummaryService {
     let primaryDistanceKm = null
     let primaryStoreName = null
     let amountToUnlock = 0
+    // Per-shop GST sum — see the multi-shop GST note below for why this is
+    // only used (instead of the single blanket gst_rate) when the cart
+    // spans more than one shop.
+    let gstFromShops = 0
 
     // Single-shop carts already resolved this exact shop's config above
     // (`resolvedShopConfig`) — reuse it instead of querying the identical
@@ -248,6 +282,12 @@ export class BillSummaryService {
       packagingFee = this._round(packagingFee + breakdown.packagingFee)
       if (breakdown.deliveryFeeWaived) anyDeliveryWaived = true
       amountToUnlock = this._round(amountToUnlock + breakdown.freeDelivery.amountToUnlock)
+      // This per-shop breakdown never carries a discount (autoAppliedDiscount
+      // only ever applies on single-shop carts — see the discount-slot gates
+      // above), so `breakdown.tax` here is already exactly what
+      // order-splitter.service.js would charge for this shop's own GST
+      // (computed from THIS shop's own resolved config, not a blanket rate).
+      gstFromShops = this._round(gstFromShops + breakdown.tax)
 
       // Use the primary (first / single) shop for the headline distance label.
       if (primaryDistanceKm === null && breakdown.distance.known) {
@@ -268,9 +308,9 @@ export class BillSummaryService {
       itemDiscount: mrpDiscount,
       couponDiscount: autoAppliedDiscount,
       distanceKm: primaryDistanceKm,
-      tipAmount,
+      tipAmount: chargeableTipAmount,
       storeName: primaryStoreName,
-      quickDeliverySelected,
+      quickDeliverySelected: chargeableQuickDeliverySelected,
       forceFreeDelivery,
     })
 
@@ -303,23 +343,60 @@ export class BillSummaryService {
     // other fee with the properly-summed multi-shop total — using the
     // stale single-shop tax figure would under/over-charge on any
     // multi-shop cart.
-    const preTaxTotal = this._round(
-      Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal)
-    )
-    const gstAmount = config.gst_enabled
-      ? this._round((preTaxTotal * this._toNumber(config.gst_rate)) / 100)
-      : 0
+    //
+    // BUG FIX: a multi-shop cart used a single blanket `config.gst_rate`
+    // (the GLOBAL config, since `config` resolves to shopId=null when there
+    // is more than one shop) applied to the WHOLE combined pre-tax total.
+    // fee_settings supports a per-shop STORE override of gst_enabled/
+    // gst_rate, and order-splitter.service.js's actual charge computes GST
+    // per shop through TotalsEngine using THAT shop's own resolved config
+    // (see OrderSplitterService#computeShopFees) — so a shop with a
+    // different GST override than GLOBAL (or than a sibling shop) made this
+    // preview's tax diverge from what checkout actually charges. The
+    // per-shop loop above already computed each shop's own correct GST
+    // (`gstFromShops`) via each shop's own resolved config; a cross-shop
+    // discount never applies on a multi-shop cart (auto-applied discounts
+    // are single-shop-only — see the discount-slot gates above), so that
+    // per-shop sum needs no further discount adjustment and is exactly what
+    // gets charged. Single-shop carts are unaffected — `config` there IS
+    // that one shop's own resolved config, so the blanket formula (which
+    // also correctly folds in the real discount) already matches.
+    let gstAmount
+    if (shopGroups.length === 1) {
+      const preTaxTotal = this._round(
+        Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal)
+      )
+      gstAmount = config.gst_enabled
+        ? this._round((preTaxTotal * this._toNumber(config.gst_rate)) / 100)
+        : 0
+    } else {
+      gstAmount = gstFromShops
+    }
     aggregate.tax = gstAmount
 
     const toPayFinal = this._round(
-      Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal + gstAmount + tipAmount)
+      Math.max(0, itemTotalDiscounted - autoAppliedDiscount + feesTotal + gstAmount + chargeableTipAmount)
     )
     const toPayOriginal = this._round(
-      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + gstAmount + tipAmount
+      itemTotalOriginal + deliveryFeeOriginal + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee + quickDeliverySurcharge + gstAmount + chargeableTipAmount
     )
     aggregate.totalPayable = toPayFinal
     aggregate.itemsSubtotal = itemTotalDiscounted
     aggregate.itemDiscount = mrpDiscount
+
+    // BUG FIX: recompute totalSavings from the properly-summed multi-shop
+    // delivery figures instead of trusting the value TotalsEngine returned
+    // inside the single `computeBreakdown` call above. That call only ever
+    // saw ONE shop's distance (`primaryDistanceKm`) and, for a multi-shop
+    // cart, the GLOBAL config rather than each shop's own resolved config —
+    // so its internal delivery-waiver "original fee" was neither the right
+    // per-shop amount nor the right sum. `aggregate.deliveryFeeOriginal`/
+    // `deliveryFeeWaived` were already corrected above (from the per-shop
+    // loop's real sums); `totalSavings` needs the same correction or a
+    // multi-shop order's "You saved ₹X" figure silently understates or
+    // overstates the real delivery discount whenever delivery is waived.
+    const deliverySaving = aggregate.deliveryFeeWaived ? deliveryFeeOriginal : 0
+    aggregate.totalSavings = this._round(mrpDiscount + autoAppliedDiscount + deliverySaving)
 
     // Rebuild the canonical fees[] array from aggregated values.
     aggregate.fees = this._buildFeesArray({
@@ -340,7 +417,7 @@ export class BillSummaryService {
     })
 
     const { normalEtaMinutes, quickEtaMinutes, deliveryEstimateMinutes } =
-      this._resolveDeliveryEstimateMinutes(config, quickDeliverySelected)
+      this._resolveDeliveryEstimateMinutes(config, chargeableQuickDeliverySelected)
     const freeThreshold = aggregate.freeDelivery.threshold
 
     // Cart milestone progress (Phase 3) — powers the mobile Smart Bottom
@@ -403,7 +480,11 @@ export class BillSummaryService {
       // and is NOT reflected here; the Flutter app overlays that discount
       // on top of / in place of this one (a manual coupon takes priority).
       couponDiscount: autoAppliedDiscount,
-      tipAmount,
+      // Reflects what will actually be CHARGED (0 for a multi-shop cart —
+      // see chargeableTipAmount above), not necessarily the raw tip value
+      // still sitting in Redis from a single-shop session — so this field
+      // always agrees with toPay.final/totals.tipAmount.
+      tipAmount: chargeableTipAmount,
       toPay: {
         original: toPayOriginal,
         final: toPayFinal,

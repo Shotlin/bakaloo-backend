@@ -45,10 +45,27 @@ export class CouponsController {
     const fulfillableItems = cart.items.filter(
       (i) => i.isAvailable && i.stockQuantity >= i.quantity
     )
+    // cartTotal comes from the cart we just fetched — never from
+    // request.body.cartTotal — so this preview uses exactly the same
+    // number orders.service.js#placeOrder will compute at actual order
+    // placement (it derives its own subtotal from the server-side cart the
+    // same way, never from client input).
+    //
+    // Reported bug: a coupon could show as valid (or invalid) here yet
+    // flip the other way — or apply a different discount amount — when the
+    // order was actually placed a moment later, because this endpoint used
+    // to trust the client-supplied cartTotal verbatim instead of the
+    // authoritative total it had just computed one line above. Any drift
+    // between the app's locally-cached total and the server's real one
+    // (a sale price that changed, an item that just went out of stock, a
+    // stale cart screen, a rounding difference) silently produced a
+    // different min-order-amount outcome or discount amount than what the
+    // customer actually got charged — "sometimes right, sometimes wrong"
+    // for the exact same cart and coupon code.
     const result = await this.service.validate(
       request.user.id,
       request.body.code,
-      request.body.cartTotal,
+      cart.subtotal,
       fulfillableItems
     )
     if (!result.valid) {

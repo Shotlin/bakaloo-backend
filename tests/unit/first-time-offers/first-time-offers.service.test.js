@@ -292,6 +292,27 @@ describe('FirstTimeOffersService.computeReward — each reward type (positive)',
     expect(reward.discount).toBe(30)
   })
 
+  it(
+    'PERCENTAGE_DISCOUNT rounds off JS floating-point drift instead of handing callers a raw ' +
+      'un-rounded value (10% of ₹29.99 computes as 2.9989999999999997 before rounding) — mirrors ' +
+      "coupons.service.js's parseFloat(x.toFixed(2)) convention so the amount actually charged at " +
+      'checkout (orders.service.js, which does not round again) matches what bill-summary.service.js ' +
+      "previews (which does), instead of drifting by a paisa. Reported as inconsistent/'wrong' totals.",
+    () => {
+      const reward = service.computeReward(
+        { rewardType: 'PERCENTAGE_DISCOUNT', rewardValue: 10 },
+        29.99
+      )
+      expect(reward.discount).toBe(3)
+      expect(Number.isInteger(reward.discount * 100)).toBe(true)
+    }
+  )
+
+  it('FLAT_DISCOUNT also returns a 2-decimal-rounded amount (defensive — inputs are already clean, but the output contract must match PERCENTAGE_DISCOUNT)', () => {
+    const reward = service.computeReward({ rewardType: 'FLAT_DISCOUNT', rewardValue: 12.5 }, 100)
+    expect(reward.discount).toBe(12.5)
+  })
+
   it('WALLET_CASHBACK returns the flat reward value as cashbackAmount', () => {
     const reward = service.computeReward({ rewardType: 'WALLET_CASHBACK', rewardValue: 100 }, 999)
     expect(reward).toEqual({ cashbackAmount: 100, freeDelivery: false })

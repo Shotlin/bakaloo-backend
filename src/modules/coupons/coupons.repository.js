@@ -186,7 +186,19 @@ export class CouponsRepository {
   }
 
   /**
-   * Get all active/valid coupons
+   * Get all active/valid coupons.
+   *
+   * Filters out a coupon that has already hit its usage cap — both the
+   * legacy `usage_limit` column and the multi-vendor `usage_limit_total`
+   * column (migration 044) — the same two gates
+   * validateCouponEligibility() enforces at apply time. Previously only
+   * `usage_limit` was checked here, so a coupon configured with
+   * `usage_limit_total` (the field the multi-vendor admin flow actually
+   * writes) kept showing up as "available" indefinitely after it was fully
+   * redeemed: the list said it was still usable, but every attempt to
+   * actually apply it came back COUPON_LIMIT_REACHED — the exact
+   * "sometimes right, sometimes wrong" mismatch between the coupon list and
+   * the apply step.
    */
   async findAvailable() {
     const { rows } = await query(
@@ -196,6 +208,7 @@ export class CouponsRepository {
          AND (valid_from IS NULL OR valid_from <= NOW())
          AND (valid_until IS NULL OR valid_until >= NOW())
          AND (usage_limit IS NULL OR used_count < usage_limit)
+         AND (usage_limit_total IS NULL OR used_count < usage_limit_total)
        ORDER BY created_at DESC`
     )
     return rows.map(this._format)

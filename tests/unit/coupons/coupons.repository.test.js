@@ -110,3 +110,31 @@ describe('CouponsRepository.resolveMatchingProductIds', () => {
     expect(params).toEqual([['p1', 'p2'], ['p2'], null])
   })
 })
+
+/**
+ * Regression coverage for findAvailable() — the "available coupons" list
+ * powering GET /coupons/available (and Flutter's availableCouponsProvider).
+ *
+ * Reported bug: a coupon configured with `usage_limit_total` (the
+ * multi-vendor field — migration 044) that had already hit its cap kept
+ * showing up in this list indefinitely, because the SQL only ever filtered
+ * on the legacy `usage_limit` column. validateCouponEligibility() (the
+ * apply-time check) DOES enforce usage_limit_total, so the customer would
+ * see the coupon listed as available, tap it, and get
+ * COUPON_LIMIT_REACHED — the list and the apply step disagreeing about the
+ * exact same coupon.
+ */
+describe('CouponsRepository.findAvailable — respects both usage-cap columns', () => {
+  it('filters on usage_limit_total in addition to the legacy usage_limit column', async () => {
+    queryMock.mockClear()
+    queryMock.mockResolvedValueOnce({ rows: [] })
+    const repo = new CouponsRepository()
+
+    await repo.findAvailable()
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/usage_limit_total\s+IS\s+NULL\s+OR\s+used_count\s*<\s*usage_limit_total/i)
+    expect(sql).toMatch(/usage_limit\s+IS\s+NULL\s+OR\s+used_count\s*<\s*usage_limit\b/i)
+  })
+})

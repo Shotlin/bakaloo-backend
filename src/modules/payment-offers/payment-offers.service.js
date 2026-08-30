@@ -171,6 +171,40 @@ export class PaymentOffersService {
     return this.repo.recordUsage(offerId, userId, orderId)
   }
 
+  /**
+   * Record payment-offer usage for an order that has just been confirmed
+   * (payment succeeded) — mirrors CouponsService.recordUsageForOrder()'s
+   * deferred-confirmation pattern, called from the same two places
+   * (payments.service.js / wallet.service.js) it is.
+   *
+   * orders.service.js#placeOrder previously called recordUsage()
+   * unconditionally the moment the order row was created — including for a
+   * genuine ONLINE/WALLET payment, before it had actually been confirmed.
+   * A payment that then failed still permanently burned the customer's
+   * usage against the offer's per-user cap, for a payment they never
+   * completed — the exact bug already fixed for coupons (see that
+   * method's docstring). COD/wallet-fully-covers-order still call
+   * recordUsage() directly and immediately, same as coupons.
+   *
+   * There's no payment_offer_id column on `orders` to look the match back
+   * up from, but orders.service.js already creates a PENDING
+   * cashback_transactions row (sourceType: 'PAYMENT_OFFER') for this order
+   * the moment a payment offer matches — reusing that as the lookup avoids
+   * a schema change entirely.
+   */
+  async recordUsageForOrder(orderId) {
+    const { CashbackRepository } = await import('../cashback/cashback.repository.js')
+    const cashbackRows = await new CashbackRepository().findActiveByOrder(orderId)
+    const paymentOfferCashback = cashbackRows.find((c) => c.sourceType === 'PAYMENT_OFFER')
+    if (!paymentOfferCashback) return
+
+    const { OrdersRepository } = await import('../orders/orders.repository.js')
+    const order = await new OrdersRepository().findById(orderId)
+    if (!order) return
+
+    await this.recordUsage(paymentOfferCashback.sourceId, order.userId, orderId)
+  }
+
   /** @private */
   _computeCashback(offer, cartTotal) {
     let amount = this._toNumber(offer.cashback_amount)

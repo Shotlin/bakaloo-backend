@@ -19,9 +19,18 @@ export class CartController {
 
   /** GET /summary */
   async getSummary(request, reply) {
-    const summary = await this.billSummaryService.getBillSummary(request.user.id, null, {
-      quickDeliverySelected: Boolean(request.query?.quickDeliverySelected),
-    })
+    // BUG FIX: this always priced delivery against the customer's default
+    // saved address (addressId hardcoded null), even when they'd selected
+    // a different one for this specific order — while placeOrder() (see
+    // orders.service.js) always uses the real submitted addressId. Ordering
+    // to a non-default address showed one delivery fee/free-delivery
+    // threshold in the cart preview and charged a different one at
+    // checkout — reported as "sometimes right, sometimes wrong" totals.
+    const summary = await this.billSummaryService.getBillSummary(
+      request.user.id,
+      request.query?.addressId || null,
+      { quickDeliverySelected: Boolean(request.query?.quickDeliverySelected) }
+    )
     return reply.code(200).send(success(summary, 'Bill summary fetched'))
   }
 

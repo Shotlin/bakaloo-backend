@@ -483,6 +483,15 @@ export class PaymentsService {
       logger.warn({ err: err.message, orderId: payment.orderId }, 'Coupon usage recording after payment finalize failed (non-critical)')
     }
 
+    // Same deferred-confirmation reasoning for a matched payment offer's
+    // per-user usage cap — see PaymentOffersService.recordUsageForOrder().
+    try {
+      const { PaymentOffersService } = await import('../payment-offers/payment-offers.service.js')
+      await new PaymentOffersService().recordUsageForOrder(payment.orderId)
+    } catch (err) {
+      logger.warn({ err: err.message, orderId: payment.orderId }, 'Payment offer usage recording after payment finalize failed (non-critical)')
+    }
+
     // Send order placed notification after confirmed payment
     try {
       const order = await this.ordersRepo.findByIdAndUser(payment.orderId, payment.userId)

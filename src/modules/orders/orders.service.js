@@ -838,6 +838,17 @@ export class OrdersService {
     // Payment offer follow-through — was previously entirely missing;
     // getPublicOffers() only ever computed a lock/unlock display flag,
     // nothing here ever credited the cashback a customer actually earned.
+    //
+    // The PENDING cashback row is safe to create unconditionally (same as
+    // the first-time-offer/cart-milestone/coupon-cashback blocks above) —
+    // it's only ever actually credited later by a real order-lifecycle
+    // event, so it's harmless if the order never gets there. recordUsage()
+    // is different: it permanently consumes the offer's per-user cap the
+    // instant it runs, so — mirroring the coupon-usage gate directly
+    // above — it must wait for payment to actually be confirmed for
+    // ONLINE/WALLET. The deferred call lives in
+    // payments.service.js/wallet.service.js, same two places
+    // couponsService.recordUsageForOrder() is called from.
     if (paymentOfferMatch && createdOrders.length === 1) {
       try {
         await this.cashbackService.createPending({
@@ -848,7 +859,9 @@ export class OrdersService {
           amount: paymentOfferMatch.cashbackAmount,
           creditTrigger: paymentOfferMatch.creditTrigger,
         })
-        await this.paymentOffersService.recordUsage(paymentOfferMatch.offerId, userId, createdOrders[0].id)
+        if (paymentAlreadyConfirmedAtCreation) {
+          await this.paymentOffersService.recordUsage(paymentOfferMatch.offerId, userId, createdOrders[0].id)
+        }
       } catch (err) {
         logStepFailure('payment_offer_follow_through', err)
       }
