@@ -38,3 +38,30 @@ describe('CartMilestonesRepository.hasPriorOrder — gated on placement, not del
     expect(params).toEqual(['user-1'])
   })
 })
+
+/**
+ * Regression coverage for getUserUsageCount() — used by usageLimitPerUser.
+ * recordUsage() fires at order creation, before payment is confirmed, so a
+ * usage row can belong to an order the customer later cancelled (Razorpay
+ * checkout cancel, or the payment-expiry worker's auto-cancel). Previously
+ * a bare COUNT(*), so one cancelled attempt permanently burned a
+ * usageLimitPerUser=1 slot on a FIRST_TIME milestone even though
+ * hasPriorOrder() above already correctly says that customer is still
+ * eligible. Reported: "first order failed [payment cancelled]... first-time
+ * [milestone] offer show[s] gone."
+ */
+describe('CartMilestonesRepository.getUserUsageCount — excludes cancelled orders', () => {
+  it('joins against orders and excludes CANCELLED, but still counts usages with no linked order', async () => {
+    queryMock.mockClear()
+    queryMock.mockResolvedValueOnce({ rows: [{ count: 0 }] })
+    const repo = new CartMilestonesRepository()
+
+    await repo.getUserUsageCount('milestone-1', 'user-1')
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    const [sql, params] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/LEFT JOIN orders/i)
+    expect(sql).toMatch(/o\.id IS NULL OR o\.status != 'CANCELLED'/)
+    expect(params).toEqual(['milestone-1', 'user-1'])
+  })
+})

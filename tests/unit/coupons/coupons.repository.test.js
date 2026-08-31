@@ -42,6 +42,31 @@ describe('CouponsRepository.hasPriorOrder — gated on placement, not delivery',
 })
 
 /**
+ * Regression coverage for getUserUsageCount() — used by usage_limit_per_user
+ * (and, for a FIRST_TIME-targeted coupon, alongside hasPriorOrder() above).
+ * recordUsage() fires at order creation, before payment is confirmed, so a
+ * usage row can belong to an order the customer later cancelled. Previously
+ * a bare COUNT(*), so one cancelled attempt permanently burned a
+ * usage_limit_per_user=1 slot even though hasPriorOrder() already correctly
+ * says that customer is still first-time.
+ */
+describe('CouponsRepository.getUserUsageCount — excludes cancelled orders', () => {
+  it('joins against orders and excludes CANCELLED, but still counts usages with no linked order', async () => {
+    queryMock.mockClear()
+    queryMock.mockResolvedValueOnce({ rows: [{ count: 0 }] })
+    const repo = new CouponsRepository()
+
+    await repo.getUserUsageCount('coupon-1', 'user-1')
+
+    expect(queryMock).toHaveBeenCalledTimes(1)
+    const [sql, params] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/LEFT JOIN orders/i)
+    expect(sql).toMatch(/o\.id IS NULL OR o\.status != 'CANCELLED'/)
+    expect(params).toEqual(['coupon-1', 'user-1'])
+  })
+})
+
+/**
  * Coverage for resolveMatchingProductIds() (088) — the query that
  * determines which cart products a category/product-scoped coupon
  * actually applies to. A category id can be either an ordinary category

@@ -57,12 +57,26 @@ export class CouponsRepository {
   }
 
   /**
-   * Get user's usage count for a coupon
+   * Get user's usage count for a coupon.
+   *
+   * Same fix as CartMilestonesRepository#getUserUsageCount — recordUsage()
+   * fires at order creation, before payment is confirmed, so a usage row
+   * can belong to an order the customer went on to cancel (a cancelled
+   * Razorpay checkout, or one auto-cancelled by the payment-expiry
+   * worker). A bare COUNT(*) here permanently burned a usage_limit_per_user
+   * slot on that cancelled attempt, even for a coupon whose targetType is
+   * FIRST_TIME — where hasPriorOrder() below already correctly excludes
+   * cancelled orders, so the two checks disagreed. LEFT JOIN (not INNER):
+   * order_id is nullable on coupon_usages, so a usage row with no linked
+   * order still counts, same as before; only a confirmed CANCELLED order
+   * is excluded.
    */
   async getUserUsageCount(couponId, userId) {
     const { rows } = await query(
-      `SELECT COUNT(*)::int AS count FROM coupon_usages
-       WHERE coupon_id = $1 AND user_id = $2`,
+      `SELECT COUNT(*)::int AS count FROM coupon_usages cu
+       LEFT JOIN orders o ON o.id = cu.order_id
+       WHERE cu.coupon_id = $1 AND cu.user_id = $2
+         AND (o.id IS NULL OR o.status != 'CANCELLED')`,
       [couponId, userId]
     )
     return rows[0].count

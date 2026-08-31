@@ -143,11 +143,35 @@ export class CartMilestonesRepository {
     return result.rowCount > 0
   }
 
-  /** How many times this user has already redeemed this milestone's reward. */
+  /**
+   * How many times this user has already redeemed this milestone's reward.
+   *
+   * recordUsage() below fires the moment an order is CREATED — same
+   * "consumed at placement, not delivery" timing as hasPriorOrder()
+   * (deliberate; see that method's own doc comment) — so a usage row can
+   * exist for an order that never actually completed: a Razorpay payment
+   * the customer cancelled, or one the payment-expiry worker later
+   * auto-cancelled. Unlike hasPriorOrder(), this was a bare COUNT(*) with
+   * no idea what became of the order it belongs to, so a single cancelled
+   * attempt permanently burned a usageLimitPerUser slot — e.g. a
+   * FIRST_TIME milestone with usageLimitPerUser=1 (the natural setting for
+   * a first-order reward) would lock a customer out forever after one
+   * cancelled first attempt, even though _isEligible()'s own FIRST_TIME/
+   * hasPriorOrder() check right below this one would have correctly said
+   * they're still eligible. Reported: "first order failed [payment
+   * cancelled]... first-time [milestone] offer show[s] gone."
+   *
+   * LEFT JOIN (not INNER) — order_id is nullable on cart_milestone_usages,
+   * so a usage row with no linked order at all still counts, same as
+   * before this fix; only a usage whose order is confirmed CANCELLED is
+   * excluded.
+   */
   async getUserUsageCount(milestoneId, userId) {
     const { rows } = await query(
-      `SELECT COUNT(*)::int AS count FROM cart_milestone_usages
-       WHERE cart_milestone_id = $1 AND user_id = $2`,
+      `SELECT COUNT(*)::int AS count FROM cart_milestone_usages cmu
+       LEFT JOIN orders o ON o.id = cmu.order_id
+       WHERE cmu.cart_milestone_id = $1 AND cmu.user_id = $2
+         AND (o.id IS NULL OR o.status != 'CANCELLED')`,
       [milestoneId, userId]
     )
     return rows[0].count
