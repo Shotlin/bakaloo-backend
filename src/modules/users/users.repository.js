@@ -75,13 +75,19 @@ export class UsersRepository {
 
   /**
    * Get user stats (order count, total spent, loyalty points)
+   *
+   * total_orders counts only DELIVERED orders (mirrors total_spent below) —
+   * the profile screen shows this as "successfully delivered", so cancelled
+   * and payment-failed/expired orders (status='CANCELLED', see
+   * orders.repository.js findByUser for how those are distinguished) must
+   * not inflate it.
    * @param {string} userId
    * @returns {Promise<object>}
    */
   async getStats(userId) {
     const { rows } = await query(
       `SELECT
-         (SELECT COUNT(*) FROM orders WHERE user_id = $1)::int AS total_orders,
+         (SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = 'DELIVERED')::int AS total_orders,
          (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE user_id = $1 AND status = 'DELIVERED') AS total_spent,
          (SELECT loyalty_points FROM users WHERE id = $1) AS loyalty_points`,
       [userId]
