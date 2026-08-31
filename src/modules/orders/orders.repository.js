@@ -366,16 +366,35 @@ export class OrdersRepository {
   }
 
   /**
-   * List orders for a user (paginated)
+   * List orders for a user (paginated).
+   *
+   * `paymentFailed` isolates the "Failed" view from the ordinary "Cancelled"
+   * one — a Razorpay-expired or verify-failed payment writes exactly
+   * `status='CANCELLED', payment_status IN ('FAILED','EXPIRED')`
+   * (payment-expiry.worker.js), which otherwise looks identical to a plain
+   * user/admin cancellation. There's no separate FAILED order_status enum
+   * value (deliberately — adding one would ripple through exhaustive
+   * status switches across the backend, Flutter app, and rider app for no
+   * real benefit), so this is derived here instead:
+   *   - `paymentFailed === true` → ONLY those rows (ignores `status`) — the
+   *     dedicated Failed tab.
+   *   - otherwise → the normal `status` filter, with those rows always
+   *     excluded, so a payment failure no longer shows up under "Cancelled"
+   *     or the unfiltered "All" list.
    */
-  async findByUser(userId, { limit, offset, status }) {
+  async findByUser(userId, { limit, offset, status, paymentFailed }) {
     const conditions = ['user_id = $1']
     const params = [userId]
     let idx = 2
 
-    if (status) {
-      conditions.push(`status = $${idx++}`)
-      params.push(status)
+    if (paymentFailed) {
+      conditions.push(`status = 'CANCELLED'`, `payment_status IN ('FAILED', 'EXPIRED')`)
+    } else {
+      if (status) {
+        conditions.push(`status = $${idx++}`)
+        params.push(status)
+      }
+      conditions.push(`NOT (status = 'CANCELLED' AND payment_status IN ('FAILED', 'EXPIRED'))`)
     }
 
     const where = conditions.join(' AND ')

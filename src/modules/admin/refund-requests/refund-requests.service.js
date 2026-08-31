@@ -97,6 +97,28 @@ export class AdminRefundRequestsService {
       await new AdminCustomersRepository().creditWallet(request.user_id, refundAmount, reason)
     }
 
+    // Mirror AdminOrdersService.refundOrder()'s direct-refund path: mark
+    // the order REFUNDED so it shows correctly everywhere (dashboard badge,
+    // customer app). Previously only PaymentsService.refund()'s
+    // refund-to-original-method branch did this — a refund approved to
+    // Wallet (the default `refundTo`) credited the customer but left the
+    // order's own status exactly as it was, so "Refunded" never appeared
+    // for the common case. Skipped when already REFUNDED (idempotent, same
+    // guard style as refundOrder()'s own comment on this).
+    if (order.status !== 'REFUNDED') {
+      await this.ordersRepository.updateStatus(order.id, 'REFUNDED', adminId, reason)
+      try {
+        this.fastify?.emitOrderUpdate?.(order.id, [request.user_id], {
+          orderId: order.id,
+          orderNumber: order.order_number,
+          status: 'REFUNDED',
+          message: 'Order refund processed',
+        })
+      } catch (_) {
+        // Keep approval non-blocking if the realtime emit fails.
+      }
+    }
+
     const updated = await this.repository.updateStatus(requestId, {
       status: 'APPROVED',
       adminId,

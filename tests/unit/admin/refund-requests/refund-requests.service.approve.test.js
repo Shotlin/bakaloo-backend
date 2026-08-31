@@ -6,10 +6,12 @@ vi.mock('../../../../src/utils/activityLogger.js', () => ({
 
 const findByIdMock = vi.fn()
 const getOrderPaymentMock = vi.fn()
+const ordersUpdateStatusMock = vi.fn(async () => 'CANCELLED')
 vi.mock('../../../../src/modules/admin/orders/orders.repository.js', () => ({
   AdminOrdersRepository: vi.fn().mockImplementation(() => ({
     findById: findByIdMock,
     getOrderPayment: getOrderPaymentMock,
+    updateStatus: ordersUpdateStatusMock,
   })),
 }))
 
@@ -79,6 +81,7 @@ beforeEach(() => {
   paymentsRefundMock.mockClear()
   findByIdMock.mockReset()
   getOrderPaymentMock.mockReset()
+  ordersUpdateStatusMock.mockClear()
 })
 
 describe('AdminRefundRequestsService.approve — refund amount calculation', () => {
@@ -105,6 +108,12 @@ describe('AdminRefundRequestsService.approve — refund amount calculation', () 
 
     expect(creditWalletMock).toHaveBeenCalledWith(USER_ID, 450, expect.any(String))
     expect(result.refund_amount).toBe(450)
+    // Regression: a refund approved to Wallet (the default destination)
+    // used to credit the customer but never mark the order REFUNDED —
+    // "Refunded" never showed up anywhere for the common case.
+    expect(ordersUpdateStatusMock).toHaveBeenCalledWith(
+      ORDER_ID, 'REFUNDED', ADMIN_ID, expect.any(String)
+    )
   })
 
   it('refunds only the sum of the selected items for a SPECIFIC-item request, ignoring the rest of the order', async () => {
@@ -160,6 +169,24 @@ describe('AdminRefundRequestsService.approve — refund amount calculation', () 
     )
     expect(creditWalletMock).not.toHaveBeenCalled()
     expect(result.refund_amount).toBe(60)
+    // Same REFUNDED mark applies to the original-payment-method path too —
+    // idempotent alongside whatever PaymentsService.refund() itself does,
+    // same pattern as AdminOrdersService.refundOrder().
+    expect(ordersUpdateStatusMock).toHaveBeenCalledWith(
+      ORDER_ID, 'REFUNDED', ADMIN_ID, expect.any(String)
+    )
+  })
+
+  it('does not re-mark an order that is already REFUNDED', async () => {
+    const { service } = makeService({
+      request: makeRequest({ item_scope: 'ALL' }),
+      order: makeOrder({ status: 'REFUNDED' }),
+      payment: null,
+    })
+
+    await service.approve(REQUEST_ID, { refundTo: 'wallet' }, ADMIN_ID, '127.0.0.1')
+
+    expect(ordersUpdateStatusMock).not.toHaveBeenCalled()
   })
 
   it('rejects refundTo=original when there is no captured gateway payment (e.g. COD)', async () => {

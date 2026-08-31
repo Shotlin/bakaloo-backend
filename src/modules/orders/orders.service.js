@@ -1096,6 +1096,7 @@ export class OrdersService {
       limit,
       offset,
       status: filters.status,
+      paymentFailed: filters.paymentFailed,
     })
 
     return {

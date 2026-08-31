@@ -192,6 +192,10 @@ export const listOrdersSchema = {
       page: { type: 'integer', minimum: 1, default: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
       status: { type: 'string' },
+      // Isolates the dedicated "Failed" tab (expired/failed-payment
+      // cancellations) — see orders.repository.js#findByUser. When true,
+      // overrides `status` entirely.
+      paymentFailed: { type: 'boolean' },
     },
   },
   response: {
