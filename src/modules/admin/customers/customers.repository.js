@@ -49,12 +49,16 @@ export class AdminCustomersRepository {
     )
 
     // Real daily-active count — anyone matching the current filters who has
-    // made an authenticated request in the last 24h (stamped by the
-    // `authenticate` preHandler). Replaces the old client-side "not
-    // blocked" proxy the dashboard used to show as "Active".
+    // made an authenticated request today (stamped by the `authenticate`
+    // preHandler). "Today" is the IST calendar day (00:00-23:59:59 IST),
+    // not a rolling 24h window, so a customer who opens the app several
+    // times in one day is still only counted once — and the count resets
+    // at midnight IST rather than 24h after their last visit. Replaces
+    // the old client-side "not blocked" proxy the dashboard used to show
+    // as "Active".
     const activeTodayRes = await query(
       `SELECT COUNT(*)::int AS active_today FROM users u
-       WHERE ${where} AND u.last_active_at >= NOW() - INTERVAL '24 hours'`,
+       WHERE ${where} AND (u.last_active_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`,
       params
     )
 
