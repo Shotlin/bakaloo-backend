@@ -39,6 +39,16 @@ export class NotificationsController {
   }
 
   /**
+   * PATCH /campaigns/:campaignId/opened — Report that the current user
+   * opened (tapped) a push notification belonging to this campaign.
+   */
+  async markCampaignOpened(request, reply) {
+    const { campaignId } = request.params
+    await this.service.markCampaignOpened(request.user.id, campaignId)
+    return reply.code(200).send(success(null, 'Campaign open recorded'))
+  }
+
+  /**
    * DELETE /:id — Delete notification
    */
   async deleteNotification(request, reply) {

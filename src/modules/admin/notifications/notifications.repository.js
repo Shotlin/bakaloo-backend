@@ -8,7 +8,9 @@ const TEMPLATE_COLS = `
 const CAMPAIGN_COLS = `
   nc.id, nc.title, nc.body, nc.image_url, nc.deep_link, nc.type,
   nc.target_type, nc.segment, nc.target_count, nc.sent_count,
-  nc.opened_count, nc.failed_count, nc.failure_summary,
+  (SELECT COUNT(*)::int FROM notifications n
+    WHERE n.campaign_id = nc.id AND n.is_read = true) AS opened_count,
+  nc.failed_count, nc.failure_summary,
   nc.status, nc.template_id, nc.scheduled_at, nc.expires_at,
   nc.sent_at, nc.created_by, nc.created_at, nc.updated_at,
   u.name AS created_by_name
@@ -268,12 +270,12 @@ export class AdminNotificationsRepository {
    * unlike the single-user NotificationsService.sendNotification() path
    * used by orders/wallet/abandoned-cart, which always wrote this row).
    */
-  async createBulkNotifications(userIds, { title, body, type, data }) {
+  async createBulkNotifications(userIds, { title, body, type, data, campaignId }) {
     if (!userIds?.length) return
     await query(
-      `INSERT INTO notifications (user_id, title, body, type, data)
-       SELECT unnest($1::uuid[]), $2, $3, $4, $5::jsonb`,
-      [userIds, title, body, type || 'general', JSON.stringify(data || {})]
+      `INSERT INTO notifications (user_id, title, body, type, data, campaign_id)
+       SELECT unnest($1::uuid[]), $2, $3, $4, $5::jsonb, $6`,
+      [userIds, title, body, type || 'general', JSON.stringify(data || {}), campaignId || null]
     )
   }
 

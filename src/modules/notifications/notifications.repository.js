@@ -53,6 +53,14 @@ export class NotificationsRepository {
     )
   }
 
+  async markCampaignOpened(userId, campaignId) {
+    await query(
+      `UPDATE notifications SET is_read = true, read_at = NOW()
+       WHERE user_id = $1 AND campaign_id = $2 AND is_read = false`,
+      [userId, campaignId]
+    )
+  }
+
   async markAllAsRead(userId) {
     await query(
       'UPDATE notifications SET is_read = true, read_at = NOW() WHERE user_id = $1 AND is_read = false',

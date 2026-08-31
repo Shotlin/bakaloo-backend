@@ -28,6 +28,18 @@ export const markAllAsReadSchema = {
   summary: 'Mark all notifications as read',
 }
 
+export const markCampaignOpenedSchema = {
+  tags: ['Notifications'],
+  summary: 'Record that the current user opened a campaign push notification',
+  params: {
+    type: 'object',
+    required: ['campaignId'],
+    properties: {
+      campaignId: { type: 'string', format: 'uuid' },
+    },
+  },
+}
+
 export const deleteNotificationSchema = {
   tags: ['Notifications'],
   summary: 'Delete notification',

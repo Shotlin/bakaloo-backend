@@ -5,6 +5,7 @@ import {
   getNotificationsSchema,
   markAsReadSchema,
   markAllAsReadSchema,
+  markCampaignOpenedSchema,
   deleteNotificationSchema,
   getPreferencesSchema,
   updatePreferencesSchema,
@@ -37,6 +38,12 @@ export default async function notificationsRoutes(fastify) {
     schema: markAllAsReadSchema,
     preHandler: [fastify.authenticate],
   }, controller.markAllAsRead.bind(controller))
+
+  // PATCH /campaigns/:campaignId/opened — Report a campaign push notification was opened
+  fastify.patch('/campaigns/:campaignId/opened', {
+    schema: markCampaignOpenedSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.markCampaignOpened.bind(controller))
 
   // DELETE /:id — Delete notification
   fastify.delete('/:id', {

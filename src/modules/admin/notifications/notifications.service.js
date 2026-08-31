@@ -114,7 +114,7 @@ export class AdminNotificationsService {
     if (allTargetUserIds.length > 0) {
       try {
         await repo.createBulkNotifications(allTargetUserIds, {
-          title, body, type: type || 'general', data: notificationData,
+          title, body, type: type || 'general', data: notificationData, campaignId,
         })
       } catch (err) {
         logger.error({ err, campaignId }, 'Bulk in-app notification creation failed')

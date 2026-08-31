@@ -36,6 +36,16 @@ export class NotificationsService {
     return await this.repository.markAllAsRead(userId)
   }
 
+  // Called by the app the moment a user taps/opens a push notification —
+  // not tied to a specific in-app notification row id (the push payload
+  // only carries the campaign id, since the same FCM payload goes to every
+  // recipient). Idempotent: a repeat tap on an already-opened campaign is a
+  // no-op at the repository level, so a campaign's opened_count only ever
+  // counts each user once, however many times they tap.
+  async markCampaignOpened(userId, campaignId) {
+    return await this.repository.markCampaignOpened(userId, campaignId)
+  }
+
   async deleteNotification(userId, notificationId) {
     const notification = await this.repository.getNotificationById(notificationId)
     if (!notification) {
