@@ -81,6 +81,38 @@ describe('AdminNotificationsRepository — createBulkNotifications (positive/neg
 
     expect(databaseMock.query).not.toHaveBeenCalled()
   })
+
+  // Coverage for the reported bug: the dashboard's Campaigns table always
+  // showed "Opened: 0" because notification_campaigns.opened_count was
+  // never written by anything. campaign_id is now stamped on each row so
+  // the app's "mark opened" call (PATCH /notifications/campaigns/:id/opened)
+  // can attribute a tap back to this campaign.
+  it('stamps the row with campaign_id so a later open can be attributed to this campaign (positive)', async () => {
+    databaseMock.query.mockResolvedValue({ rows: [] })
+    const repo = new AdminNotificationsRepository()
+
+    await repo.createBulkNotifications(['u1'], {
+      title: 'Sale!', body: 'Big discounts today', data: { campaignId: 'c1' }, campaignId: 'c1',
+    })
+
+    const [sql, params] = databaseMock.query.mock.calls[0]
+    expect(sql).toContain('campaign_id')
+    expect(params).toContain('c1')
+  })
+})
+
+describe('AdminNotificationsRepository — opened_count is derived live, not read from the stale counter (positive)', () => {
+  it('findAllCampaigns computes opened_count from notifications.is_read rather than selecting nc.opened_count', async () => {
+    databaseMock.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ total: 0 }] })
+    const repo = new AdminNotificationsRepository()
+
+    await repo.findAllCampaigns({ offset: 0, limit: 20 })
+
+    const [sql] = databaseMock.query.mock.calls[0]
+    expect(sql).not.toMatch(/\bnc\.opened_count\b/)
+    expect(sql).toContain('is_read = true')
+    expect(sql).toContain('AS opened_count')
+  })
 })
 
 describe('AdminNotificationsService._executeSend — in-app fallback guarantee (the reported bug)', () => {
