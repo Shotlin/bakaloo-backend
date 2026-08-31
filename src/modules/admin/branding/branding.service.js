@@ -35,8 +35,8 @@ export class BrandingService {
 
   async updateBranding(data, adminId, ip) {
     const row = await repo.update({
-      splash_image_url: data.splash_image_url,
-      logo_image_url: data.logo_image_url,
+      splash_image_url: data.splashImageUrl,
+      logo_image_url: data.logoImageUrl,
     })
 
     const responseData = toResponseShape(row)
