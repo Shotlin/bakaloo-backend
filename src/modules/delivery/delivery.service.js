@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service.js'
 import { buildCustomerOrderEventNotification } from '../notifications/customer-order-event.helper.js'
 import { UploadsService } from '../uploads/uploads.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
+import { SpinWheelService } from '../spin-wheel/spin-wheel.service.js'
 import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { verifyPickupSignature } from '../../utils/qrToken.js'
@@ -27,6 +28,7 @@ export class DeliveryService {
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
     this.cashbackService = new CashbackService()
+    this.spinWheelService = new SpinWheelService()
     this.commissionSettingsRepo = new CommissionSettingsRepository()
     this.paymentSettingsService = new PaymentSettingsService()
   }
@@ -829,6 +831,13 @@ export class DeliveryService {
     // block or fail the rider's delivery confirmation.
     this.cashbackService.evaluateAndCredit(orderId, 'ORDER_DELIVERED').catch((err) => {
       logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (rider deliver)')
+    })
+
+    // Grant any spin-wheel milestone (order-count/spend threshold) this
+    // delivery newly earned. Same fire-and-forget, post-commit treatment as
+    // cashback above — must never block or fail the rider's confirmation.
+    this.spinWheelService.evaluateMilestones(assignment.customer_id).catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Spin milestone evaluation failed (rider deliver)')
     })
 
     return {

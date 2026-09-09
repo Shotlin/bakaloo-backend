@@ -168,6 +168,13 @@ export const buildApp = async () => {
     prefix: '/api/v1/purchase-limits',
   })
 
+  // Spin & Win — prize wheel gamification (server-resolved odds, daily/
+  // milestone/admin-granted spin credits, reward issuance via the same
+  // coupon/wallet primitives cart-milestones/first-time-offers use)
+  await app.register(import('./modules/spin-wheel/spin-wheel.routes.js'), {
+    prefix: '/api/v1/spin-wheel',
+  })
+
   // Addresses — fully implemented
   await app.register(import('./modules/addresses/addresses.routes.js'), {
     prefix: '/api/v1/addresses',

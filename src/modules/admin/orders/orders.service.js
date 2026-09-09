@@ -14,6 +14,7 @@ import { RiderAssignmentResolverService } from '../../rider-assignment/rider-ass
 import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignment.repository.js'
 import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
 import { CashbackService } from '../../cashback/cashback.service.js'
+import { SpinWheelService } from '../../spin-wheel/spin-wheel.service.js'
 import ExcelJS from 'exceljs'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -96,6 +97,7 @@ export class AdminOrdersService {
     this.riderAssignmentLogRepo = new RiderAssignmentRepository()
     this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
     this.cashbackService = new CashbackService()
+    this.spinWheelService = new SpinWheelService()
   }
 
   /**
@@ -322,6 +324,9 @@ export class AdminOrdersService {
     if (newStatus === 'DELIVERED') {
       this.cashbackService.evaluateAndCredit(orderId, 'ORDER_DELIVERED').catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Cashback evaluation failed (admin status update)')
+      })
+      this.spinWheelService.evaluateMilestones(order.user_id).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Spin milestone evaluation failed (admin status update)')
       })
     }
 
