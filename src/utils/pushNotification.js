@@ -99,9 +99,28 @@ export async function sendPush(fcmToken, { title, body, imageUrl, deepLink, data
   }
 }
 
+// FCM hard caps a single sendEach()/sendEachForMulticast() call at 500
+// messages — anything larger must be split into chunks and sent as
+// separate calls (see FCM_BATCH_CHUNK_SIZE usage below).
+const FCM_BATCH_CHUNK_SIZE = 500
+// How many chunks to have in flight at once. Keeps large campaigns
+// (thousands of tokens) fast without firing hundreds of concurrent
+// requests at the FCM API.
+const FCM_BATCH_CONCURRENCY = 5
+
+function chunk(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
 /**
  * Send push to multiple tokens with partial failure handling.
  * Deactivates invalid tokens in bulk.
+ *
+ * Internally chunks into batches of FCM_BATCH_CHUNK_SIZE (FCM's hard
+ * per-call limit) and sends the chunks with bounded concurrency, then
+ * merges the results back into a single summary.
  */
 export async function sendPushBatch(fcmTokens, { title, body, imageUrl, deepLink, data = {} }) {
   if (!fcmTokens?.length) return { success: false, reason: 'No tokens', sent: 0, failed: 0 }
@@ -112,63 +131,86 @@ export async function sendPushBatch(fcmTokens, { title, body, imageUrl, deepLink
     return { success: false, reason: 'FCM not configured', sent: 0, failed: 0 }
   }
 
-  try {
-    const admin = _admin || (await import('firebase-admin')).default
-    const stringData = Object.fromEntries(
-      Object.entries({
-        ...data,
-        ...(deepLink ? { deepLink } : {}),
-        ...(imageUrl ? { imageUrl } : {}),
-      })
-        .filter(([, v]) => v !== null && v !== undefined)
-        .map(([k, v]) => [k, String(v)])
-    )
-
-    const messages = fcmTokens.map((token) => ({
-      token,
-      notification: {
-        title,
-        body,
-        ...(imageUrl && isValidHttpsUrl(imageUrl) ? { imageUrl } : {}),
-      },
-      data: stringData,
-      android: {
-        priority: 'high',
-        notification: {
-          sound: 'default',
-          channelId: 'bakaloo_notifications',
-          imageUrl: imageUrl && isValidHttpsUrl(imageUrl) ? imageUrl : undefined,
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-        },
-      },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } },
-        fcmOptions: imageUrl && isValidHttpsUrl(imageUrl)
-          ? { imageUrl }
-          : undefined,
-      },
-    }))
-
-    const result = await admin.messaging().sendEach(messages)
-    logger.info({ title, sent: result.successCount, failed: result.failureCount }, 'Batch push complete')
-
-    // Collect invalid token indices
-    const invalidTokens = []
-    result.responses.forEach((r, i) => {
-      if (!r.success && isTokenInvalidError(r.error)) {
-        invalidTokens.push(fcmTokens[i])
-      }
+  const admin = _admin || (await import('firebase-admin')).default
+  const stringData = Object.fromEntries(
+    Object.entries({
+      ...data,
+      ...(deepLink ? { deepLink } : {}),
+      ...(imageUrl ? { imageUrl } : {}),
     })
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => [k, String(v)])
+  )
 
-    return {
-      success: true,
-      sent: result.successCount,
-      failed: result.failureCount,
-      invalidTokens,
-    }
-  } catch (err) {
-    logger.error({ err: err.message, title }, 'Batch push failed')
-    return { success: false, reason: err.message, sent: 0, failed: 0, invalidTokens: [] }
+  const buildMessage = (token) => ({
+    token,
+    notification: {
+      title,
+      body,
+      ...(imageUrl && isValidHttpsUrl(imageUrl) ? { imageUrl } : {}),
+    },
+    data: stringData,
+    android: {
+      priority: 'high',
+      notification: {
+        sound: 'default',
+        channelId: 'bakaloo_notifications',
+        imageUrl: imageUrl && isValidHttpsUrl(imageUrl) ? imageUrl : undefined,
+        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+    },
+    apns: {
+      payload: { aps: { sound: 'default', badge: 1 } },
+      fcmOptions: imageUrl && isValidHttpsUrl(imageUrl)
+        ? { imageUrl }
+        : undefined,
+    },
+  })
+
+  const tokenChunks = chunk(fcmTokens, FCM_BATCH_CHUNK_SIZE)
+  let sent = 0
+  let failed = 0
+  const invalidTokens = []
+  const chunkErrors = []
+
+  // Send chunks with bounded concurrency (FCM_BATCH_CONCURRENCY at a time)
+  // rather than all at once, to stay well under FCM's rate limits on
+  // very large campaigns.
+  for (let i = 0; i < tokenChunks.length; i += FCM_BATCH_CONCURRENCY) {
+    const group = tokenChunks.slice(i, i + FCM_BATCH_CONCURRENCY)
+    await Promise.all(
+      group.map(async (tokens) => {
+        try {
+          const result = await admin.messaging().sendEach(tokens.map(buildMessage))
+          sent += result.successCount
+          failed += result.failureCount
+          result.responses.forEach((r, idx) => {
+            if (!r.success && isTokenInvalidError(r.error)) {
+              invalidTokens.push(tokens[idx])
+            }
+          })
+        } catch (err) {
+          logger.error({ err: err.message, title }, 'Batch push chunk failed')
+          failed += tokens.length
+          chunkErrors.push(err.message)
+        }
+      })
+    )
+  }
+
+  logger.info({ title, sent, failed, chunks: tokenChunks.length }, 'Batch push complete')
+
+  // Only a total failure (every chunk errored, nothing delivered) is
+  // reported as success: false — a campaign with some successful chunks
+  // should still be marked SENT with a partial failure count.
+  const success = sent > 0 || chunkErrors.length === 0
+
+  return {
+    success,
+    sent,
+    failed,
+    invalidTokens,
+    ...(chunkErrors.length > 0 ? { reason: chunkErrors[0] } : {}),
   }
 }
 
