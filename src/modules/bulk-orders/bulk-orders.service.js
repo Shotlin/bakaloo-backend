@@ -650,6 +650,15 @@ export class BulkOrdersService {
         })
         continue
       }
+      if (sp.bulk_order_eligible === false) {
+        failed.push({
+          product_id: productId,
+          requested: qty,
+          available: Number(sp.stock_quantity),
+          reason: 'BULK_NOT_ELIGIBLE',
+        })
+        continue
+      }
       if (Number(sp.stock_quantity) < qty) {
         failed.push({
           product_id: productId,

@@ -138,6 +138,9 @@ export const createProductSchema = {
       price: { type: 'number', minimum: 0 },
       salePrice: { type: 'number', minimum: 0 },
       costPrice: { type: 'number', minimum: 0 },
+      // B2B wholesale unit price — nullable; falls back to price/salePrice
+      // at checkout when unset (see buildShopPriceJoin's wholesale tier).
+      wholesalePrice: { type: ['number', 'null'], minimum: 0 },
       categoryId: { type: 'string', format: 'uuid' },
       stock: { type: 'integer', minimum: 0, default: 0 },
       unit: { type: 'string', enum: ['kg', 'g', 'l', 'ml', 'piece', 'pack', 'dozen', 'box'] },
@@ -251,6 +254,7 @@ export const updateProductSchema = {
       price: { type: 'number', minimum: 0 },
       salePrice: { type: 'number', minimum: 0 },
       costPrice: { type: 'number', minimum: 0 },
+      wholesalePrice: { type: ['number', 'null'], minimum: 0 },
       categoryId: { type: 'string', format: 'uuid' },
       stock: { type: 'integer', minimum: 0 },
       unit: { type: 'string', enum: ['kg', 'g', 'l', 'ml', 'piece', 'pack', 'dozen', 'box'] },

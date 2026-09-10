@@ -284,7 +284,8 @@ export class BulkOrdersRepository {
    *   product_id: string,
    *   stock_quantity: number,
    *   is_available: boolean,
-   *   max_order_qty: number
+   *   max_order_qty: number,
+   *   bulk_order_eligible: boolean
    * }>>}
    */
   async findShopProductsForValidation(client, shopId, productIds) {
@@ -293,7 +294,8 @@ export class BulkOrdersRepository {
       SELECT sp.product_id,
              sp.stock_quantity,
              sp.is_available,
-             sp.max_order_qty
+             sp.max_order_qty,
+             sp.bulk_order_eligible
         FROM shop_products sp
         JOIN unnest($2::uuid[]) AS t(product_id)
           ON t.product_id = sp.product_id

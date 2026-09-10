@@ -85,9 +85,9 @@ export class ShopProductsRepository {
   // ────────────────────────────────────────────────────────
   static SELECT_COLUMNS = `
     id, shop_id, product_id,
-    price, sale_price, cost_price,
+    price, sale_price, cost_price, wholesale_price,
     stock_quantity, low_stock_threshold, max_order_qty,
-    is_available, is_featured, sold_out_at,
+    is_available, is_featured, bulk_order_eligible, sold_out_at,
     approval_status, approved_at, approved_by, rejection_reason,
     deleted_at, created_at, updated_at
   `
@@ -106,14 +106,14 @@ export class ShopProductsRepository {
     const { rows } = await query(
       `INSERT INTO shop_products (
         shop_id, product_id,
-        price, sale_price, cost_price,
+        price, sale_price, cost_price, wholesale_price,
         stock_quantity, low_stock_threshold, max_order_qty,
-        is_available, is_featured, sold_out_at
+        is_available, is_featured, bulk_order_eligible, sold_out_at
       ) VALUES (
         $1, $2,
-        $3, $4, $5,
-        $6, $7, $8,
-        $9, $10, $11
+        $3, $4, $5, $6,
+        $7, $8, $9,
+        $10, $11, $12, $13
       )
       RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
       [
@@ -122,11 +122,13 @@ export class ShopProductsRepository {
         data.price ?? null,
         data.sale_price ?? null,
         data.cost_price ?? null,
+        data.wholesale_price ?? null,
         data.stock_quantity,
         data.low_stock_threshold,
         data.max_order_qty,
         data.is_available,
         data.is_featured ?? false,
+        data.bulk_order_eligible ?? true,
         soldOutAt,
       ]
     )
@@ -157,9 +159,9 @@ export class ShopProductsRepository {
 
     const { rows } = await query(
       `UPDATE shop_products SET
-        price = $3, sale_price = $4, cost_price = $5,
-        stock_quantity = $6, low_stock_threshold = $7, max_order_qty = $8,
-        is_available = $9, is_featured = $10, sold_out_at = $11,
+        price = $3, sale_price = $4, cost_price = $5, wholesale_price = $6,
+        stock_quantity = $7, low_stock_threshold = $8, max_order_qty = $9,
+        is_available = $10, is_featured = $11, bulk_order_eligible = $12, sold_out_at = $13,
         approval_status = 'APPROVED', approved_at = NULL, approved_by = NULL,
         rejection_reason = NULL,
         deleted_at = NULL, updated_at = NOW()
@@ -171,11 +173,13 @@ export class ShopProductsRepository {
         data.price ?? null,
         data.sale_price ?? null,
         data.cost_price ?? null,
+        data.wholesale_price ?? null,
         data.stock_quantity,
         data.low_stock_threshold,
         data.max_order_qty,
         data.is_available,
         data.is_featured ?? false,
+        data.bulk_order_eligible ?? true,
         soldOutAt,
       ]
     )
@@ -284,11 +288,13 @@ export class ShopProductsRepository {
           sp.price,
           sp.sale_price,
           sp.cost_price,
+          sp.wholesale_price,
           sp.stock_quantity,
           sp.low_stock_threshold,
           sp.max_order_qty,
           sp.is_available,
           sp.is_featured,
+          sp.bulk_order_eligible,
           sp.sold_out_at,
           sp.approval_status,
           sp.approved_at,
@@ -379,10 +385,12 @@ export class ShopProductsRepository {
       'price',
       'sale_price',
       'cost_price',
+      'wholesale_price',
       'low_stock_threshold',
       'max_order_qty',
       'is_available',
       'is_featured',
+      'bulk_order_eligible',
     ]
 
     for (const key of updatable) {

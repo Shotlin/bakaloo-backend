@@ -749,7 +749,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
+              p.cost_price, p.wholesale_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
@@ -800,7 +800,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
-              p.cost_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
+              p.cost_price, p.wholesale_price, p.category_id, ${shopPrice.stockExpr} AS stock_quantity, p.unit,
               p.thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
@@ -1219,7 +1219,7 @@ export class ProductsRepository {
   async create(data) {
     const { rows } = await query(
       `INSERT INTO products
-        (name, slug, description, price, sale_price, cost_price,
+        (name, slug, description, price, sale_price, cost_price, wholesale_price,
          category_id, stock_quantity, unit, thumbnail_url, images, tags,
          is_featured, is_active, sku, barcode, low_stock_threshold, max_order_qty,
          ingredients, allergen_info, shelf_life, storage_instructions,
@@ -1230,12 +1230,12 @@ export class ProductsRepository {
          product_family_id, option_label, option_sort_order, is_default_option,
          food_type, origin_tag, custom_badges, display_delivery_minutes,
          hsn_code, uqc, gst_rate)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
-       RETURNING id, name, slug, price, sale_price, stock_quantity, unit,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50)
+       RETURNING id, name, slug, price, sale_price, wholesale_price, stock_quantity, unit,
                  thumbnail_url, category_id, is_featured, is_active, sku, created_at`,
       [
         data.name, data.slug, data.description || null,
-        data.price, data.salePrice || null, data.costPrice || null,
+        data.price, data.salePrice || null, data.costPrice || null, data.wholesalePrice || null,
         data.categoryId, data.stock || 0, data.unit || 'piece',
         data.thumbnailUrl || null, JSON.stringify(data.images || []),
         data.tags || [], data.isFeatured || false, data.isActive !== false,
@@ -1275,7 +1275,7 @@ export class ProductsRepository {
   async update(id, data) {
     const fieldMap = {
       name: 'name', description: 'description', price: 'price',
-      salePrice: 'sale_price', costPrice: 'cost_price',
+      salePrice: 'sale_price', costPrice: 'cost_price', wholesalePrice: 'wholesale_price',
       categoryId: 'category_id', stock: 'stock_quantity',
       unit: 'unit', thumbnailUrl: 'thumbnail_url',
       isFeatured: 'is_featured', isActive: 'is_active', slug: 'slug',
@@ -1355,7 +1355,7 @@ export class ProductsRepository {
 
     const { rows } = await query(
       `UPDATE products SET ${fields.join(', ')} WHERE id = $${idx}
-       RETURNING id, name, slug, price, sale_price, stock_quantity, unit,
+       RETURNING id, name, slug, price, sale_price, wholesale_price, stock_quantity, unit,
                  thumbnail_url, category_id, is_featured, is_active, updated_at`,
       params
     )

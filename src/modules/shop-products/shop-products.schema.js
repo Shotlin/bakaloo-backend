@@ -26,6 +26,9 @@ export const createShopProductSchema = z
     price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     sale_price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     cost_price: z.number().min(COST_PRICE_MIN).max(PRICE_MAX).optional().nullable(),
+    // B2B wholesale override for this shop — nullable, falls back to the
+    // product's own wholesale_price (then retail) when unset.
+    wholesale_price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     stock_quantity: z.number().int().min(STOCK_MIN).max(STOCK_MAX).default(0),
     low_stock_threshold: z.number().int().min(LOW_STOCK_MIN).default(5),
     max_order_qty: z
@@ -36,6 +39,11 @@ export const createShopProductSchema = z
       .default(50),
     is_available: z.boolean().default(true),
     is_featured: z.boolean().default(false),
+    // Whether this listing can be included in a bulk order at this shop —
+    // independent of is_available (a product can sell normally but be
+    // excluded from bulk purchasing, e.g. a low-margin or hard-to-source
+    // item). Defaults true so nothing changes for existing bulk-order flow.
+    bulk_order_eligible: z.boolean().default(true),
   })
   .superRefine((data, ctx) => {
     // Requirement 3.9 — sale_price must be < price when both are set
@@ -62,6 +70,7 @@ export const updateShopProductSchema = z
     price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     sale_price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     cost_price: z.number().min(COST_PRICE_MIN).max(PRICE_MAX).optional().nullable(),
+    wholesale_price: z.number().min(PRICE_MIN).max(PRICE_MAX).optional().nullable(),
     low_stock_threshold: z.number().int().min(LOW_STOCK_MIN).optional(),
     max_order_qty: z
       .number()
@@ -71,16 +80,19 @@ export const updateShopProductSchema = z
       .optional(),
     is_available: z.boolean().optional(),
     is_featured: z.boolean().optional(),
+    bulk_order_eligible: z.boolean().optional(),
   })
   .refine(
     (data) =>
       data.price !== undefined ||
       data.sale_price !== undefined ||
       data.cost_price !== undefined ||
+      data.wholesale_price !== undefined ||
       data.low_stock_threshold !== undefined ||
       data.max_order_qty !== undefined ||
       data.is_available !== undefined ||
-      data.is_featured !== undefined,
+      data.is_featured !== undefined ||
+      data.bulk_order_eligible !== undefined,
     { message: 'At least one field must be provided' }
   )
 
