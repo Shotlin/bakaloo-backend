@@ -271,6 +271,7 @@ async function handleApplySectionLayout({ versionId, tabId }) {
          version.tab_id,
          version.snapshot,
          version.status,
+         version.audience,
          tab.key AS tab_key,
          tab.store_key
        FROM section_manifest_versions version
@@ -292,7 +293,16 @@ async function handleApplySectionLayout({ versionId, tabId }) {
       return
     }
 
-    await client.query('DELETE FROM section_manifests WHERE tab_id = $1', [tabId])
+    // Scoped by audience too — applying a scheduled B2C layout must never
+    // wipe that tab's independent B2B section list (duplicate of the same
+    // fix in sections.repository.js#restoreSnapshot; this worker path has
+    // its own copy of the DELETE+INSERT since it runs outside the request
+    // lifecycle).
+    const audience = version.audience || 'B2C'
+    await client.query(
+      'DELETE FROM section_manifests WHERE tab_id = $1 AND audience = $2',
+      [tabId, audience]
+    )
 
     const snapshot = Array.isArray(version.snapshot) ? version.snapshot : []
     const orderedSnapshot = [...snapshot].sort(
@@ -307,9 +317,10 @@ async function handleApplySectionLayout({ versionId, tabId }) {
            sort_order,
            visible,
            config,
-           merch_binding
+           merch_binding,
+           audience
          )
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
         [
           tabId,
           section.section_type,
@@ -317,6 +328,7 @@ async function handleApplySectionLayout({ versionId, tabId }) {
           section.visible ?? true,
           JSON.stringify(section.config || {}),
           section.merch_binding ? JSON.stringify(section.merch_binding) : null,
+          audience,
         ]
       )
     }

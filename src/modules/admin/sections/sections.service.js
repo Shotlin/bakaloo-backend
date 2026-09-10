@@ -18,8 +18,8 @@ function broadcastSectionUpdate(tabKey) {
 }
 
 export class SectionsService {
-  async getByTabId(tabId) {
-    return repo.findByTabId(tabId)
+  async getByTabId(tabId, audience = 'B2C') {
+    return repo.findByTabId(tabId, audience)
   }
 
   async getById(id) {
@@ -84,8 +84,8 @@ export class SectionsService {
     return section
   }
 
-  async reorder(tabId, orderedIds, adminId, ip) {
-    const sections = await repo.reorder(tabId, orderedIds)
+  async reorder(tabId, orderedIds, audience, adminId, ip) {
+    const sections = await repo.reorder(tabId, orderedIds, audience)
     const tab = await repo.findTabById(tabId)
 
     await invalidateSectionCaches()
@@ -106,20 +106,49 @@ export class SectionsService {
     return duplicatedSection
   }
 
-  async saveSnapshot(tabId, adminId) {
-    const sections = await repo.findByTabId(tabId)
-    return repo.createVersion(tabId, sections, adminId)
+  /**
+   * "Copy B2C to B2B" — bootstraps a tab's B2B section list from its
+   * current B2C one, mirroring the same bulk-copy action already shipped
+   * for themes (dashboard "Copy B2C to B2B" button on the Themes list).
+   * Refuses to overwrite an existing B2B section list.
+   */
+  async copyToAudience(tabId, fromAudience, toAudience, adminId, ip) {
+    const tab = await repo.findTabById(tabId)
+    if (!tab) return null
+
+    const result = await repo.copySections(tabId, fromAudience, toAudience)
+
+    if (result.copied > 0) {
+      await invalidateSectionCaches()
+      broadcastSectionUpdate(tab.key)
+      logAdminActivity(
+        adminId,
+        'COPY_SECTIONS',
+        'section_manifest',
+        tabId,
+        null,
+        { fromAudience, toAudience, copied: result.copied },
+        ip
+      )
+    }
+
+    return result
   }
 
-  async getVersions(tabId) {
-    return repo.getVersions(tabId)
+  async saveSnapshot(tabId, audience, adminId) {
+    const sections = await repo.findByTabId(tabId, audience)
+    return repo.createVersion(tabId, sections, adminId, { audience })
+  }
+
+  async getVersions(tabId, audience = 'B2C') {
+    return repo.getVersions(tabId, audience)
   }
 
   async rollbackToVersion(tabId, versionId, adminId, ip) {
     const version = await repo.findVersionById(tabId, versionId)
     if (!version) return null
 
-    const sections = await repo.restoreSnapshot(tabId, version.snapshot)
+    const sections = await repo.restoreSnapshot(tabId, version.snapshot, version.audience)
     const tab = await repo.findTabById(tabId)
 
     await invalidateSectionCaches()
@@ -128,30 +157,31 @@ export class SectionsService {
     return sections
   }
 
-  async scheduleLayout(tabId, scheduledAt, adminId, ip) {
+  async scheduleLayout(tabId, scheduledAt, audience, adminId, ip) {
     const tab = await repo.findTabById(tabId)
     if (!tab) return null
 
-    const sections = await repo.findByTabId(tabId)
-    await repo.expireScheduledVersions(tabId)
+    const sections = await repo.findByTabId(tabId, audience)
+    await repo.expireScheduledVersions(tabId, audience)
 
     const version = await repo.createVersion(tabId, sections, adminId, {
       scheduledAt,
       status: 'scheduled',
+      audience,
     })
 
     const delay = Math.max(0, new Date(scheduledAt).getTime() - Date.now())
 
     try {
-      const existingJob = await themeQueue.getJob(`section-schedule-${tabId}`)
+      const existingJob = await themeQueue.getJob(`section-schedule-${tabId}-${audience}`)
       if (existingJob) await existingJob.remove()
     } catch {}
 
     await themeQueue.add(
       'apply-section-layout',
-      { type: 'apply-section-layout', versionId: version.id, tabId },
+      { type: 'apply-section-layout', versionId: version.id, tabId, audience },
       {
-        jobId: `section-schedule-${tabId}`,
+        jobId: `section-schedule-${tabId}-${audience}`,
         delay,
         removeOnComplete: true,
       }
@@ -161,14 +191,14 @@ export class SectionsService {
     return version
   }
 
-  async cancelSchedule(tabId, adminId, ip) {
+  async cancelSchedule(tabId, audience, adminId, ip) {
     const tab = await repo.findTabById(tabId)
     if (!tab) return null
 
-    const cancelled = await repo.expireScheduledVersions(tabId)
+    const cancelled = await repo.expireScheduledVersions(tabId, audience)
 
     try {
-      const job = await themeQueue.getJob(`section-schedule-${tabId}`)
+      const job = await themeQueue.getJob(`section-schedule-${tabId}-${audience}`)
       if (job) await job.remove()
     } catch {}
 

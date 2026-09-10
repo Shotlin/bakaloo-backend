@@ -29,8 +29,8 @@ export function getSectionCacheKey(tabId) {
   return `${SECTION_CACHE_PREFIX}:${tabId}`
 }
 
-export function getSectionPublicCacheKey(storeKey = 'zepto', tabKey = 'all') {
-  return `${SECTION_PUBLIC_CACHE_PREFIX}:${storeKey}:${tabKey}`
+export function getSectionPublicCacheKey(storeKey = 'zepto', tabKey = 'all', audience = 'B2C') {
+  return `${SECTION_PUBLIC_CACHE_PREFIX}:${storeKey}:${tabKey}:${audience}`
 }
 
 export function getTabHomeCacheKey(storeKey = 'zepto', key = 'all') {

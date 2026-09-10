@@ -20,12 +20,19 @@ export class SectionsRepository {
     return tab || null
   }
 
-  async findByTabId(tabId) {
+  /**
+   * Admin listing — exact audience match only, no B2C fallback. The admin
+   * needs to see exactly what exists for the audience they've selected
+   * (including "nothing yet") so the Section Builder's audience toggle is
+   * never ambiguous about which set they're editing. The public/mobile
+   * read path (public.controller.js) has its own separate fallback query.
+   */
+  async findByTabId(tabId, audience = 'B2C') {
     const { rows } = await query(
       `SELECT * FROM section_manifests
-       WHERE tab_id = $1
+       WHERE tab_id = $1 AND audience = $2
        ORDER BY sort_order ASC`,
-      [tabId]
+      [tabId, audience]
     )
     return rows
   }
@@ -40,11 +47,12 @@ export class SectionsRepository {
   }
 
   async create(tabId, data) {
+    const audience = data.audience || 'B2C'
     const { rows: [{ max_order }] } = await query(
       `SELECT COALESCE(MAX(sort_order), -1) AS max_order
        FROM section_manifests
-       WHERE tab_id = $1`,
-      [tabId]
+       WHERE tab_id = $1 AND audience = $2`,
+      [tabId, audience]
     )
 
     const { rows: [section] } = await query(
@@ -54,9 +62,10 @@ export class SectionsRepository {
          sort_order,
          visible,
          config,
-         merch_binding
+         merch_binding,
+         audience
        )
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
        RETURNING *`,
       [
         tabId,
@@ -65,6 +74,7 @@ export class SectionsRepository {
         data.visible ?? true,
         JSON.stringify(data.config || {}),
         data.merch_binding ? JSON.stringify(data.merch_binding) : null,
+        audience,
       ]
     )
 
@@ -128,17 +138,20 @@ export class SectionsRepository {
     try {
       await client.query('BEGIN')
       await client.query('DELETE FROM section_manifests WHERE id = $1', [id])
+      // Renumber only the same (tab_id, audience) sequence the deleted row
+      // belonged to — otherwise deleting a B2C section would also shuffle
+      // the independent B2B sort_order sequence for the same tab.
       await client.query(
         `WITH numbered AS (
            SELECT id, ROW_NUMBER() OVER (ORDER BY sort_order ASC, created_at ASC) - 1 AS new_order
            FROM section_manifests
-           WHERE tab_id = $1
+           WHERE tab_id = $1 AND audience = $2
          )
          UPDATE section_manifests sm
          SET sort_order = numbered.new_order
          FROM numbered
          WHERE sm.id = numbered.id`,
-        [section.tab_id]
+        [section.tab_id, section.audience]
       )
       await client.query('COMMIT')
     } catch (err) {
@@ -151,16 +164,20 @@ export class SectionsRepository {
     return section
   }
 
-  async reorder(tabId, orderedIds) {
+  async reorder(tabId, orderedIds, audience = 'B2C') {
     const client = await getClient()
     try {
       await client.query('BEGIN')
       for (let i = 0; i < orderedIds.length; i++) {
+        // Scoped by audience too — orderedIds always comes from an
+        // audience-filtered listing on the caller side, but this keeps the
+        // write itself from ever touching the other audience's rows even
+        // if a stale id slipped through.
         await client.query(
           `UPDATE section_manifests
            SET sort_order = $1
-           WHERE id = $2 AND tab_id = $3`,
-          [i, orderedIds[i], tabId]
+           WHERE id = $2 AND tab_id = $3 AND audience = $4`,
+          [i, orderedIds[i], tabId, audience]
         )
       }
       await client.query('COMMIT')
@@ -171,7 +188,7 @@ export class SectionsRepository {
       client.release()
     }
 
-    return this.findByTabId(tabId)
+    return this.findByTabId(tabId, audience)
   }
 
   async duplicate(id) {
@@ -181,8 +198,8 @@ export class SectionsRepository {
     const { rows: [{ max_order }] } = await query(
       `SELECT COALESCE(MAX(sort_order), -1) AS max_order
        FROM section_manifests
-       WHERE tab_id = $1`,
-      [original.tab_id]
+       WHERE tab_id = $1 AND audience = $2`,
+      [original.tab_id, original.audience]
     )
 
     const { rows: [section] } = await query(
@@ -192,9 +209,10 @@ export class SectionsRepository {
          sort_order,
          visible,
          config,
-         merch_binding
+         merch_binding,
+         audience
        )
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
        RETURNING *`,
       [
         original.tab_id,
@@ -203,10 +221,64 @@ export class SectionsRepository {
         original.visible,
         JSON.stringify(original.config || {}),
         original.merch_binding ? JSON.stringify(original.merch_binding) : null,
+        original.audience,
       ]
     )
 
     return section || null
+  }
+
+  /**
+   * Bulk-bootstrap a tab's B2B section list from its current B2C one — the
+   * Section Builder's "Copy B2C to B2B" action. Refuses to run if the
+   * target audience already has sections (the admin would need to delete
+   * them first), so this can never silently duplicate/clobber real B2B
+   * work in progress.
+   */
+  async copySections(tabId, fromAudience, toAudience) {
+    const existing = await this.findByTabId(tabId, toAudience)
+    if (existing.length > 0) {
+      return { copied: 0, alreadyHadSections: true, sections: existing }
+    }
+
+    const source = await this.findByTabId(tabId, fromAudience)
+    if (source.length === 0) {
+      return { copied: 0, alreadyHadSections: false, sections: [] }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      for (const section of source) {
+        await client.query(
+          `INSERT INTO section_manifests (
+             tab_id, section_type, sort_order, visible, config, merch_binding, audience
+           )
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
+          [
+            tabId,
+            section.section_type,
+            section.sort_order,
+            section.visible,
+            JSON.stringify(section.config || {}),
+            section.merch_binding ? JSON.stringify(section.merch_binding) : null,
+            toAudience,
+          ]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+
+    return {
+      copied: source.length,
+      alreadyHadSections: false,
+      sections: await this.findByTabId(tabId, toAudience),
+    }
   }
 
   async createVersion(tabId, snapshot, createdBy, options = {}) {
@@ -215,6 +287,7 @@ export class SectionsRepository {
       status = 'applied',
       abVariant = 'A',
       abSplitPercent = 0,
+      audience = 'B2C',
     } = options
 
     const { rows: [version] } = await query(
@@ -226,17 +299,19 @@ export class SectionsRepository {
          scheduled_at,
          status,
          ab_variant,
-         ab_split_percent
+         ab_split_percent,
+         audience
        )
        VALUES (
          $1,
-         (SELECT COALESCE(MAX(version), 0) + 1 FROM section_manifest_versions WHERE tab_id = $1),
+         (SELECT COALESCE(MAX(version), 0) + 1 FROM section_manifest_versions WHERE tab_id = $1 AND audience = $8),
          $2::jsonb,
          $3,
          $4,
          $5,
          $6,
-         $7
+         $7,
+         $8
        )
        RETURNING *`,
       [
@@ -247,13 +322,14 @@ export class SectionsRepository {
         status,
         abVariant,
         abSplitPercent,
+        audience,
       ]
     )
 
     return version || null
   }
 
-  async getVersions(tabId) {
+  async getVersions(tabId, audience = 'B2C') {
     const { rows } = await query(
       `SELECT
          id,
@@ -265,10 +341,10 @@ export class SectionsRepository {
          ab_split_percent,
          created_at
        FROM section_manifest_versions
-       WHERE tab_id = $1
+       WHERE tab_id = $1 AND audience = $2
        ORDER BY version DESC
        LIMIT 50`,
-      [tabId]
+      [tabId, audience]
     )
     return rows
   }
@@ -283,23 +359,29 @@ export class SectionsRepository {
     return version || null
   }
 
-  async expireScheduledVersions(tabId) {
+  async expireScheduledVersions(tabId, audience = 'B2C') {
     const { rows } = await query(
       `UPDATE section_manifest_versions
        SET status = 'expired'
        WHERE tab_id = $1
+         AND audience = $2
          AND status = 'scheduled'
        RETURNING *`,
-      [tabId]
+      [tabId, audience]
     )
     return rows
   }
 
-  async restoreSnapshot(tabId, snapshot) {
+  async restoreSnapshot(tabId, snapshot, audience = 'B2C') {
     const client = await getClient()
     try {
       await client.query('BEGIN')
-      await client.query('DELETE FROM section_manifests WHERE tab_id = $1', [tabId])
+      // Scoped by audience — restoring a B2C rollback must never touch
+      // that tab's independent B2B section list.
+      await client.query(
+        'DELETE FROM section_manifests WHERE tab_id = $1 AND audience = $2',
+        [tabId, audience]
+      )
 
       const orderedSnapshot = [...(snapshot || [])].sort(
         (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
@@ -313,9 +395,10 @@ export class SectionsRepository {
              sort_order,
              visible,
              config,
-             merch_binding
+             merch_binding,
+             audience
            )
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)`,
           [
             tabId,
             section.section_type,
@@ -323,6 +406,7 @@ export class SectionsRepository {
             section.visible ?? true,
             JSON.stringify(section.config || {}),
             section.merch_binding ? JSON.stringify(section.merch_binding) : null,
+            audience,
           ]
         )
       }
@@ -335,6 +419,6 @@ export class SectionsRepository {
       client.release()
     }
 
-    return this.findByTabId(tabId)
+    return this.findByTabId(tabId, audience)
   }
 }

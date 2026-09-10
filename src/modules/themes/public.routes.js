@@ -140,6 +140,7 @@ export default async function publicThemeRoutes(fastify) {
         },
       },
     },
+    preHandler: [tryAttachUser],
   }, ctrl.getSectionManifest.bind(ctrl))
 
   fastify.post('/analytics', {

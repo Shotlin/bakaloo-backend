@@ -273,8 +273,9 @@ export class PublicThemeController {
       return error('Tab key is required', 'BAD_REQUEST')
     }
 
+    const audience = resolveEffectiveAudience(request)
     const clientETag = request.headers['if-none-match']
-    const cacheKey = getSectionPublicCacheKey(storeKey, tabKey)
+    const cacheKey = getSectionPublicCacheKey(storeKey, tabKey, audience)
 
     const cached = await redis.get(cacheKey)
     if (cached) {
@@ -297,20 +298,12 @@ export class PublicThemeController {
       return error('Tab not found', 'NOT_FOUND')
     }
 
-    const { rows } = await query(
-      `SELECT
-         id,
-         section_type AS type,
-         sort_order AS "order",
-         visible,
-         config,
-         merch_binding
-       FROM section_manifests
-       WHERE tab_id = $1
-         AND visible = true
-       ORDER BY sort_order ASC`,
-      [tab.id]
-    )
+    // A B2B viewer sees that tab's B2B-specific section list when one
+    // exists; otherwise falls back to the tab's B2C sections (same
+    // reasoning as getActiveTheme/getTabManifestRows above — a B2B viewer
+    // must never see a blank home screen just because an admin hasn't
+    // built B2B-specific content for this tab yet).
+    const rows = await fetchSectionRows(tab.id, audience)
 
     // Resolve products for sections that have product_ids or category_ids in merch_binding.
     // Without this step the mobile receives only IDs and renders nothing.
@@ -506,6 +499,46 @@ async function getTabDefinition(storeKey, tabKey) {
     [storeKey, tabKey]
   )
   return tab || null
+}
+
+const SECTION_ROW_SELECT = `
+  id,
+  section_type AS type,
+  sort_order AS "order",
+  visible,
+  config,
+  merch_binding
+`
+
+/**
+ * Whole-set B2C fallback for a tab's section list — unlike the
+ * single-row `audience IN ($n,'B2C') ORDER BY (audience=$n) DESC LIMIT 1`
+ * pattern used for app_themes (one active row to pick), a tab's section
+ * list is many ordered rows, so falling back has to be all-or-nothing:
+ * if the tab has ANY B2B-specific sections, use exactly those; otherwise
+ * use the whole B2C list. Never mix rows from both audiences into one
+ * response.
+ */
+async function fetchSectionRows(tabId, audience) {
+  if (audience === 'B2B') {
+    const { rows } = await query(
+      `SELECT ${SECTION_ROW_SELECT}
+       FROM section_manifests
+       WHERE tab_id = $1 AND audience = 'B2B' AND visible = true
+       ORDER BY sort_order ASC`,
+      [tabId]
+    )
+    if (rows.length > 0) return rows
+  }
+
+  const { rows } = await query(
+    `SELECT ${SECTION_ROW_SELECT}
+     FROM section_manifests
+     WHERE tab_id = $1 AND audience = 'B2C' AND visible = true
+     ORDER BY sort_order ASC`,
+    [tabId]
+  )
+  return rows
 }
 
 async function resolveSectionProducts(config, fallbackResolver, cap) {

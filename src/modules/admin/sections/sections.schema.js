@@ -38,6 +38,13 @@ const merchBindingSchema = {
   },
 }
 
+const audienceQuerystring = {
+  type: 'object',
+  properties: {
+    audience: { type: 'string', enum: ['B2C', 'B2B'], default: 'B2C' },
+  },
+}
+
 export const tabIdSchema = {
   params: {
     type: 'object',
@@ -46,6 +53,7 @@ export const tabIdSchema = {
       tabId: { type: 'string', format: 'uuid' },
     },
   },
+  querystring: audienceQuerystring,
 }
 
 export const sectionIdSchema = {
@@ -68,6 +76,7 @@ export const createSectionSchema = {
       config: { type: 'object' },
       visible: { type: 'boolean', default: true },
       merch_binding: merchBindingSchema,
+      audience: { type: 'string', enum: ['B2C', 'B2B'], default: 'B2C' },
     },
   },
 }
@@ -91,6 +100,7 @@ export const updateMerchSchema = {
 
 export const reorderSectionsSchema = {
   params: tabIdSchema.params,
+  querystring: audienceQuerystring,
   body: {
     type: 'object',
     required: ['order'],
@@ -116,6 +126,7 @@ export const rollbackSchema = {
 
 export const scheduleSchema = {
   params: tabIdSchema.params,
+  querystring: audienceQuerystring,
   body: {
     type: 'object',
     required: ['scheduled_at'],
@@ -123,4 +134,8 @@ export const scheduleSchema = {
       scheduled_at: { type: 'string', format: 'date-time' },
     },
   },
+}
+
+export const copyToB2BSchema = {
+  params: tabIdSchema.params,
 }
