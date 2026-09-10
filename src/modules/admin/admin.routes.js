@@ -32,6 +32,8 @@ import adminThemeTabRoutes from './theme-tabs/theme-tabs.routes.js'
 import adminSectionRoutes from './sections/sections.routes.js'
 import adminLegalPagesRoutes from './legal-pages/legal-pages.routes.js'
 import adminBrandingRoutes from './branding/branding.routes.js'
+import adminBusinessAccountsRoutes from './business-accounts/business-accounts.routes.js'
+import adminLedgerRoutes from './ledger/ledger.routes.js'
 
 /**
  * Admin routes plugin
@@ -78,6 +80,8 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminDashboardRoutes, { prefix: '/dashboard' })
   fastify.register(adminOrderRoutes, { prefix: '/orders' })
   fastify.register(adminRefundRequestsRoutes, { prefix: '/refund-requests' })
+  fastify.register(adminBusinessAccountsRoutes, { prefix: '/business-accounts' })
+  fastify.register(adminLedgerRoutes, { prefix: '/ledger' })
   fastify.register(adminProductRoutes, { prefix: '/products' })
   fastify.register(adminCustomerRoutes, { prefix: '/customers' })
   fastify.register(adminAbandonedCartsRoutes, { prefix: '/abandoned-carts' })

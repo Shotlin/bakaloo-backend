@@ -74,13 +74,16 @@ export class CartService {
 
   /**
    * Get an enriched view of the cart for the API.
+   *
+   * @param {string} userId
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getCart(userId) {
+  async getCart(userId, priceMode = 'retail') {
     const cartItems = await this.repo.getCart(userId)
     if (cartItems.length === 0) {
       return this._emptyEnriched(userId)
     }
-    return this._enrichCart(userId, cartItems)
+    return this._enrichCart(userId, cartItems, priceMode)
   }
 
   // ────────────────────────────────────────────────────────
@@ -260,7 +263,7 @@ export class CartService {
    * the shop when there is exactly one available shop for the product
    * across the user's allocations. Multiple shops → CART_SHOP_REQUIRED.
    */
-  async addItem(userId, { productId = null, shopId = null, shopProductId = null, quantity }) {
+  async addItem(userId, { productId = null, shopId = null, shopProductId = null, quantity }, priceMode = 'retail') {
     const qty = Number(quantity)
     if (!Number.isInteger(qty) || qty <= 0) {
       return {
@@ -384,7 +387,7 @@ export class CartService {
     )
     await this._maybeMarkRecovered(userId)
 
-    return { success: true, cart: await this._enrichCart(userId, cartItems) }
+    return { success: true, cart: await this._enrichCart(userId, cartItems, priceMode) }
   }
 
   /**
@@ -396,7 +399,7 @@ export class CartService {
    * rejected with CART_ITEM_AMBIGUOUS so we never update sibling options
    * by accident.
    */
-  async updateItem(userId, productId, quantity, shopId = null, shopProductId = null) {
+  async updateItem(userId, productId, quantity, shopId = null, shopProductId = null, priceMode = 'retail') {
     const qty = Number(quantity)
     if (!Number.isInteger(qty) || qty <= 0) {
       return {
@@ -540,7 +543,7 @@ export class CartService {
     await this.repo.saveCart(userId, cartItems)
     await this._maybeMarkRecovered(userId)
 
-    return { success: true, cart: await this._enrichCart(userId, cartItems) }
+    return { success: true, cart: await this._enrichCart(userId, cartItems, priceMode) }
   }
 
   /**
@@ -548,7 +551,7 @@ export class CartService {
    * by the new optional `shopProductId`. Ambiguous matches are rejected
    * with CART_ITEM_AMBIGUOUS so sibling options are never deleted.
    */
-  async removeItem(userId, productId, shopId = null, shopProductId = null) {
+  async removeItem(userId, productId, shopId = null, shopProductId = null, priceMode = 'retail') {
     let resolvedProductId = productId
     let resolvedShopId = shopId
     if (shopProductId) {
@@ -608,7 +611,7 @@ export class CartService {
 
     await this.repo.saveCart(userId, filtered)
     await this._maybeMarkRecovered(userId)
-    return { success: true, cart: await this._enrichCart(userId, filtered) }
+    return { success: true, cart: await this._enrichCart(userId, filtered, priceMode) }
   }
 
   /**
@@ -634,7 +637,7 @@ export class CartService {
    * The cart in Redis is rewritten with only the validated items so a
    * subsequent retry by the customer reflects the current reality.
    */
-  async validateCart(userId) {
+  async validateCart(userId, priceMode = 'retail') {
     const cartItems = await this.repo.getCart(userId)
     if (cartItems.length === 0) {
       return {
@@ -692,8 +695,16 @@ export class CartService {
       // shop_products.price (the schema allows it) must never silently
       // fall back to the master catalog price in _effectivePrice() below;
       // that's exactly the kind of "price shown/charged doesn't match the
-      // shop's real price" bug this treats as unavailable instead.
-      if (sp.sp_price === null || sp.sp_price === undefined) {
+      // shop's real price" bug this treats as unavailable instead. Wholesale
+      // is the one exception, by design (see buildShopPriceJoin in
+      // products.repository.js): it's allowed to fall back to the shop's
+      // own retail price when no wholesale price is configured, so the
+      // hard-fail only fires there if EVERY tier (shop wholesale, master
+      // wholesale, shop retail) is unset.
+      const priceUnresolvable = priceMode === 'wholesale'
+        ? sp.sp_wholesale_price == null && sp.product_wholesale_price == null && sp.sp_price == null
+        : sp.sp_price == null
+      if (priceUnresolvable) {
         failed.push({
           productId: item.productId,
           shopId: item.shopId,
@@ -750,11 +761,11 @@ export class CartService {
         continue
       }
 
-      const effective = this._effectivePrice(sp)
+      const effective = this._effectivePrice(sp, priceMode)
       const lineTotal = parseFloat((effective * item.quantity).toFixed(2))
       subtotal += lineTotal
 
-      validItems.push(this._formatLine(sp, item, effective, lineTotal))
+      validItems.push(this._formatLine(sp, item, effective, lineTotal, priceMode))
     }
 
     // Persist validated items back to Redis (drops failed entries so the
@@ -806,8 +817,11 @@ export class CartService {
     }
   }
 
-  /** Enrich raw cart items with current product data for display. */
-  async _enrichCart(userId, cartItems) {
+  /**
+   * Enrich raw cart items with current product data for display.
+   * @param {'retail'|'wholesale'} [priceMode='retail']
+   */
+  async _enrichCart(userId, cartItems, priceMode = 'retail') {
     if (cartItems.length === 0) return this._emptyEnriched(userId)
 
     const [rows, tipAmount, deliveryInstructions] = await Promise.all([
@@ -829,11 +843,15 @@ export class CartService {
       if (sp.shop_active !== true) continue
       if (sp.product_active !== true) continue
       // See the matching check in validateCart() above — a shop with no
-      // price set for this listing must never display the master price.
-      if (sp.sp_price === null || sp.sp_price === undefined) continue
+      // price set for this listing must never display the master price
+      // (wholesale is the one exception; see validateCart's comment).
+      const priceUnresolvable = priceMode === 'wholesale'
+        ? sp.sp_wholesale_price == null && sp.product_wholesale_price == null && sp.sp_price == null
+        : sp.sp_price == null
+      if (priceUnresolvable) continue
 
-      const effective = this._effectivePrice(sp)
-      const listPrice = this._listPrice(sp)
+      const effective = this._effectivePrice(sp, priceMode)
+      const listPrice = this._listPrice(sp, priceMode)
       const lineTotal = parseFloat((effective * item.quantity).toFixed(2))
 
       // A line can go out of stock (or get manually delisted) after it was
@@ -851,7 +869,7 @@ export class CartService {
         totalMrp += listPrice * item.quantity
       }
 
-      items.push(this._formatLine(sp, item, effective, lineTotal))
+      items.push(this._formatLine(sp, item, effective, lineTotal, priceMode))
     }
 
     // Only fulfillable items count toward per-shop fee computation and
@@ -894,7 +912,20 @@ export class CartService {
     }
   }
 
-  _effectivePrice(sp) {
+  /**
+   * @param {object} sp - a shop_products+products joined row
+   * @param {'retail'|'wholesale'} [priceMode='retail']
+   */
+  _effectivePrice(sp, priceMode = 'retail') {
+    if (priceMode === 'wholesale') {
+      // Wholesale has no separate "sale" tier (matches buildShopPriceJoin's
+      // wholesale COALESCE in products.repository.js) — bulk pricing is
+      // already the negotiated rate. Falls all the way back to the shop's
+      // regular retail price when no wholesale price is configured
+      // anywhere, same fallback chain as product browsing.
+      const price = this._listPrice(sp, priceMode)
+      return price
+    }
     // shop-level override first, falling back to master catalog
     const sale = sp.sp_sale_price ?? sp.product_sale_price
     const list = sp.sp_price ?? sp.product_price
@@ -903,15 +934,22 @@ export class CartService {
     return Number.isFinite(num) ? num : 0
   }
 
-  _listPrice(sp) {
-    const list = sp.sp_price ?? sp.product_price
+  /**
+   * @param {object} sp
+   * @param {'retail'|'wholesale'} [priceMode='retail']
+   */
+  _listPrice(sp, priceMode = 'retail') {
+    const list = priceMode === 'wholesale'
+      ? sp.sp_wholesale_price ?? sp.product_wholesale_price ?? sp.sp_price ?? sp.product_price
+      : sp.sp_price ?? sp.product_price
     const num = Number(list)
     return Number.isFinite(num) ? num : 0
   }
 
-  _formatLine(sp, item, effective, lineTotal) {
-    const listPrice = this._listPrice(sp)
-    const sale = sp.sp_sale_price ?? sp.product_sale_price
+  _formatLine(sp, item, effective, lineTotal, priceMode = 'retail') {
+    const listPrice = this._listPrice(sp, priceMode)
+    // No separate "sale" tier in wholesale mode — see _effectivePrice().
+    const sale = priceMode === 'wholesale' ? null : sp.sp_sale_price ?? sp.product_sale_price
     const salePrice = sale !== null && sale !== undefined ? Number(sale) : null
     const effectivePrice = Number(effective) || 0
 

@@ -8,6 +8,7 @@ import { PaymentsService } from '../payments/payments.service.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
+import { generateGstInvoicePDF } from '../../utils/gstInvoiceGenerator.js'
 import { getActivePickupToken } from '../../utils/pickupTokens.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
@@ -35,6 +36,9 @@ import { CashbackService } from '../cashback/cashback.service.js'
 import { SpinWheelService } from '../spin-wheel/spin-wheel.service.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
+import { LedgerService } from '../ledger/ledger.service.js'
+import { BusinessAccountsRepository } from '../business-accounts/business-accounts.repository.js'
+import { UsersRepository } from '../users/users.repository.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
 import { PaymentOffersService } from '../payment-offers/payment-offers.service.js'
 import { PurchaseLimitsService } from '../purchase-limits/purchase-limits.service.js'
@@ -142,6 +146,17 @@ export class OrdersService {
     this.walletRepo = options.walletRepository || new WalletRepository()
     this.walletService =
       options.walletService || new WalletService(this.walletRepo, fastify)
+    // LEDGER payment method — B2B credit line, gated in
+    // _checkPaymentMethodAllowed() and drawn via LedgerService#payFromLedger
+    // (the same two-step create-PENDING-then-pay shape as ONLINE/legacy-WALLET).
+    this.ledgerService = options.ledgerService || new LedgerService()
+    // GST invoicing snapshot at order-placement time — see placeOrder()'s
+    // buyerGstin/buyerCompanyName block.
+    this.businessAccountsRepo =
+      options.businessAccountsRepository || new BusinessAccountsRepository()
+    // Used only by getGstInvoice() to attach the customer's name/phone —
+    // neither is a column on `orders` itself.
+    this.usersRepo = options.usersRepository || new UsersRepository()
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService()
     this.paymentOffersService =
@@ -182,7 +197,7 @@ export class OrdersService {
    * a single coupon code across multiple per-shop totals would require
    * platform-level coupon redistribution rules that are out of scope.
    */
-  async placeOrder(userId, body) {
+  async placeOrder(userId, body, priceMode = 'retail') {
     const {
       addressId,
       paymentMethod,
@@ -274,8 +289,14 @@ export class OrdersService {
     }
 
     // 1. Validate cart (re-checks allocations, shop active, stock,
-    //    max_order_qty per Req 12.3/12.7)
-    const cartResult = await this.cartService.validateCart(userId)
+    //    max_order_qty per Req 12.3/12.7). priceMode flows through to every
+    //    item's price/salePrice/lineTotal (cart.service.js#_formatLine) —
+    //    OrderSplitterService trusts those fields as-is (computeShopFees
+    //    sums item.lineTotal, orderItems snapshots item.salePrice/price),
+    //    so this one call is what makes the entire downstream fee/order
+    //    creation pipeline wholesale-correct for an approved, B2B-enabled
+    //    customer with no other change needed there.
+    const cartResult = await this.cartService.validateCart(userId, priceMode)
     if (!cartResult.valid || cartResult.items.length === 0) {
       const failed = cartResult.failed && cartResult.failed.length > 0
         ? cartResult.failed
@@ -292,6 +313,24 @@ export class OrdersService {
     }
 
     const { items: cartItems, subtotal, groupedByShop } = cartResult
+
+    // GST invoicing snapshot (src/utils/gstInvoiceGenerator.js) — captured
+    // independent of priceMode: a business-account holder's GSTIN is worth
+    // stamping on the invoice regardless of which price tier this
+    // particular order happened to use. Point-in-time snapshot, not a live
+    // re-read at invoice-download time — the account's GSTIN or status can
+    // change later.
+    let buyerGstin = null
+    let buyerCompanyName = null
+    try {
+      const businessAccount = await this.businessAccountsRepo.findByUserId(userId)
+      if (businessAccount?.status === 'APPROVED') {
+        buyerGstin = businessAccount.gst_number
+        buyerCompanyName = businessAccount.company_name
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, userId }, 'Business account lookup for GST invoice snapshot failed (non-critical)')
+    }
 
     // 2. Validate delivery address
     const address = await this.addressRepo.findByIdAndUser(addressId, userId)
@@ -349,7 +388,8 @@ export class OrdersService {
     const paymentGateError = await this._checkPaymentMethodAllowed(
       userId,
       addressId,
-      normalizedPaymentMethod
+      normalizedPaymentMethod,
+      priceMode
     )
     if (paymentGateError) {
       return paymentGateError
@@ -593,6 +633,8 @@ export class OrdersService {
           couponCode: appliedCouponCode,
           deliveryNotes: deliveryNotes || null,
           deliveryInstructions: resolvedInstructions,
+          buyerGstin,
+          buyerCompanyName,
           // Delivery slot
           deliveryMode: resolvedDeliveryMode,
           scheduledDeliveryAt: resolvedDeliveryMode === 'SCHEDULED' ? (scheduledDeliveryAt || scheduledSlotStart) : null,
@@ -608,8 +650,10 @@ export class OrdersService {
       // docstring) — no new multi-shop-splitting complexity introduced.
       // Skipped entirely for the legacy paymentMethod:'WALLET' (old
       // published app), which keeps using its own full-payment
-      // payFromWallet() flow untouched.
-      if (useWallet && groupedByShop.size === 1 && normalizedPaymentMethod !== 'WALLET' && createdOrders.length === 1) {
+      // payFromWallet() flow untouched — and for LEDGER, whose own
+      // full-payment payFromLedger() flow draws the order's entire
+      // totalAmount and has no concept of a partial wallet offset on top.
+      if (useWallet && groupedByShop.size === 1 && normalizedPaymentMethod !== 'WALLET' && normalizedPaymentMethod !== 'LEDGER' && createdOrders.length === 1) {
         const orderId = createdOrders[0].id
         const orderTotal = createdOrders[0].totalAmount
         // FOR UPDATE lock taken here, inside this same transaction — the
@@ -1035,7 +1079,7 @@ export class OrdersService {
    * (matching every other early-return in `placeOrder`) when the requested
    * method isn't allowed, or `null` when it's fine to proceed.
    */
-  async _checkPaymentMethodAllowed(userId, addressId, normalizedPaymentMethod) {
+  async _checkPaymentMethodAllowed(userId, addressId, normalizedPaymentMethod, priceMode = 'retail') {
     const config = await this.paymentSettingsService.getConfig()
 
     if (normalizedPaymentMethod === 'ONLINE') {
@@ -1060,6 +1104,22 @@ export class OrdersService {
       return null
     }
 
+    // LEDGER — B2B credit line. Not gated by fee_settings (it's not a
+    // platform-wide toggle like COD/Razorpay/wallet); gated on the
+    // customer actually having an ACTIVE ledger account, mirroring
+    // bulk-orders.service.js#create's identical LEDGER_NOT_AVAILABLE check.
+    if (normalizedPaymentMethod === 'LEDGER') {
+      const ledgerAccount = await this.ledgerService.getMine(userId)
+      if (!ledgerAccount || ledgerAccount.status !== 'ACTIVE') {
+        return {
+          success: false,
+          message: 'Ledger payment requires an active B2B credit line',
+          code: 'LEDGER_NOT_AVAILABLE',
+        }
+      }
+      return null
+    }
+
     // COD (default)
     if (!config.codEnabled) {
       return {
@@ -1069,7 +1129,7 @@ export class OrdersService {
       }
     }
 
-    const { totalPayable } = await this.billSummaryService.getBillSummary(userId, addressId)
+    const { totalPayable } = await this.billSummaryService.getBillSummary(userId, addressId, { priceMode })
     if (totalPayable < config.codMinOrderAmount) {
       return {
         success: false,
@@ -1507,6 +1567,40 @@ export class OrdersService {
       ? { assignmentId: rawToken.delivery_assignment_id, token: rawToken.token, version: rawToken.version }
       : null
     const buffer = await generateInvoicePDF({ ...order, timeline, pickup_token: pickupToken })
+    return {
+      success: true,
+      buffer,
+      orderNumber: order.orderNumber,
+    }
+  }
+
+  /**
+   * Generate the A4 GST tax invoice PDF for an order — separate document
+   * from getInvoice() above (an 80mm POS receipt). Same ownership/paid
+   * gating; additionally attaches the customer's name/phone (not columns
+   * on `orders` itself, so getInvoice()'s receipt has always rendered
+   * those as "-" for the customer-facing route — a proper tax invoice
+   * needs them, so this method does the one-off users lookup getInvoice()
+   * never needed).
+   */
+  async getGstInvoice(userId, orderId) {
+    const order = await this.repo.findById(orderId)
+    if (!order) {
+      return { success: false, statusCode: 404, message: 'Order not found' }
+    }
+    if (order.userId !== userId) {
+      return { success: false, statusCode: 403, message: 'Access denied' }
+    }
+    if (order.paymentStatus !== 'PAID') {
+      return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
+    }
+
+    const customer = await this.usersRepo.findById(userId)
+    const buffer = await generateGstInvoicePDF({
+      ...order,
+      customerName: customer?.name || null,
+      customerPhone: customer?.phone || null,
+    })
     return {
       success: true,
       buffer,

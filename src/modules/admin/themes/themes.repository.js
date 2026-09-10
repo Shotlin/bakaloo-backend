@@ -32,11 +32,15 @@ export class ThemesRepository {
     return theme || null
   }
 
-  async findActive() {
+  async findActive(audience = 'B2C') {
+    // Falls back to the B2C active theme when no B2B one exists yet —
+    // see public.controller.js#getActiveTheme's identical reasoning.
     const { rows: [theme] } = await query(
       `${THEME_SELECT}
-       WHERE theme.is_active = true
-       LIMIT 1`
+       WHERE theme.is_active = true AND theme.audience IN ($1, 'B2C')
+       ORDER BY (theme.audience = $1) DESC
+       LIMIT 1`,
+      [audience]
     )
     return theme || null
   }
@@ -103,9 +107,10 @@ export class ThemesRepository {
          status,
          ab_variant,
          ab_split_percent,
+         audience,
          etag
        )
-       VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
         data.name,
@@ -118,6 +123,7 @@ export class ThemesRepository {
         data.status || 'draft',
         data.ab_variant || 'A',
         data.ab_split_percent ?? 100,
+        data.audience || 'B2C',
         etag,
       ]
     )
@@ -199,7 +205,7 @@ export class ThemesRepository {
       params.push(tabMeta?.sort_order ?? 0)
     }
 
-    for (const col of ['tab_key', 'tab_label', 'tab_icon_url', 'status', 'ab_variant']) {
+    for (const col of ['tab_key', 'tab_label', 'tab_icon_url', 'status', 'ab_variant', 'audience']) {
       if (data[col] !== undefined) {
         sets.push(`${col} = $${idx++}`)
         params.push(data[col])
@@ -255,14 +261,19 @@ export class ThemesRepository {
       }
 
       if (existing.tab_id) {
+        // Scoped by audience too — a B2C and a B2B theme can now both be
+        // 'active' for the same (tab_id, ab_variant) at once (see
+        // idx_one_active_theme_per_audience, migration 123); activating
+        // one must never demote the other audience's active sibling.
         await client.query(
           `UPDATE app_themes
            SET status = 'draft', updated_at = NOW()
            WHERE tab_id = $1
              AND ab_variant = $2
-             AND id <> $3
+             AND audience = $3
+             AND id <> $4
              AND status = 'active'`,
-          [existing.tab_id, existing.ab_variant, id]
+          [existing.tab_id, existing.ab_variant, existing.audience, id]
         )
       }
 
@@ -272,8 +283,11 @@ export class ThemesRepository {
         existing.store_key === 'zepto'
 
       if (shouldUpdateActiveFlag) {
+        // Legacy singleton is now one-per-audience (migration 123) — only
+        // demote the same audience's previously-active legacy theme.
         await client.query(
-          'UPDATE app_themes SET is_active = false, updated_at = NOW() WHERE is_active = true'
+          'UPDATE app_themes SET is_active = false, updated_at = NOW() WHERE is_active = true AND audience = $1',
+          [existing.audience]
         )
       }
 

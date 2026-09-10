@@ -2,7 +2,7 @@ import { query, getClient } from '../../../config/database.js'
 import { revokeOrderPickupTokens } from '../../../utils/pickupTokens.js'
 
 export class AdminOrdersRepository {
-  async findAll({ offset, limit, status, paymentMethod, paymentStatus, search, startDate, endDate, deliveryType, needsPaymentReview, recoveredFromFailed, riderId, minAmount, maxAmount, area }) {
+  async findAll({ offset, limit, status, paymentMethod, paymentStatus, search, startDate, endDate, deliveryType, needsPaymentReview, recoveredFromFailed, riderId, minAmount, maxAmount, area, isB2B }) {
     // needsPaymentReview/recoveredFromFailed both key off payments.metadata,
     // so they share one join — kept out of the base query (not a LEFT JOIN)
     // so it costs nothing for the normal order list, and only applies when
@@ -62,6 +62,12 @@ export class AdminOrdersRepository {
       params.push(`%${area}%`)
       sql += ` AND (o.delivery_address->>'pincode' ILIKE $${idx} OR o.delivery_address->>'city' ILIKE $${idx})`
       idx++
+    }
+    if (isB2B) {
+      // Orders snapshotted a buyer GSTIN at checkout only when the
+      // customer had an APPROVED business account at order time — the B2B
+      // Orders dashboard page's filter.
+      sql += ` AND o.buyer_gstin IS NOT NULL`
     }
 
     const countSql = (needsPaymentsJoin

@@ -74,6 +74,20 @@ export default async function ordersRoutes(fastify) {
     preHandler: [fastify.authenticate],
   }, controller.getInvoice.bind(controller))
 
+  // GET /:id/tax-invoice — Download A4 GST tax invoice as PDF
+  fastify.get('/:id/tax-invoice', {
+    schema: {
+      tags: ['Orders'],
+      summary: 'Download A4 GST tax invoice as PDF',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } },
+      },
+    },
+    preHandler: [fastify.authenticate],
+  }, controller.getGstInvoice.bind(controller))
+
   // ─── Admin routes ───────────────────────────────────────
 
   // GET /admin/all — List all orders [ADMIN]

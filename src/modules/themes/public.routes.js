@@ -3,7 +3,29 @@ import { PublicThemeController } from './public.controller.js'
 const ctrl = new PublicThemeController()
 
 export default async function publicThemeRoutes(fastify) {
-  // NO auth hook — this is a public endpoint
+  // Best-effort JWT verification: if a token is present and valid,
+  // request.auth.b2b gets populated (see auth.plugin.js) so
+  // resolveEffectiveAudience() can tell a logged-in B2B customer from
+  // everyone else. Never rejects — these endpoints stay public/anonymous
+  // when no token is present. Same pattern as products.routes.js.
+  const tryAttachUser = async (request) => {
+    if (typeof fastify.optionalAuth === 'function') {
+      try {
+        await fastify.optionalAuth(request)
+      } catch {
+        /* anonymous fallback */
+      }
+      return
+    }
+    try {
+      await request.jwtVerify()
+    } catch {
+      /* anonymous fallback */
+    }
+  }
+
+  // NO required-auth hook — these stay public endpoints; tryAttachUser
+  // above is best-effort and never rejects.
   fastify.get('/active', {
     schema: {
       tags: ['Theme'],
@@ -24,6 +46,7 @@ export default async function publicThemeRoutes(fastify) {
         },
       },
     },
+    preHandler: [tryAttachUser],
   }, ctrl.getActiveTheme.bind(ctrl))
 
   fastify.get('/tabs', {
@@ -50,6 +73,7 @@ export default async function publicThemeRoutes(fastify) {
         },
       },
     },
+    preHandler: [tryAttachUser],
   }, ctrl.getTabThemes.bind(ctrl))
 
   fastify.get('/tabs/:key/home', {

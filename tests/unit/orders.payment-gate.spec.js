@@ -80,7 +80,7 @@ describe('OrdersService._checkPaymentMethodAllowed', () => {
       expect.objectContaining({ success: false, code: 'COD_BELOW_MIN' })
     )
     expect(result.message).toContain('200')
-    expect(billSummaryService.getBillSummary).toHaveBeenCalledWith(USER_ID, ADDRESS_ID)
+    expect(billSummaryService.getBillSummary).toHaveBeenCalledWith(USER_ID, ADDRESS_ID, { priceMode: 'retail' })
   })
 
   it('rejects COD when the bill is above the configured maximum', async () => {

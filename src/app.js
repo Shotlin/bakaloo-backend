@@ -373,6 +373,18 @@ export const buildApp = async () => {
     prefix: '/api/v1/bulk-orders',
   })
 
+  // Business Accounts — customer-facing B2B application/status/toggle
+  // (admin approve/reject lives under /api/v1/admin/business-accounts)
+  await app.register(import('./modules/business-accounts/business-accounts.routes.js'), {
+    prefix: '/api/v1/business-accounts',
+  })
+
+  // Ledger — customer-facing B2B credit-line balance/transactions
+  // (admin setup/limits/status lives under /api/v1/admin/ledger)
+  await app.register(import('./modules/ledger/ledger.routes.js'), {
+    prefix: '/api/v1/ledger',
+  })
+
   // Scheduled Orders — customer-side future / recurring orders (task 10.2)
   // (Worker that fires the orders at scheduled_for lives in task 10.3.)
   await app.register(

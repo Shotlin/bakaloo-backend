@@ -527,6 +527,10 @@ export class OrderSplitterService {
           // survives later config changes (same principle as scheduledSlotLabel).
           quickDeliverySelected: fees.quickDeliverySelected || false,
           quickDeliverySurchargeAmount: fees.quickDeliverySurchargeAmount || 0,
+          // GST invoicing (src/utils/gstInvoiceGenerator.js) — point-in-time
+          // snapshot of the buyer's business account, not a live re-read.
+          buyerGstin: checkoutMeta.buyerGstin || null,
+          buyerCompanyName: checkoutMeta.buyerCompanyName || null,
         },
         orderItems
       )

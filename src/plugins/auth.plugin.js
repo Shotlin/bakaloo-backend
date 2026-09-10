@@ -59,72 +59,107 @@ async function authPlugin(fastify) {
    * @see Requirements: R20.8
    * @see Design: §5.5
    */
+  /**
+   * Shared by `authenticate` and `optionalAuth`: verify the JWT, fetch live
+   * account state (blocked / session-version / B2B business-account
+   * status), and populate `request.auth.b2b`. Throws a tagged error
+   * ({ httpStatus, code, message }) on the two known rejection cases;
+   * `request.jwtVerify()` itself throws an untagged error on a missing,
+   * malformed, or expired token. Callers decide how to respond —
+   * `authenticate` replies with the failure, `optionalAuth` lets its
+   * caller's own try/catch swallow it and proceed anonymously.
+   *
+   * The LEFT JOIN to business_accounts is new (B2B feature) — everything
+   * else here is byte-for-byte the same gates `authenticate` always had.
+   */
+  async function attachAuthContext(request) {
+    await request.jwtVerify()
+
+    // Single PK lookup fetches both existing gates plus live B2B status in
+    // one round-trip.
+    const { rows } = await query(
+      `SELECT u.is_blocked, u.session_version, ba.status AS b2b_status, ba.b2b_enabled
+         FROM users u
+         LEFT JOIN business_accounts ba ON ba.user_id = u.id
+        WHERE u.id = $1 LIMIT 1`,
+      [request.user.id]
+    )
+
+    // Daily-active-customer stamp — fire-and-forget (never awaited) and
+    // throttled at the SQL level (skip if stamped within the last 10
+    // minutes) so this doesn't turn into a write on every single
+    // authenticated request platform-wide. Wrapped in a synchronous
+    // try/catch (not just a trailing .catch()) because `query()` isn't
+    // guaranteed to return a thenable in every context this decorator
+    // runs in — this must never affect the auth decision or add latency
+    // to the request it's riding on.
+    try {
+      query(
+        `UPDATE users SET last_active_at = NOW()
+         WHERE id = $1 AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL '10 minutes')`,
+        [request.user.id]
+      ).catch((err) => {
+        logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
+      })
+    } catch (err) {
+      logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
+    }
+
+    // ── 1. Blocked-account gate ─────────────────────────────────
+    if (rows.length > 0 && rows[0].is_blocked) {
+      throw Object.assign(new Error('Account is blocked. Contact support.'), {
+        httpStatus: 403,
+        code: 'ACCOUNT_BLOCKED',
+      })
+    }
+
+    // ── 2. session_version gate (R20.8, design §5.5) ────────────
+    // The JWT claim is populated by login / select-shop /
+    // change-password. A row miss (deleted user) plus a present
+    // claim is treated as an invalidated session for symmetry with
+    // the row-vs-claim mismatch path; downstream guards already
+    // assume `request.user.id` resolves to a live row.
+    const jwtSessionVersion = request.user.session_version
+    if (jwtSessionVersion === undefined || jwtSessionVersion === null) {
+      if (env.STRICT_SESSION_VERSION_CHECK) {
+        throw Object.assign(new Error('Session is no longer valid'), {
+          httpStatus: 401,
+          code: ERROR_CODES.SESSION_INVALID,
+        })
+      }
+      // Non-strict mode: legacy token without the claim — accept.
+    } else {
+      const rowSessionVersion = rows[0]?.session_version
+      if (rowSessionVersion !== jwtSessionVersion) {
+        throw Object.assign(new Error('Session is no longer valid'), {
+          httpStatus: 401,
+          code: ERROR_CODES.SESSION_INVALID,
+        })
+      }
+    }
+
+    // request.auth.b2b is null when the account has never applied for a
+    // business account at all — resolveEffectivePriceMode/resolveEffectiveAudience
+    // treat that the same as PENDING/REJECTED (never grants B2B pricing/theme).
+    request.auth = {
+      ...(request.auth || {}),
+      b2b: rows[0]?.b2b_status
+        ? { status: rows[0].b2b_status, enabled: !!rows[0].b2b_enabled }
+        : null,
+    }
+  }
+
   fastify.decorate('authenticate', async function (request, reply) {
     try {
-      await request.jwtVerify()
-
-      // Single PK lookup fetches both gates in one round-trip.
-      const { rows } = await query(
-        'SELECT is_blocked, session_version FROM users WHERE id = $1 LIMIT 1',
-        [request.user.id]
-      )
-
-      // Daily-active-customer stamp — fire-and-forget (never awaited) and
-      // throttled at the SQL level (skip if stamped within the last 10
-      // minutes) so this doesn't turn into a write on every single
-      // authenticated request platform-wide. Wrapped in a synchronous
-      // try/catch (not just a trailing .catch()) because `query()` isn't
-      // guaranteed to return a thenable in every context this decorator
-      // runs in — this must never affect the auth decision or add latency
-      // to the request it's riding on.
-      try {
-        query(
-          `UPDATE users SET last_active_at = NOW()
-           WHERE id = $1 AND (last_active_at IS NULL OR last_active_at < NOW() - INTERVAL '10 minutes')`,
-          [request.user.id]
-        ).catch((err) => {
-          logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
-        })
-      } catch (err) {
-        logger.warn({ err: err.message, userId: request.user.id }, 'last_active_at stamp failed (non-critical)')
-      }
-
-      // ── 1. Blocked-account gate ─────────────────────────────────
-      if (rows.length > 0 && rows[0].is_blocked) {
-        return reply.code(403).send({
-          success: false,
-          message: 'Account is blocked. Contact support.',
-          code: 'ACCOUNT_BLOCKED',
-        })
-      }
-
-      // ── 2. session_version gate (R20.8, design §5.5) ────────────
-      // The JWT claim is populated by login / select-shop /
-      // change-password. A row miss (deleted user) plus a present
-      // claim is treated as an invalidated session for symmetry with
-      // the row-vs-claim mismatch path; downstream guards already
-      // assume `request.user.id` resolves to a live row.
-      const jwtSessionVersion = request.user.session_version
-      if (jwtSessionVersion === undefined || jwtSessionVersion === null) {
-        if (env.STRICT_SESSION_VERSION_CHECK) {
-          return reply.code(401).send({
-            success: false,
-            message: 'Session is no longer valid',
-            code: ERROR_CODES.SESSION_INVALID,
-          })
-        }
-        // Non-strict mode: legacy token without the claim — accept.
-      } else {
-        const rowSessionVersion = rows[0]?.session_version
-        if (rowSessionVersion !== jwtSessionVersion) {
-          return reply.code(401).send({
-            success: false,
-            message: 'Session is no longer valid',
-            code: ERROR_CODES.SESSION_INVALID,
-          })
-        }
-      }
+      await attachAuthContext(request)
     } catch (err) {
+      if (err.httpStatus) {
+        return reply.code(err.httpStatus).send({
+          success: false,
+          message: err.message,
+          code: err.code,
+        })
+      }
       // `err.name` distinguishes TokenExpiredError / JsonWebTokenError /
       // NotBeforeError from unrelated failures (e.g. the DB lookup above
       // throwing). Logged at warn so production auth failures are
@@ -139,6 +174,26 @@ async function authPlugin(fastify) {
         code: 'UNAUTHORIZED',
       })
     }
+  })
+
+  /**
+   * preHandler: best-effort auth for public/soft-auth routes (product
+   * listing, categories, payment-offers, and anywhere else that wants to
+   * personalize for a logged-in customer without requiring login). Runs
+   * the exact same live checks as `authenticate` — a blocked account or a
+   * stale session is never treated as verified here either — but never
+   * sends a reply of its own; on any failure request.user/.auth are simply
+   * left unset and the caller's own try/catch falls back to anonymous.
+   *
+   * Previously referenced defensively in several route files
+   * (`typeof fastify.optionalAuth === 'function'`) but never actually
+   * decorated — this was a real gap: those routes silently fell back to a
+   * bare `request.jwtVerify()` with no `is_blocked`/`session_version`
+   * check at all, and (before this feature) no way to know a caller's
+   * verified B2B status on a soft-auth route either.
+   */
+  fastify.decorate('optionalAuth', async function (request) {
+    await attachAuthContext(request)
   })
 
   /**

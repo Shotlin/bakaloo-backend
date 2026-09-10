@@ -4,6 +4,7 @@ import {
   settlementQueue,
   payoutQueue,
   addressPurgeQueue,
+  ledgerBillingQueue,
   closeBullMQ,
   startNotificationWorker,
   startOrderWorker,
@@ -16,6 +17,7 @@ import {
   startStockNotificationsWorker,
   startReportPrecomputeWorker,
   startAddressPurgeWorker,
+  startLedgerBillingWorker,
 } from '../config/bullmq.js'
 
 export async function startWorkerRuntime() {
@@ -55,6 +57,10 @@ export async function startWorkerRuntime() {
     '../workers/address-purge.worker.js'
   )
 
+  const { createLedgerBillingProcessor, scheduleLedgerBillingCron } = await import(
+    '../workers/ledger-billing.worker.js'
+  )
+
   const { startEventLoopMonitor } = await import(
     '../utils/event-loop-monitor.js'
   )
@@ -83,6 +89,9 @@ export async function startWorkerRuntime() {
   // Address-purge worker — daily job that hard-deletes soft-deleted
   // addresses once their security/audit retention window has elapsed.
   startAddressPurgeWorker(createAddressPurgeProcessor())
+  // Ledger-billing worker — daily B2B credit-ledger cycle open + overdue
+  // sweep (see modules/ledger).
+  startLedgerBillingWorker(createLedgerBillingProcessor())
 
   // Event-loop blocking detector (task 13.6) — logs warning when
   // the event loop is blocked for >100ms.
@@ -112,6 +121,15 @@ export async function startWorkerRuntime() {
     logger.warn(
       { err: err.message },
       'Address-purge daily cron registration failed'
+    )
+  }
+
+  try {
+    await scheduleLedgerBillingCron(ledgerBillingQueue)
+  } catch (err) {
+    logger.warn(
+      { err: err.message },
+      'Ledger-billing daily cron registration failed'
     )
   }
 

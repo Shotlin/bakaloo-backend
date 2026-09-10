@@ -283,7 +283,7 @@ describe('ProductsService.getById/getBySlug — customer scoping', () => {
     const svc = new ProductsService(repo, { allocationService: allocation })
     const result = await svc.getById(PRODUCT_ID, { userId: CUSTOMER_ID })
 
-    expect(repo.findById).toHaveBeenCalledWith(PRODUCT_ID, [SHOP_A])
+    expect(repo.findById).toHaveBeenCalledWith(PRODUCT_ID, [SHOP_A], 'retail')
     expect(result.id).toBe(PRODUCT_ID)
   })
 
@@ -306,7 +306,7 @@ describe('ProductsService.getById/getBySlug — customer scoping', () => {
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getById(PRODUCT_ID, null)
 
-    expect(repo.findById).toHaveBeenCalledWith(PRODUCT_ID, null)
+    expect(repo.findById).toHaveBeenCalledWith(PRODUCT_ID, null, 'retail')
   })
 
   it('returns null from getBySlug when product not found in allocated shops', async () => {
@@ -317,7 +317,7 @@ describe('ProductsService.getById/getBySlug — customer scoping', () => {
     const svc = new ProductsService(repo, { allocationService: allocation })
     const result = await svc.getBySlug('demo-product', { userId: CUSTOMER_ID })
 
-    expect(repo.findBySlug).toHaveBeenCalledWith('demo-product', [SHOP_A])
+    expect(repo.findBySlug).toHaveBeenCalledWith('demo-product', [SHOP_A], 'retail')
     expect(result).toBeNull()
   })
 })
@@ -335,7 +335,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getFeatured({ userId: CUSTOMER_ID })
 
-    expect(repo.findFeatured).toHaveBeenCalledWith(20, [SHOP_A])
+    expect(repo.findFeatured).toHaveBeenCalledWith(20, [SHOP_A], 'retail')
   })
 
   it('forwards allocated_shop_ids to getPriceDrops', async () => {
@@ -346,7 +346,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getPriceDrops(10, { userId: CUSTOMER_ID })
 
-    expect(repo.getPriceDrops).toHaveBeenCalledWith(10, [SHOP_A])
+    expect(repo.getPriceDrops).toHaveBeenCalledWith(10, [SHOP_A], 'retail')
   })
 
   it('forwards allocated_shop_ids to getLastMinute', async () => {
@@ -357,7 +357,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getLastMinute(10, { userId: CUSTOMER_ID })
 
-    expect(repo.getLastMinute).toHaveBeenCalledWith(10, [SHOP_A])
+    expect(repo.getLastMinute).toHaveBeenCalledWith(10, [SHOP_A], 'retail')
   })
 
   it('forwards allocated_shop_ids to findRelated using the catalog row category', async () => {
@@ -371,7 +371,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getRelated(PRODUCT_ID, { userId: CUSTOMER_ID })
 
-    expect(repo.findRelated).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 10, [SHOP_A])
+    expect(repo.findRelated).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 10, [SHOP_A], 'retail')
   })
 
   it('forwards allocated_shop_ids to findPairWith', async () => {
@@ -383,7 +383,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     const svc = new ProductsService(repo, { allocationService: allocation })
     await svc.getPairWith(PRODUCT_ID, 'cat-1', 5, { userId: CUSTOMER_ID })
 
-    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [])
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [], 'retail')
   })
 
   it('getPairWith falls back to the DB and caches the result on a cache miss (no rule configured yet)', async () => {
@@ -398,7 +398,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
 
     expect(repo.getSuggestionTargetCategoryIds).toHaveBeenCalledWith('cat-1')
     expect(cacheSet).toHaveBeenCalledWith('products:pairwith-categories:v1:cat-1', [], 3600)
-    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [])
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], [], 'retail')
   })
 
   it('getPairWith passes an admin-configured target-category list through to findPairWith', async () => {
@@ -411,7 +411,7 @@ describe('ProductsService — other read paths inherit customer scoping', () => 
     await svc.getPairWith(PRODUCT_ID, 'cat-1', 5, { userId: CUSTOMER_ID })
 
     expect(repo.getSuggestionTargetCategoryIds).not.toHaveBeenCalled()
-    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], ['cat-dairy', 'cat-bakery'])
+    expect(repo.findPairWith).toHaveBeenCalledWith(PRODUCT_ID, 'cat-1', 5, [SHOP_A], ['cat-dairy', 'cat-bakery'], 'retail')
   })
 
   it('returns [] across all collections when the customer has zero allocations', async () => {

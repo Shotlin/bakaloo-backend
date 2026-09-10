@@ -21,6 +21,7 @@ export const listOrdersSchema = {
       minAmount: { type: 'number' },
       maxAmount: { type: 'number' },
       area: { type: 'string' },
+      isB2B: { type: 'boolean' },
     },
   },
 }
@@ -144,6 +145,7 @@ export const manualOrderSchema = {
 
 export const invoiceSchema = { tags: ['Admin Orders'], summary: 'Download PDF invoice', params: uuidParam }
 export const packingSlipSchema = { tags: ['Admin Orders'], summary: 'Download PDF packing slip', params: uuidParam }
+export const gstInvoiceSchema = { tags: ['Admin Orders'], summary: 'Download A4 GST tax invoice', params: uuidParam }
 
 export const exportSchema = {
   tags: ['Admin Orders'],

@@ -1,5 +1,7 @@
 import { getClient } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
+import { LedgerService } from '../ledger/ledger.service.js'
+import { BusinessAccountsRepository } from '../business-accounts/business-accounts.repository.js'
 
 /**
  * Bulk Orders service — business logic for the multi-vendor large-order
@@ -51,9 +53,13 @@ const MS_PER_DAY = 24 * MS_PER_HOUR
 export class BulkOrdersService {
   /**
    * @param {import('./bulk-orders.repository.js').BulkOrdersRepository} repository
+   * @param {LedgerService} [ledgerService] - Injectable for tests. Used only
+   *   by the LEDGER payment-method confirm path.
    */
-  constructor(repository) {
+  constructor(repository, ledgerService = new LedgerService(), businessAccountsRepository = new BusinessAccountsRepository()) {
     this.repo = repository
+    this.ledgerService = ledgerService
+    this.businessAccountsRepo = businessAccountsRepository
   }
 
   // ────────────────────────────────────────────────────────
@@ -229,13 +235,45 @@ export class BulkOrdersService {
       }
     }
 
+    // LEDGER is a B2B-only payment method — reject at creation rather
+    // than letting a B2C customer's order sit in DRAFT/SUBMITTED only to
+    // fail when a shop staffer tries to confirm it (the ledger draw
+    // itself is re-verified again at that point regardless — this is
+    // just a friendlier, earlier rejection).
+    if (data.payment_method === 'LEDGER') {
+      const ledgerAccount = await this.ledgerService.getMine(userId)
+      if (!ledgerAccount || ledgerAccount.status !== 'ACTIVE') {
+        return {
+          success: false,
+          message: 'Ledger payment requires an active B2B credit line',
+          code: 'LEDGER_NOT_AVAILABLE',
+        }
+      }
+    }
+
     const orderNumber = await this.generateOrderNumber()
+
+    // GST invoicing snapshot — same reasoning as orders.service.js#placeOrder's
+    // identical block: point-in-time capture, independent of payment method.
+    let buyerGstin = null
+    let buyerCompanyName = null
+    try {
+      const businessAccount = await this.businessAccountsRepo.findByUserId(userId)
+      if (businessAccount?.status === 'APPROVED') {
+        buyerGstin = businessAccount.gst_number
+        buyerCompanyName = businessAccount.company_name
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, userId }, 'Business account lookup for GST invoice snapshot failed (non-critical)')
+    }
 
     const inserted = await this.repo.create({
       ...data,
       user_id: userId,
       order_number: orderNumber,
       status: 'DRAFT',
+      buyer_gstin: buyerGstin,
+      buyer_company_name: buyerCompanyName,
     })
 
     logger.info(
@@ -666,6 +704,11 @@ export class BulkOrdersService {
       }
 
       const failed = []
+      // Server-recomputed total — only ever used for the LEDGER payment
+      // path below. bulk_orders' client-supplied item prices/total_amount
+      // are never trusted for a credit-line charge (see
+      // lockShopProduct()'s effective_unit_price docstring).
+      let wholesaleTotal = 0
       for (const [productId, qty] of aggregated.entries()) {
         // Sequential awaits inside a transaction client are intentional —
         // pg cannot run multiple queries on the same client in parallel.
@@ -697,6 +740,7 @@ export class BulkOrdersService {
           sp.id,
           Number(sp.stock_quantity) - qty
         )
+        wholesaleTotal += Number(sp.effective_unit_price || 0) * qty
       }
 
       if (failed.length > 0) {
@@ -719,11 +763,40 @@ export class BulkOrdersService {
         }
       }
 
-      const updated = await this.repo.updateStatus(
-        locked.id,
-        'CONFIRMED',
-        client
-      )
+      // LEDGER payment: draw the recomputed wholesale total against the
+      // customer's B2B credit line, inside this same transaction, so a
+      // rejected draw (inactive account / hard limit exceeded) rolls back
+      // the stock deduction too — the order is never left half-confirmed.
+      if (locked.payment_method === 'LEDGER') {
+        try {
+          await this.ledgerService.drawForUser(
+            locked.user_id,
+            wholesaleTotal,
+            `Bulk order ${locked.order_number}`,
+            { bulkOrderId: locked.id, client }
+          )
+        } catch (ledgerErr) {
+          await client.query('ROLLBACK')
+          logger.warn(
+            {
+              userId: actor.id,
+              bulkOrderId: locked.id,
+              action: 'bulk_order_confirm_ledger_draw_rejected',
+              err: ledgerErr.message,
+            },
+            'Bulk order confirm rolled back — ledger draw rejected'
+          )
+          return {
+            success: false,
+            message: ledgerErr.message || 'Ledger draw rejected',
+            code: 'LEDGER_DRAW_REJECTED',
+          }
+        }
+      }
+
+      const updated = locked.payment_method === 'LEDGER'
+        ? await this.repo.markLedgerPaidAndConfirm(client, locked.id, wholesaleTotal)
+        : await this.repo.updateStatus(locked.id, 'CONFIRMED', client)
       await client.query('COMMIT')
 
       logger.info(
@@ -733,6 +806,7 @@ export class BulkOrdersService {
           bulkOrderId: locked.id,
           action: 'bulk_order_confirmed',
           itemCount: aggregated.size,
+          paymentMethod: locked.payment_method || null,
         },
         'Bulk order confirmed and stock deducted'
       )

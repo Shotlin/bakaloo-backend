@@ -150,8 +150,9 @@ export class ProductsService {
    *
    * @param {object} filters
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async list(filters, customerContext = null) {
+  async list(filters, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -167,12 +168,12 @@ export class ProductsService {
     }
 
     const scope = this._scopeKey(allocatedShopIds)
-    const cacheKey = `products:list:${CACHE_VERSION}:${scope}:${JSON.stringify(filters)}`
+    const cacheKey = `products:list:${CACHE_VERSION}:${scope}:${priceMode}:${JSON.stringify(filters)}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
     const result = this._normalizeProductListResult(
-      await this.repo.findMany({ ...filters, allocatedShopIds })
+      await this.repo.findMany({ ...filters, allocatedShopIds, priceMode })
     )
     await cacheSet(cacheKey, result, CACHE_TTL_LIST)
 
@@ -194,8 +195,9 @@ export class ProductsService {
    * @param {string} q
    * @param {object} filters
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async search(q, filters, customerContext = null) {
+  async search(q, filters, customerContext = null, priceMode = 'retail') {
     const trimmed = String(q || '').trim()
 
     if (!trimmed) {
@@ -228,7 +230,7 @@ export class ProductsService {
     // search queries bypass cache for freshness
     try {
       return this._normalizeProductListResult(
-        await this.repo.fullTextSearch(trimmed, { ...filters, allocatedShopIds })
+        await this.repo.fullTextSearch(trimmed, { ...filters, allocatedShopIds, priceMode })
       )
     } catch (err) {
       logger.warn(
@@ -240,6 +242,7 @@ export class ProductsService {
           ...filters,
           search: trimmed,
           allocatedShopIds,
+          priceMode,
         })
       )
       return { ...result, suggestions: [] }
@@ -250,8 +253,9 @@ export class ProductsService {
    * Featured products (cached 30 min)
    *
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getFeatured(customerContext = null) {
+  async getFeatured(customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -259,12 +263,12 @@ export class ProductsService {
     }
 
     const scope = this._scopeKey(allocatedShopIds)
-    const cacheKey = `products:featured:${CACHE_VERSION}:${scope}`
+    const cacheKey = `products:featured:${CACHE_VERSION}:${scope}:${priceMode}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
     const products = this._normalizeProducts(
-      await this.repo.findFeatured(20, allocatedShopIds)
+      await this.repo.findFeatured(20, allocatedShopIds, priceMode)
     )
     await cacheSet(cacheKey, products, CACHE_TTL_FEATURED)
     return products
@@ -275,8 +279,10 @@ export class ProductsService {
    *
    * @param {string} id
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {string|null} [viewerUserId]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getById(id, customerContext = null, viewerUserId = null) {
+  async getById(id, customerContext = null, viewerUserId = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -284,11 +290,11 @@ export class ProductsService {
     }
 
     const scope = this._scopeKey(allocatedShopIds)
-    const cacheKey = `products:detail:${CACHE_VERSION}:${scope}:${id}`
+    const cacheKey = `products:detail:${CACHE_VERSION}:${scope}:${priceMode}:${id}`
     const cached = await cacheGet(cacheKey)
     const product = cached
       ? cached
-      : this._normalizeProduct(await this.repo.findById(id, allocatedShopIds))
+      : this._normalizeProduct(await this.repo.findById(id, allocatedShopIds, priceMode))
     if (!product) {
       return null
     }
@@ -376,8 +382,10 @@ export class ProductsService {
    *
    * @param {string} slug
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {string|null} [viewerUserId]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getBySlug(slug, customerContext = null, viewerUserId = null) {
+  async getBySlug(slug, customerContext = null, viewerUserId = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -385,11 +393,11 @@ export class ProductsService {
     }
 
     const scope = this._scopeKey(allocatedShopIds)
-    const cacheKey = `products:slug:${CACHE_VERSION}:${scope}:${slug}`
+    const cacheKey = `products:slug:${CACHE_VERSION}:${scope}:${priceMode}:${slug}`
     const cached = await cacheGet(cacheKey)
     const product = cached
       ? cached
-      : this._normalizeProduct(await this.repo.findBySlug(slug, allocatedShopIds))
+      : this._normalizeProduct(await this.repo.findBySlug(slug, allocatedShopIds, priceMode))
     if (!product) {
       return null
     }
@@ -407,12 +415,14 @@ export class ProductsService {
    *
    * @param {string} identifier
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {string|null} [viewerUserId]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getByIdOrSlug(identifier, customerContext = null, viewerUserId = null) {
+  async getByIdOrSlug(identifier, customerContext = null, viewerUserId = null, priceMode = 'retail') {
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier)
     return isUUID
-      ? this.getById(identifier, customerContext, viewerUserId)
-      : this.getBySlug(identifier, customerContext, viewerUserId)
+      ? this.getById(identifier, customerContext, viewerUserId, priceMode)
+      : this.getBySlug(identifier, customerContext, viewerUserId, priceMode)
   }
 
   /**
@@ -420,8 +430,9 @@ export class ProductsService {
    *
    * @param {string} id
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getRelated(id, customerContext = null) {
+  async getRelated(id, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -434,11 +445,11 @@ export class ProductsService {
     if (!product) return null
 
     return this._normalizeProducts(
-      await this.repo.findRelated(id, product.category_id, 10, allocatedShopIds)
+      await this.repo.findRelated(id, product.category_id, 10, allocatedShopIds, priceMode)
     )
   }
 
-  async getPairWith(productId, categoryId, limit = 10, customerContext = null) {
+  async getPairWith(productId, categoryId, limit = 10, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -461,7 +472,7 @@ export class ProductsService {
     }
 
     return this._normalizeProducts(
-      await this.repo.findPairWith(productId, categoryId, limit, allocatedShopIds, targetCategoryIds)
+      await this.repo.findPairWith(productId, categoryId, limit, allocatedShopIds, targetCategoryIds, priceMode)
     )
   }
 
@@ -484,8 +495,9 @@ export class ProductsService {
    * @param {string[]} excludeProductIds - Product ids already in the cart.
    * @param {number} [limit=12]
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail']
    */
-  async getQuickAdd(cartCategoryIds, excludeProductIds, limit = 12, customerContext = null) {
+  async getQuickAdd(cartCategoryIds, excludeProductIds, limit = 12, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
       return []
@@ -501,7 +513,8 @@ export class ProductsService {
         categoryIds,
         [...excluded],
         sameCategoryLimit,
-        allocatedShopIds
+        allocatedShopIds,
+        priceMode
       )
       for (const product of sameCategory) {
         picked.push(product)
@@ -524,7 +537,8 @@ export class ProductsService {
           relatedCategoryIds,
           [...excluded],
           relatedLimit,
-          allocatedShopIds
+          allocatedShopIds,
+          priceMode
         )
         for (const product of relatedCategory) {
           picked.push(product)
@@ -538,7 +552,8 @@ export class ProductsService {
       const randomPicks = await this.repo.findPopularRandom(
         [...excluded],
         stillNeeded,
-        allocatedShopIds
+        allocatedShopIds,
+        priceMode
       )
       picked.push(...randomPicks)
     }
@@ -593,7 +608,7 @@ export class ProductsService {
     return normalized
   }
 
-  async getPriceDrops(limit = 10, customerContext = null) {
+  async getPriceDrops(limit = 10, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -601,11 +616,11 @@ export class ProductsService {
     }
 
     return this._normalizeProducts(
-      await this.repo.getPriceDrops(limit, allocatedShopIds)
+      await this.repo.getPriceDrops(limit, allocatedShopIds, priceMode)
     )
   }
 
-  async getLastMinute(limit = 10, customerContext = null) {
+  async getLastMinute(limit = 10, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -613,7 +628,7 @@ export class ProductsService {
     }
 
     return this._normalizeProducts(
-      await this.repo.getLastMinute(limit, allocatedShopIds)
+      await this.repo.getLastMinute(limit, allocatedShopIds, priceMode)
     )
   }
 

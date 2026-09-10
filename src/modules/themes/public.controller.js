@@ -4,13 +4,14 @@ import { redis } from '../../config/redis.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { logger } from '../../config/logger.js'
 import {
-  ACTIVE_THEME_CACHE_KEY,
+  getActiveThemeCacheKey,
   getSectionPublicCacheKey,
   getTabHomeCacheKey,
   getTabManifestCacheKey,
 } from './theme-cache.js'
 import { STORE_KEYS } from '../theme-tabs/theme-tabs.shared.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
+import { resolveEffectiveAudience } from '../../utils/price-mode.js'
 
 const CACHE_TTL = 300
 
@@ -49,19 +50,26 @@ export class PublicThemeController {
   }
 
   async getActiveTheme(request, reply) {
-    const cached = await redis.get(ACTIVE_THEME_CACHE_KEY)
+    const audience = resolveEffectiveAudience(request)
+    const cacheKey = getActiveThemeCacheKey(audience)
+    const cached = await redis.get(cacheKey)
     if (cached) {
       return success(JSON.parse(cached), 'Active theme')
     }
 
+    // Same B2C fallback reasoning as getTabManifestRows() below.
     const { rows } = await query(
-      'SELECT theme_data FROM app_themes WHERE is_active = true LIMIT 1'
+      `SELECT theme_data FROM app_themes
+        WHERE is_active = true AND audience IN ($1, 'B2C')
+        ORDER BY (audience = $1) DESC
+        LIMIT 1`,
+      [audience]
     )
 
     const themeData = rows[0]?.theme_data ?? null
 
     if (themeData) {
-      await redis.set(ACTIVE_THEME_CACHE_KEY, JSON.stringify(themeData), 'EX', CACHE_TTL)
+      await redis.set(cacheKey, JSON.stringify(themeData), 'EX', CACHE_TTL)
     }
 
     return success(themeData, 'Active theme')
@@ -69,8 +77,9 @@ export class PublicThemeController {
 
   async getTabThemes(request, reply) {
     const storeKey = normalizeStoreKey(request.query?.store_key)
+    const audience = resolveEffectiveAudience(request)
     const clientETag = request.headers['if-none-match']
-    const cacheKey = getTabManifestCacheKey(storeKey)
+    const cacheKey = getTabManifestCacheKey(storeKey, audience)
 
     const cached = await redis.get(cacheKey)
     if (cached) {
@@ -87,7 +96,7 @@ export class PublicThemeController {
       return success(parsed.data, 'Tab themes')
     }
 
-    const rows = await getTabManifestRows(storeKey)
+    const rows = await getTabManifestRows(storeKey, audience)
     const responseData = buildTabManifestResponse(storeKey, rows)
 
     // Admin-configurable delivery-time display badge (e.g. "45 mins
@@ -371,7 +380,15 @@ function normalizeStoreKey(storeKey) {
   return STORE_KEYS.includes(normalized) ? normalized : 'zepto'
 }
 
-async function getTabManifestRows(storeKey) {
+async function getTabManifestRows(storeKey, audience = 'B2C') {
+  // Prefer a theme flagged for the requested audience, but fall back to
+  // the B2C one when no B2B-specific theme has been configured for this
+  // tab+variant yet — a newly-approved B2B customer must never see a
+  // blank/missing theme just because an admin hasn't built B2B theming
+  // for every tab. `audience IN ($2, 'B2C')` is a no-op filter for a B2C
+  // viewer (collapses to `= 'B2C'`, unchanged from before this migration);
+  // for a B2B viewer it matches both, and `ORDER BY (audience = $2) DESC`
+  // prefers the exact-audience row when both exist.
   const { rows } = await query(
     `SELECT
        tab.id AS tab_id,
@@ -394,7 +411,8 @@ async function getTabManifestRows(storeKey) {
        WHERE tab_id = tab.id
          AND status = 'active'
          AND ab_variant = 'A'
-       ORDER BY updated_at DESC, created_at DESC
+         AND audience IN ($2, 'B2C')
+       ORDER BY (audience = $2) DESC, updated_at DESC, created_at DESC
        LIMIT 1
      ) theme_a ON true
      LEFT JOIN LATERAL (
@@ -403,13 +421,14 @@ async function getTabManifestRows(storeKey) {
        WHERE tab_id = tab.id
          AND status = 'active'
          AND ab_variant = 'B'
-       ORDER BY updated_at DESC, created_at DESC
+         AND audience IN ($2, 'B2C')
+       ORDER BY (audience = $2) DESC, updated_at DESC, created_at DESC
        LIMIT 1
      ) theme_b ON true
      WHERE tab.store_key = $1
        AND tab.status = 'active'
      ORDER BY tab.sort_order ASC, tab.label ASC`,
-    [storeKey]
+    [storeKey, audience]
   )
 
   return rows

@@ -113,6 +113,15 @@ export class AdminOrdersController {
     }
   }
 
+  async getGstInvoice(request, reply) {
+    try {
+      const buffer = await this.service.getGstInvoice(request.params.id)
+      return reply.type('application/pdf').header('Content-Disposition', `attachment; filename=tax-invoice-${request.params.id}.pdf`).send(buffer)
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
   async exportCSV(request, reply) {
     try {
       const buffer = await this.service.exportCSV(request.query)

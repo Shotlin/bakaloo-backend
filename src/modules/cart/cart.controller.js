@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
 
 /**
  * Cart controller — thin HTTP layer
@@ -11,9 +12,18 @@ export class CartController {
     this.productsService = productsService
   }
 
+  /**
+   * Resolve the effective price mode for this request. The client opts in
+   * via `?priceMode=wholesale` (all cart routes require auth, so
+   * `request.auth.b2b` is always populated by fastify.authenticate).
+   */
+  _resolvePriceMode(request) {
+    return resolveEffectivePriceMode(request, request.query?.priceMode === 'wholesale')
+  }
+
   /** GET / */
   async get(request, reply) {
-    const cart = await this.service.getCart(request.user.id)
+    const cart = await this.service.getCart(request.user.id, this._resolvePriceMode(request))
     return reply.code(200).send(success(cart, 'Cart fetched'))
   }
 
@@ -29,7 +39,10 @@ export class CartController {
     const summary = await this.billSummaryService.getBillSummary(
       request.user.id,
       request.query?.addressId || null,
-      { quickDeliverySelected: Boolean(request.query?.quickDeliverySelected) }
+      {
+        quickDeliverySelected: Boolean(request.query?.quickDeliverySelected),
+        priceMode: this._resolvePriceMode(request),
+      }
     )
     return reply.code(200).send(success(summary, 'Bill summary fetched'))
   }
@@ -37,7 +50,8 @@ export class CartController {
   /** GET /quick-add — "Quick Add" rail suggestions based on cart contents */
   async getQuickAdd(request, reply) {
     const limit = Math.min(Math.max(Number(request.query?.limit) || 12, 1), 20)
-    const cart = await this.service.getCart(request.user.id)
+    const priceMode = this._resolvePriceMode(request)
+    const cart = await this.service.getCart(request.user.id, priceMode)
     const categoryIds = [...new Set(cart.items.map((item) => item.categoryId).filter(Boolean))]
     const excludeProductIds = cart.items.map((item) => item.productId)
 
@@ -45,7 +59,8 @@ export class CartController {
       categoryIds,
       excludeProductIds,
       limit,
-      { userId: request.user.id }
+      { userId: request.user.id },
+      priceMode
     )
     return reply.code(200).send(success(products, 'Quick add suggestions'))
   }
@@ -57,7 +72,7 @@ export class CartController {
       shopId: request.body.shopId || null,
       shopProductId: request.body.shopProductId || null,
       quantity: request.body.quantity,
-    })
+    }, this._resolvePriceMode(request))
     if (!result.success) {
       return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
     }
@@ -71,7 +86,8 @@ export class CartController {
       request.params.productId,
       request.body.quantity,
       request.body.shopId || null,
-      request.body.shopProductId || null
+      request.body.shopProductId || null,
+      this._resolvePriceMode(request)
     )
     if (!result.success) {
       return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
@@ -85,7 +101,8 @@ export class CartController {
       request.user.id,
       request.params.productId,
       request.query?.shopId || null,
-      request.query?.shopProductId || null
+      request.query?.shopProductId || null,
+      this._resolvePriceMode(request)
     )
     if (!result.success) {
       return reply.code(400).send(error(result.message, result.code || 'CART_ERROR'))
@@ -101,7 +118,7 @@ export class CartController {
 
   /** POST /validate */
   async validate(request, reply) {
-    const result = await this.service.validateCart(request.user.id)
+    const result = await this.service.validateCart(request.user.id, this._resolvePriceMode(request))
     return reply.code(200).send(success(result, 'Cart validated'))
   }
 

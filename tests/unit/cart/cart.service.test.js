@@ -857,6 +857,129 @@ describe('CartService.validateCart', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════
+// CartService — wholesale price mode (B2B)
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('CartService — wholesale price mode', () => {
+  it('validateCart charges the shop wholesale price, with no sale-price tier', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({
+        product_id: PROD_1, shop_id: SHOP_A,
+        sp_price: 100, sp_sale_price: 90, sp_wholesale_price: 70,
+      }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.validateCart(USER_ID, 'wholesale')
+
+    expect(result.valid).toBe(true)
+    expect(result.items[0].effectivePrice).toBe(70)
+    expect(result.items[0].salePrice).toBeNull()
+    expect(result.subtotal).toBe(140)
+  })
+
+  it('validateCart falls back to the shop retail price when no wholesale price is configured', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({
+        product_id: PROD_1, shop_id: SHOP_A,
+        sp_price: 100, sp_wholesale_price: null, product_wholesale_price: null,
+      }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.validateCart(USER_ID, 'wholesale')
+
+    expect(result.valid).toBe(true)
+    expect(result.items[0].effectivePrice).toBe(100)
+  })
+
+  it('validateCart still rejects SHOP_PRICE_NOT_SET in wholesale mode when every tier is unset', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({
+        product_id: PROD_1, shop_id: SHOP_A,
+        sp_price: null, product_price: 999,
+        sp_wholesale_price: null, product_wholesale_price: null,
+      }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.validateCart(USER_ID, 'wholesale')
+
+    expect(result.valid).toBe(false)
+    expect(result.failed).toEqual([
+      expect.objectContaining({ productId: PROD_1, shopId: SHOP_A, code: 'SHOP_PRICE_NOT_SET' }),
+    ])
+  })
+
+  it('getCart resolves wholesale pricing end to end', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 3 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({
+        product_id: PROD_1, shop_id: SHOP_A,
+        sp_price: 100, sp_sale_price: 90, sp_wholesale_price: 60,
+      }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID, 'wholesale')
+
+    expect(result.items[0].effectivePrice).toBe(60)
+    expect(result.subtotal).toBe(180)
+    expect(result.totalMrp).toBe(180)
+  })
+
+  it('_formatLine reports zero discount for wholesale (no sale tier to discount against)', () => {
+    const repo = makeRepoMock()
+    const service = new CartService(repo)
+    const sp = makeSpRow({ sp_price: 100, sp_sale_price: 80, sp_wholesale_price: 60 })
+
+    const line = service._formatLine(
+      sp,
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+      60,
+      60,
+      'wholesale'
+    )
+
+    expect(line.price).toBe(60)
+    expect(line.salePrice).toBeNull()
+    expect(line.effectivePrice).toBe(60)
+    expect(line.discountAmount).toBe(0)
+    expect(line.discountPercent).toBe(0)
+  })
+
+  it('defaults to retail pricing when priceMode is omitted (backward compatible)', async () => {
+    const repo = makeRepoMock()
+    repo.getCart.mockResolvedValueOnce([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+    ])
+    repo.findShopProductsForCart.mockResolvedValueOnce([
+      makeSpRow({ product_id: PROD_1, shop_id: SHOP_A, sp_price: 100, sp_wholesale_price: 60 }),
+    ])
+    const svc = new CartService(repo)
+
+    const result = await svc.getCart(USER_ID)
+
+    expect(result.items[0].effectivePrice).toBe(100)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════
 // CartService.getCart — out-of-stock lines stay visible, but priced at ₹0
 // ═══════════════════════════════════════════════════════════════════════
 //

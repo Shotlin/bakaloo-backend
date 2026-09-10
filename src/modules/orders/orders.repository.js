@@ -34,8 +34,9 @@ export class OrdersRepository {
         delivery_notes, estimated_delivery,
         handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
         delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
-        fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+        fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount,
+        buyer_gstin, buyer_company_name
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
       RETURNING id, order_number, user_id, shop_id, rider_id, status, items,
                 subtotal, discount_amount, delivery_fee, platform_fee, tax_amount, total_amount,
                 payment_method, payment_status, coupon_code, delivery_address, delivery_notes,
@@ -43,7 +44,7 @@ export class OrdersRepository {
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
                 delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
                 fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount,
-                wallet_amount_used, created_at, updated_at`,
+                wallet_amount_used, buyer_gstin, buyer_company_name, created_at, updated_at`,
       [
         orderData.orderNumber,
         orderData.userId,
@@ -75,6 +76,8 @@ export class OrdersRepository {
         JSON.stringify(orderData.feeBreakdown || {}),
         orderData.quickDeliverySelected || false,
         orderData.quickDeliverySurchargeAmount || 0,
+        orderData.buyerGstin || null,
+        orderData.buyerCompanyName || null,
       ]
     )
 
@@ -639,6 +642,8 @@ export class OrdersRepository {
           : typeof row.fee_breakdown === 'string'
             ? JSON.parse(row.fee_breakdown)
             : row.fee_breakdown,
+      buyerGstin: row.buyer_gstin || null,
+      buyerCompanyName: row.buyer_company_name || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }

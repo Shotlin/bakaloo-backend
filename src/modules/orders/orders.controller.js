@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
 
 /**
  * Orders controller — thin HTTP layer
@@ -11,7 +12,8 @@ export class OrdersController {
   // ─── Customer endpoints ─────────────────────────────────
 
   async placeOrder(request, reply) {
-    const result = await this.service.placeOrder(request.user.id, request.body)
+    const priceMode = resolveEffectivePriceMode(request, request.query?.priceMode === 'wholesale')
+    const result = await this.service.placeOrder(request.user.id, request.body, priceMode)
     if (!result.success) {
       const code = result.code || 'ORDER_FAILED'
       const payload = error(result.message, code)
@@ -127,6 +129,18 @@ export class OrdersController {
     reply
       .header('Content-Type', 'application/pdf')
       .header('Content-Disposition', `attachment; filename=invoice-${result.orderNumber}.pdf`)
+    return reply.send(result.buffer)
+  }
+
+  /** GET /:id/tax-invoice — A4 GST tax invoice (separate from the POS-style receipt above) */
+  async getGstInvoice(request, reply) {
+    const result = await this.service.getGstInvoice(request.user.id, request.params.id)
+    if (!result.success) {
+      return reply.code(result.statusCode || 400).send(error(result.message, 'INVOICE_FAILED'))
+    }
+    reply
+      .header('Content-Type', 'application/pdf')
+      .header('Content-Disposition', `attachment; filename=tax-invoice-${result.orderNumber}.pdf`)
     return reply.send(result.buffer)
   }
 }

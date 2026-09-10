@@ -27,6 +27,7 @@ export class BulkOrdersRepository {
     subtotal, discount_amount, delivery_fee, total_amount,
     delivery_date, delivery_slot, delivery_address,
     payment_method, payment_status,
+    buyer_gstin, buyer_company_name,
     created_at, updated_at
   `
 
@@ -159,13 +160,15 @@ export class BulkOrdersRepository {
         items, total_items,
         subtotal, discount_amount, delivery_fee, total_amount,
         delivery_date, delivery_slot, delivery_address,
-        payment_method, payment_status
+        payment_method, payment_status,
+        buyer_gstin, buyer_company_name
       ) VALUES (
         $1, $2, $3, $4,
         $5::jsonb, $6,
         $7, $8, $9, $10,
         $11, $12, $13::jsonb,
-        $14, $15
+        $14, $15,
+        $16, $17
       )
       RETURNING ${BulkOrdersRepository.SELECT_COLUMNS}`
 
@@ -185,6 +188,8 @@ export class BulkOrdersRepository {
       JSON.stringify(data.delivery_address),
       data.payment_method ?? null,
       data.payment_status ?? 'PENDING',
+      data.buyer_gstin ?? null,
+      data.buyer_company_name ?? null,
     ]
 
     const runner = client ? client.query.bind(client) : query
@@ -209,6 +214,27 @@ export class BulkOrdersRepository {
         RETURNING ${BulkOrdersRepository.SELECT_COLUMNS}`
     const runner = client ? client.query.bind(client) : query
     const { rows } = await runner(sql, [newStatus, id])
+    return rows[0] || null
+  }
+
+  /**
+   * LEDGER confirm path only (bulk-orders.service.js#_confirmAndDeductStock):
+   * transitions status to CONFIRMED, flips payment_status to PAID (the
+   * ledger draw that just succeeded IS the payment — cash collection is
+   * deferred to the ledger's own billing cycle), and stamps the
+   * server-recomputed total onto total_amount, since the client-supplied
+   * total_amount from create() can never be trusted for what a credit
+   * line was actually charged.
+   */
+  async markLedgerPaidAndConfirm(client, id, recomputedTotalAmount) {
+    const { rows } = await client.query(
+      `UPDATE bulk_orders
+          SET status = 'CONFIRMED', payment_status = 'PAID',
+              total_amount = $2, updated_at = NOW()
+        WHERE id = $1
+        RETURNING ${BulkOrdersRepository.SELECT_COLUMNS}`,
+      [id, recomputedTotalAmount]
+    )
     return rows[0] || null
   }
 
@@ -287,14 +313,24 @@ export class BulkOrdersRepository {
    * @param {import('pg').PoolClient} client
    * @param {string} shopId
    * @param {string} productId
-   * @returns {Promise<{ id: string, stock_quantity: number, is_available: boolean }|null>}
+   * @returns {Promise<{ id: string, stock_quantity: number, is_available: boolean, effective_unit_price: number }|null>}
    */
   async lockShopProduct(client, shopId, productId) {
+    // effective_unit_price mirrors buildShopPriceJoin's wholesale COALESCE
+    // tier (products.repository.js) — shop wholesale price, else the
+    // master wholesale price, else shop retail, else master retail. Only
+    // consumed by the LEDGER payment path (see bulk-orders.service.js
+    // #_confirmAndDeductStock), which must never trust the client-supplied
+    // item prices for a credit-line charge. FOR UPDATE OF sp scopes the
+    // lock to shop_products only — the joined products row isn't being
+    // mutated here and shouldn't be locked.
     const { rows } = await client.query(
-      `SELECT id, stock_quantity, is_available
-         FROM shop_products
-        WHERE shop_id = $1 AND product_id = $2 AND deleted_at IS NULL
-        FOR UPDATE`,
+      `SELECT sp.id, sp.stock_quantity, sp.is_available,
+              COALESCE(sp.wholesale_price, p.wholesale_price, sp.price, p.price) AS effective_unit_price
+         FROM shop_products sp
+         JOIN products p ON p.id = sp.product_id
+        WHERE sp.shop_id = $1 AND sp.product_id = $2 AND sp.deleted_at IS NULL
+        FOR UPDATE OF sp`,
       [shopId, productId]
     )
     return rows[0] || null

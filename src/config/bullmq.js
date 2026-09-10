@@ -209,6 +209,24 @@ export const addressPurgeQueue = new Queue('address-purge', {
   },
 })
 
+/**
+ * Ledger-billing queue — daily B2B credit-ledger cycle open + overdue
+ * sweep (see src/workers/ledger-billing.worker.js).
+ *
+ * Concurrency 1: mirrors payoutQueue — billing-cycle writes and the
+ * account suspend/reactivate transitions they can trigger are serialized.
+ * Single low-volume job/day, same reasoning as addressPurgeQueue.
+ */
+export const ledgerBillingQueue = new Queue('ledger-billing', {
+  connection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 5000 },
+    removeOnComplete: { age: 7 * 24 * 3600 },
+    removeOnFail: { age: 14 * 24 * 3600 },
+  },
+})
+
 // ─── WORKERS ─────────────────────────────────────────────
 
 const workers = []
@@ -544,6 +562,34 @@ export function startAddressPurgeWorker(processor) {
 }
 
 /**
+ * Start ledger-billing worker — handles the daily B2B credit-ledger
+ * billing-cycle open + overdue sweep.
+ *
+ * Concurrency 1: see ledgerBillingQueue's docstring above.
+ */
+export function startLedgerBillingWorker(processor) {
+  const worker = new Worker('ledger-billing', processor, {
+    connection,
+    concurrency: 1,
+  })
+
+  worker.on('completed', (job) => {
+    logger.debug({ jobId: job.id, name: job.name }, 'Ledger-billing job completed')
+  })
+
+  worker.on('failed', (job, err) => {
+    logger.error(
+      { jobId: job?.id, name: job?.name, err: err.message, action: 'ledger_billing_job_failed' },
+      'Ledger-billing job failed'
+    )
+  })
+
+  workers.push(worker)
+  logger.info('Ledger-billing worker started')
+  return worker
+}
+
+/**
  * Close all queues and workers (graceful shutdown)
  */
 export async function closeBullMQ() {
@@ -561,5 +607,6 @@ export async function closeBullMQ() {
   await stockNotificationsQueue.close()
   await reportPrecomputeQueue.close()
   await addressPurgeQueue.close()
+  await ledgerBillingQueue.close()
   logger.info('BullMQ queues and workers closed')
 }

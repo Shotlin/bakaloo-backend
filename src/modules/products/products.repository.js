@@ -98,33 +98,52 @@ function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
  * @param {string[]|null} allocatedShopIds
  * @param {any[]} params - Mutated; the array of $-placeholder values.
  * @param {number} startIdx - Next available $-placeholder index.
+ * @param {'retail'|'wholesale'} [priceMode='retail'] - Wholesale is only
+ *   ever reached via resolveEffectivePriceMode() (src/utils/price-mode.js),
+ *   which already re-verifies the caller's live B2B status server-side —
+ *   this function trusts whatever mode it's given.
  * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, nextIdx: number }}
  */
-function buildShopPriceJoin(allocatedShopIds, params, startIdx) {
+function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'retail') {
+  const isWholesale = priceMode === 'wholesale'
+  // Wholesale has no separate "sale" tier — bulk pricing is already the
+  // negotiated rate, so retail promotions don't stack on top of it.
+  const noSalePrice = 'NULL::decimal'
+
   if (!Array.isArray(allocatedShopIds) || allocatedShopIds.length === 0) {
     return {
       joinSql: '',
-      priceExpr: 'p.price',
-      salePriceExpr: 'p.sale_price',
+      priceExpr: isWholesale ? 'COALESCE(p.wholesale_price, p.price)' : 'p.price',
+      salePriceExpr: isWholesale ? noSalePrice : 'p.sale_price',
       stockExpr: 'p.stock_quantity',
       nextIdx: startIdx,
     }
   }
   params.push(allocatedShopIds)
   const idx = startIdx
+  // The LATERAL join's own ORDER BY picks the single best-matching shop
+  // row — it must rank shops by the SAME effective price this call will
+  // actually display, or a multi-shop customer could see one shop's price
+  // but have another shop's (higher) price be the one actually charged.
+  const bestRowOrderExpr = isWholesale
+    ? 'COALESCE(sp.wholesale_price, sp.price)'
+    : 'COALESCE(sp.sale_price, sp.price)'
   return {
     joinSql: `LEFT JOIN LATERAL (
       SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price,
+             sp.wholesale_price AS sp_wholesale_price,
              sp.stock_quantity AS sp_stock_quantity
         FROM shop_products sp
        WHERE sp.product_id = p.id
          AND sp.shop_id = ANY($${idx}::uuid[])
          AND sp.is_available = true AND sp.deleted_at IS NULL
-       ORDER BY COALESCE(sp.sale_price, sp.price) ASC
+       ORDER BY ${bestRowOrderExpr} ASC
        LIMIT 1
     ) shop_price ON true`,
-    priceExpr: 'COALESCE(shop_price.sp_price, p.price)',
-    salePriceExpr: 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
+    priceExpr: isWholesale
+      ? 'COALESCE(shop_price.sp_wholesale_price, p.wholesale_price, shop_price.sp_price, p.price)'
+      : 'COALESCE(shop_price.sp_price, p.price)',
+    salePriceExpr: isWholesale ? noSalePrice : 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
     stockExpr: 'COALESCE(shop_price.sp_stock_quantity, p.stock_quantity)',
     nextIdx: startIdx + 1,
   }
@@ -159,6 +178,7 @@ export class ProductsRepository {
     inStock,
     allocatedShopIds = null,
     groupOptions = false,
+    priceMode = 'retail',
   }) {
     const offset = (page - 1) * limit
     const conditions = ['p.deleted_at IS NULL']
@@ -185,7 +205,7 @@ export class ProductsRepository {
     // Note: minPrice/maxPrice still filter on the master p.price —
     // changing filter semantics is a separate, riskier scope than fixing
     // the DISPLAYED price and isn't part of the reported bug.
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx, priceMode)
     paramIdx = shopPrice.nextIdx
 
     // Status filter (for admin dashboard)
@@ -374,7 +394,7 @@ export class ProductsRepository {
    * @param {object} filters
    * @param {string[]|null} [filters.allocatedShopIds]
    */
-  async fullTextSearch(q, { page = 1, limit = 20, allocatedShopIds = null }) {
+  async fullTextSearch(q, { page = 1, limit = 20, allocatedShopIds = null, priceMode = 'retail' }) {
     const offset = (page - 1) * limit
     const trimmed = String(q || '').trim()
     const searchTerms = normalizeSearchTerms(trimmed)
@@ -394,7 +414,7 @@ export class ProductsRepository {
     )
     const visClause = visibility.sql
 
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
 
     // $1 = prefixTsQuery, $2 = likePattern, optional $3 = shop_ids for
     // visibility, optional $4 = shop_ids again for price resolution,
@@ -539,7 +559,7 @@ export class ProductsRepository {
     // see suggestions for products outside their allocated shops.
     let suggestions = []
     if (rows.length === 0 && trimmed.length >= 2) {
-      suggestions = await this.fuzzySuggest(trimmed, 6, allocatedShopIds)
+      suggestions = await this.fuzzySuggest(trimmed, 6, allocatedShopIds, priceMode)
     }
 
     return {
@@ -563,7 +583,7 @@ export class ProductsRepository {
    * @param {number} [limit=6]
    * @param {string[]|null} [allocatedShopIds]
    */
-  async fuzzySuggest(q, limit = 6, allocatedShopIds = null) {
+  async fuzzySuggest(q, limit = 6, allocatedShopIds = null, priceMode = 'retail') {
     try {
       const params = [q]
       const visibility = buildCustomerVisibilitySnippet(
@@ -571,7 +591,7 @@ export class ProductsRepository {
         params,
         params.length + 1
       )
-      const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+      const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
       params.push(limit)
       const limitIdx = shopPrice.nextIdx
 
@@ -612,14 +632,14 @@ export class ProductsRepository {
    * @param {number} [limit=20]
    * @param {string[]|null} [allocatedShopIds]
    */
-  async findFeatured(limit = 20, allocatedShopIds = null) {
+  async findFeatured(limit = 20, allocatedShopIds = null, priceMode = 'retail') {
     const params = []
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
       params,
       params.length + 1
     )
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -718,14 +738,14 @@ export class ProductsRepository {
    * @param {string[]|null} [allocatedShopIds] - Customer scoping; when set
    *   the product is only returned if at least one allocated shop carries it.
    */
-  async findById(id, allocatedShopIds = null) {
+  async findById(id, allocatedShopIds = null, priceMode = 'retail') {
     const params = [id]
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
       params,
       params.length + 1
     )
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
@@ -769,14 +789,14 @@ export class ProductsRepository {
    * @param {string} slug
    * @param {string[]|null} [allocatedShopIds]
    */
-  async findBySlug(slug, allocatedShopIds = null) {
+  async findBySlug(slug, allocatedShopIds = null, priceMode = 'retail') {
     const params = [slug]
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
       params,
       params.length + 1
     )
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
 
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, p.description, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
@@ -822,14 +842,14 @@ export class ProductsRepository {
    * @param {number} [limit=10]
    * @param {string[]|null} [allocatedShopIds]
    */
-  async findRelated(productId, categoryId, limit = 10, allocatedShopIds = null) {
+  async findRelated(productId, categoryId, limit = 10, allocatedShopIds = null, priceMode = 'retail') {
     const params = [categoryId, productId]
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
       params,
       params.length + 1
     )
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -893,7 +913,7 @@ export class ProductsRepository {
    * @param {string[]|null} [allocatedShopIds]
    * @param {string[]|null} [targetCategoryIds]
    */
-  async findPairWith(productId, categoryId, limit = 10, allocatedShopIds = null, targetCategoryIds = null) {
+  async findPairWith(productId, categoryId, limit = 10, allocatedShopIds = null, targetCategoryIds = null, priceMode = 'retail') {
     const params = [categoryId, productId]
 
     let categoryPredicate = 'p.category_id != $1'
@@ -907,7 +927,7 @@ export class ProductsRepository {
       params,
       params.length + 1
     )
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -949,7 +969,7 @@ export class ProductsRepository {
    * @param {number} limit
    * @param {string[]|null} [allocatedShopIds]
    */
-  async findPopularByCategories(categoryIds, excludeProductIds, limit, allocatedShopIds = null) {
+  async findPopularByCategories(categoryIds, excludeProductIds, limit, allocatedShopIds = null, priceMode = 'retail') {
     if (!Array.isArray(categoryIds) || categoryIds.length === 0 || limit <= 0) return []
 
     const params = [categoryIds]
@@ -959,7 +979,7 @@ export class ProductsRepository {
       excludeSql = `AND p.id != ALL($${params.length}::uuid[])`
     }
     const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -995,7 +1015,7 @@ export class ProductsRepository {
    * @param {number} limit
    * @param {string[]|null} [allocatedShopIds]
    */
-  async findPopularRandom(excludeProductIds, limit, allocatedShopIds = null) {
+  async findPopularRandom(excludeProductIds, limit, allocatedShopIds = null, priceMode = 'retail') {
     if (limit <= 0) return []
 
     const params = []
@@ -1005,7 +1025,7 @@ export class ProductsRepository {
       excludeSql = `AND p.id != ALL($${params.length}::uuid[])`
     }
     const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -1403,7 +1423,7 @@ export class ProductsRepository {
    * @param {number} [limit=10]
    * @param {string[]|null} [allocatedShopIds]
    */
-  async getPriceDrops(limit = 10, allocatedShopIds = null) {
+  async getPriceDrops(limit = 10, allocatedShopIds = null, priceMode = 'retail') {
     const params = []
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
@@ -1415,7 +1435,7 @@ export class ProductsRepository {
     // price actually DISPLAYED for a qualifying product must still be the
     // shop's own listing, same as everywhere else, so the discount shown
     // here always matches what checkout will charge.
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -1443,7 +1463,7 @@ export class ProductsRepository {
    * @param {number} [limit=10]
    * @param {string[]|null} [allocatedShopIds]
    */
-  async getLastMinute(limit = 10, allocatedShopIds = null) {
+  async getLastMinute(limit = 10, allocatedShopIds = null, priceMode = 'retail') {
     const params = []
     const visibility = buildCustomerVisibilitySnippet(
       allocatedShopIds,
@@ -1453,7 +1473,7 @@ export class ProductsRepository {
     // "cheap enough to feature here" stays a master-catalog curation
     // filter (p.price <= 150 below, unchanged) — displayed price is the
     // shop's own listing, same reasoning as getPriceDrops() above.
-    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
     params.push(limit)
     const limitIdx = shopPrice.nextIdx
 
@@ -1475,11 +1495,11 @@ export class ProductsRepository {
     return rows
   }
 
-  async findPriceDrops(limit = 10, allocatedShopIds = null) {
-    return this.getPriceDrops(limit, allocatedShopIds)
+  async findPriceDrops(limit = 10, allocatedShopIds = null, priceMode = 'retail') {
+    return this.getPriceDrops(limit, allocatedShopIds, priceMode)
   }
 
-  async findLastMinute(limit = 10, allocatedShopIds = null) {
-    return this.getLastMinute(limit, allocatedShopIds)
+  async findLastMinute(limit = 10, allocatedShopIds = null, priceMode = 'retail') {
+    return this.getLastMinute(limit, allocatedShopIds, priceMode)
   }
 }

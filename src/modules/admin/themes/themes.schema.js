@@ -23,6 +23,7 @@ export const createThemeSchema = {
       status: { type: 'string', enum: ['draft', 'active', 'scheduled', 'archived'] },
       ab_variant: { type: 'string', enum: ['A', 'B'] },
       ab_split_percent: { type: 'integer', minimum: 0, maximum: 100 },
+      audience: { type: 'string', enum: ['B2C', 'B2B'], default: 'B2C' },
     },
   },
 }
@@ -48,6 +49,7 @@ export const updateThemeSchema = {
       status: { type: 'string', enum: ['draft', 'active', 'scheduled', 'archived'] },
       ab_variant: { type: 'string', enum: ['A', 'B'] },
       ab_split_percent: { type: 'integer', minimum: 0, maximum: 100 },
+      audience: { type: 'string', enum: ['B2C', 'B2B'] },
     },
   },
 }

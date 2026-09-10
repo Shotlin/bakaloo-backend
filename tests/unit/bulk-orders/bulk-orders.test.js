@@ -897,7 +897,7 @@ describe('BulkOrdersRepository — SQL safety', () => {
     expect(dataSql).toMatch(/ORDER BY created_at DESC/)
   })
 
-  it('create uses 15 positional params and ::jsonb casts', async () => {
+  it('create uses 17 positional params and ::jsonb casts', async () => {
     query.mockResolvedValueOnce({ rows: [{ id: ORDER_ID }] })
     const repo = new BulkOrdersRepository()
     await repo.create({
@@ -927,7 +927,7 @@ describe('BulkOrdersRepository — SQL safety', () => {
     expect(sql).toMatch(/\$5::jsonb/) // items
     expect(sql).toMatch(/\$13::jsonb/) // delivery_address
     expect(sql).toMatch(/RETURNING/)
-    expect(params).toHaveLength(15)
+    expect(params).toHaveLength(17)
     // items + delivery_address must be JSON-serialised, not passed raw.
     expect(typeof params[4]).toBe('string')
     expect(typeof params[12]).toBe('string')
@@ -997,9 +997,9 @@ describe('BulkOrdersRepository — SQL safety', () => {
     const repo = new BulkOrdersRepository()
     await repo.lockShopProduct(client, SHOP_ID, PRODUCT_A)
     const [sql, params] = client.query.mock.calls.at(-1)
-    expect(sql).toMatch(/FOR UPDATE/)
-    expect(sql).toMatch(/shop_id = \$1 AND product_id = \$2/)
-    expect(sql).toMatch(/deleted_at IS NULL/)
+    expect(sql).toMatch(/FOR UPDATE OF sp/)
+    expect(sql).toMatch(/sp\.shop_id = \$1 AND sp\.product_id = \$2/)
+    expect(sql).toMatch(/sp\.deleted_at IS NULL/)
     expect(params).toEqual([SHOP_ID, PRODUCT_A])
   })
 

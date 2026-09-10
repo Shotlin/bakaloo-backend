@@ -50,8 +50,15 @@ export class BillSummaryService {
    * Compute the bill summary for a user's cart.
    * @param {string} userId
    * @param {string|null} [addressId] - optional selected address; defaults to the user's default address
+   * @param {object} [opts]
+   * @param {boolean} [opts.quickDeliverySelected]
+   * @param {'retail'|'wholesale'} [opts.priceMode='retail'] - Every fee/GST/
+   *   discount figure below is derived from `cart.subtotal`/`totalMrp`/
+   *   `shopGroups`, all sourced from this one getCart() call — TotalsEngine
+   *   itself does no independent price lookups, so threading priceMode
+   *   through here is the only change this method needs to charge wholesale.
    */
-  async getBillSummary(userId, addressId = null, { quickDeliverySelected = false } = {}) {
+  async getBillSummary(userId, addressId = null, { quickDeliverySelected = false, priceMode = 'retail' } = {}) {
     // getCart and getConfig are independent of each other — run together
     // rather than one-after-another. This endpoint is on a latency-sensitive
     // path: the Flutter app refetches it every time the customer navigates
@@ -59,7 +66,7 @@ export class BillSummaryService {
     // estimate while waiting, so shaving round trips here directly shrinks
     // how often that fallback is visible.
     const [cart, paymentConfig] = await Promise.all([
-      this.cartService.getCart(userId),
+      this.cartService.getCart(userId, priceMode),
       this.paymentSettingsService.getConfig(),
     ])
     if (!cart.items || cart.items.length === 0) {

@@ -127,6 +127,10 @@ const orderResponseSchema = {
     quickDeliverySurchargeAmount: { type: 'number' },
     timeline: { type: 'array', items: timelineItemSchema },
     tracking: trackingSchema,
+    // GST invoicing — snapshot of the buyer's business account at order
+    // time; null for a B2C customer with no business account.
+    buyerGstin: { type: ['string', 'null'] },
+    buyerCompanyName: { type: ['string', 'null'] },
   },
 }
 
@@ -138,7 +142,7 @@ export const placeOrderSchema = {
     required: ['addressId', 'paymentMethod'],
     properties: {
       addressId: { type: 'string', format: 'uuid' },
-      paymentMethod: { type: 'string', enum: ['COD', 'ONLINE', 'WALLET'] },
+      paymentMethod: { type: 'string', enum: ['COD', 'ONLINE', 'WALLET', 'LEDGER'] },
       couponCode: {
         oneOf: [
           { type: 'string', minLength: 1, maxLength: 50 },

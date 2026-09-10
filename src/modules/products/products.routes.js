@@ -3,6 +3,7 @@ import { ProductsService } from './products.service.js'
 import { ProductsRepository } from './products.repository.js'
 import { importProductsFromCSV } from '../../utils/csvImporter.js'
 import { success, error } from '../../utils/apiResponse.js'
+import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
 import {
   listProductsSchema,
   searchProductsSchema,
@@ -63,6 +64,10 @@ export default async function productRoutes(fastify) {
     return { userId: user.id }
   }
 
+  /** Mirrors resolvePriceMode() in the controller for these inline handlers. */
+  const resolvePriceMode = (request) =>
+    resolveEffectivePriceMode(request, request?.query?.priceMode === 'wholesale')
+
   // GET / — List products (filter, sort, paginate)
   fastify.get('/', {
     schema: listProductsSchema,
@@ -118,7 +123,8 @@ export default async function productRoutes(fastify) {
     const { page = 1, limit = 20 } = request.query
     const result = await service.list(
       { page: +page, limit: +limit, sort: 'newest' },
-      resolveCustomerContext(request)
+      resolveCustomerContext(request),
+      resolvePriceMode(request)
     )
     return reply.code(200).send(success(result.data, 'New arrivals fetched', { pagination: result.pagination }))
   })
@@ -127,6 +133,10 @@ export default async function productRoutes(fastify) {
   fastify.get('/deals', {
     preHandler: [tryAttachUser],
   }, async (request, reply) => {
+    // "Deals" is inherently a retail sale-price concept (wholesale has no
+    // sale_price tier — see buildShopPriceJoin) — always list at retail
+    // regardless of the caller's price mode, same reasoning as
+    // getPriceDrops()/getLastMinute() in products.repository.js.
     const result = await service.list(
       { page: 1, limit: +request.query.limit || 20, sort: 'price_asc', inStock: true },
       resolveCustomerContext(request)
@@ -164,11 +174,12 @@ export default async function productRoutes(fastify) {
       const { id } = request.params
       const { limit } = request.query || { limit: 10 }
       const customerContext = resolveCustomerContext(request)
-      const product = await service.getById(id, customerContext)
+      const priceMode = resolvePriceMode(request)
+      const product = await service.getById(id, customerContext, null, priceMode)
       if (!product) {
         return reply.code(404).send({ success: false, message: 'Product not found' })
       }
-      const pairWith = await service.getPairWith(id, product.category_id, limit, customerContext)
+      const pairWith = await service.getPairWith(id, product.category_id, limit, customerContext, priceMode)
       return { success: true, message: 'Pair with products', data: pairWith }
     }
   })

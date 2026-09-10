@@ -1,6 +1,7 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { generateInvoicePDF, generatePackingSlipPDF } from '../../../utils/invoiceGenerator.js'
+import { generateGstInvoicePDF } from '../../../utils/gstInvoiceGenerator.js'
 import { query as dbQuery, getClient, pool } from '../../../config/database.js'
 import { logger } from '../../../config/logger.js'
 import { NotificationsRepository } from '../../notifications/notifications.repository.js'
@@ -480,6 +481,12 @@ export class AdminOrdersService {
   async getPackingSlip(orderId) {
     const order = await this._withPickupTokenForInvoice(orderId)
     return generatePackingSlipPDF(order)
+  }
+
+  /** A4 GST tax invoice — separate document from getInvoice() above (an 80mm POS receipt). */
+  async getGstInvoice(orderId) {
+    const order = await this._withPickupTokenForInvoice(orderId)
+    return generateGstInvoicePDF(order)
   }
 
   /**

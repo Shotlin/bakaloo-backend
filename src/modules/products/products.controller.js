@@ -1,5 +1,6 @@
 import { success, error } from '../../utils/apiResponse.js'
 import { query } from '../../config/database.js'
+import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
 
 /**
  * Build a customer scoping context from the authenticated request.
@@ -29,6 +30,19 @@ function resolveCustomerContext(request) {
 }
 
 /**
+ * Resolve the effective price mode for this request. The client opts in
+ * via `?priceMode=wholesale`; resolveEffectivePriceMode() re-verifies the
+ * live, server-populated `request.auth.b2b` status before ever honoring
+ * it — a client can ask, but never grant itself wholesale pricing.
+ *
+ * @param {object} request
+ * @returns {'wholesale'|'retail'}
+ */
+function resolvePriceMode(request) {
+  return resolveEffectivePriceMode(request, request?.query?.priceMode === 'wholesale')
+}
+
+/**
  * Products controller — thin HTTP layer
  */
 export class ProductsController {
@@ -39,7 +53,8 @@ export class ProductsController {
   /** GET / — List products */
   async list(request, reply) {
     const customerContext = resolveCustomerContext(request)
-    const result = await this.service.list(request.query, customerContext)
+    const priceMode = resolvePriceMode(request)
+    const result = await this.service.list(request.query, customerContext, priceMode)
     return reply.code(200).send(
       success(result.data, 'Products fetched', { pagination: result.pagination })
     )
@@ -49,7 +64,8 @@ export class ProductsController {
   async search(request, reply) {
     const { q, ...filters } = request.query
     const customerContext = resolveCustomerContext(request)
-    const result = await this.service.search(q, filters, customerContext)
+    const priceMode = resolvePriceMode(request)
+    const result = await this.service.search(q, filters, customerContext, priceMode)
     return reply.code(200).send(
       success(result.data, 'Search results', {
         pagination: result.pagination,
@@ -61,7 +77,8 @@ export class ProductsController {
   /** GET /featured — Featured products */
   async featured(request, reply) {
     const customerContext = resolveCustomerContext(request)
-    const products = await this.service.getFeatured(customerContext)
+    const priceMode = resolvePriceMode(request)
+    const products = await this.service.getFeatured(customerContext, priceMode)
     return reply.code(200).send(success(products, 'Featured products'))
   }
 
@@ -69,7 +86,8 @@ export class ProductsController {
   async getPriceDrops(request, reply) {
     const limit = Math.min(parseInt(request.query.limit, 10) || 10, 20)
     const customerContext = resolveCustomerContext(request)
-    const products = await this.service.getPriceDrops(limit, customerContext)
+    const priceMode = resolvePriceMode(request)
+    const products = await this.service.getPriceDrops(limit, customerContext, priceMode)
     return reply.code(200).send(success(products, 'Price drop products fetched'))
   }
 
@@ -77,17 +95,20 @@ export class ProductsController {
   async getLastMinute(request, reply) {
     const limit = Math.min(parseInt(request.query.limit, 10) || 10, 20)
     const customerContext = resolveCustomerContext(request)
-    const products = await this.service.getLastMinute(limit, customerContext)
+    const priceMode = resolvePriceMode(request)
+    const products = await this.service.getLastMinute(limit, customerContext, priceMode)
     return reply.code(200).send(success(products, 'Last-minute products fetched'))
   }
 
   /** GET /:id — Single product */
   async getOne(request, reply) {
     const customerContext = resolveCustomerContext(request)
+    const priceMode = resolvePriceMode(request)
     const product = await this.service.getByIdOrSlug(
       request.params.id,
       customerContext,
-      request.user?.id || null
+      request.user?.id || null,
+      priceMode
     )
     if (!product) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))
@@ -109,9 +130,11 @@ export class ProductsController {
   /** GET /:id/related — Related products */
   async getRelated(request, reply) {
     const customerContext = resolveCustomerContext(request)
+    const priceMode = resolvePriceMode(request)
     const products = await this.service.getRelated(
       request.params.id,
-      customerContext
+      customerContext,
+      priceMode
     )
     if (products === null) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))

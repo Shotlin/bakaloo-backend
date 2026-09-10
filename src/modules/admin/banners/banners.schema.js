@@ -22,6 +22,7 @@ export const createBannerSchema = {
       startDate: { type: 'string', format: 'date-time' },
       endDate: { type: 'string', format: 'date-time' },
       triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'], default: 'ALWAYS' },
+      audience: { type: 'string', enum: ['B2C', 'B2B', 'ALL'], default: 'B2C' },
     },
   },
 }
@@ -44,6 +45,7 @@ export const updateBannerSchema = {
       startDate: { type: ['string', 'null'], format: 'date-time' },
       endDate: { type: ['string', 'null'], format: 'date-time' },
       triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'] },
+      audience: { type: 'string', enum: ['B2C', 'B2B', 'ALL'] },
     },
   },
 }
