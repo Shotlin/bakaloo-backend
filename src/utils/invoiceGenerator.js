@@ -288,9 +288,33 @@ function drawTotals(doc, order) {
   printLine('Total', total, true)
   doc.moveDown(0.3)
 
+  // A wallet-partial-payment order (migration 112) has part of the total
+  // already deducted from wallet at order-placement time, with the rest
+  // due via whatever `payment_method` is (COD collects it on delivery,
+  // ONLINE already captured it via Razorpay). Printing only the bare
+  // payment_method string here — as this used to do unconditionally — hid
+  // that split entirely: a COD slip for a ₹120 order with ₹20 already paid
+  // from wallet just said "Cash on Delivery", giving the rider/packer no
+  // way to know only ₹100 is actually still owed.
+  const walletUsed = parseFloat(order.wallet_amount_used || order.walletAmountUsed || 0)
+  const methodLabel = order.payment_method || order.paymentMethod || '-'
+
   doc.font('Helvetica').fontSize(8)
-  doc.text('Payment Method', PAGE_LEFT, doc.y, { lineBreak: false })
-  doc.text(order.payment_method || order.paymentMethod || '-', PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'right', lineBreak: false })
+  if (walletUsed > 0) {
+    const remaining = Math.max(0, total - walletUsed)
+    let y = doc.y
+    doc.text('Paid via Wallet', PAGE_LEFT, y, { lineBreak: false })
+    drawAmount(doc, walletUsed, y, { size: 8 })
+    doc.y = y + 13
+
+    y = doc.y
+    doc.text(`Due (${methodLabel})`, PAGE_LEFT, y, { lineBreak: false })
+    drawAmount(doc, remaining, y, { size: 8 })
+    doc.y = y + 13
+  } else {
+    doc.text('Payment Method', PAGE_LEFT, doc.y, { lineBreak: false })
+    doc.text(methodLabel, PAGE_LEFT, doc.y, { width: PAGE_WIDTH, align: 'right', lineBreak: false })
+  }
   doc.moveDown(0.9)
 
   if (savings > 0) {

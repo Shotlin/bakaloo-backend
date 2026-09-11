@@ -1537,7 +1537,12 @@ export class OrdersService {
   }
 
   /**
-   * Generate PDF invoice for an order
+   * Generate PDF invoice for an order — the GST tax invoice for a B2B
+   * order (non-null buyerGstin, or paid via the B2B-only LEDGER method),
+   * the plain 80mm receipt otherwise. The mobile app only ever calls this
+   * one route (it has no separate tax-invoice button), so a B2B customer
+   * needs the right document to come back automatically rather than
+   * always getting the retail-shaped receipt.
    */
   async getInvoice(userId, orderId) {
     const order = await this.repo.findById(orderId)
@@ -1556,6 +1561,10 @@ export class OrdersService {
 
     if (order.paymentStatus !== 'PAID') {
       return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
+    }
+
+    if (order.buyerGstin || order.paymentMethod === 'LEDGER') {
+      return this._buildGstInvoiceResult(userId, order)
     }
 
     // Timeline enriches the CANCELLED/REFUNDED banner with a date + reason;
@@ -1595,6 +1604,11 @@ export class OrdersService {
       return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
     }
 
+    return this._buildGstInvoiceResult(userId, order)
+  }
+
+  /** Shared by getInvoice() (auto-routed) and getGstInvoice() (explicit route). */
+  async _buildGstInvoiceResult(userId, order) {
     const customer = await this.usersRepo.findById(userId)
     const buffer = await generateGstInvoicePDF({
       ...order,
