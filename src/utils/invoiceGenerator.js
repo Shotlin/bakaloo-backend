@@ -21,6 +21,21 @@ const PAGE_WIDTH = PAGE_RIGHT - PAGE_LEFT
 // must use this embedded font instead (see STORE_INFO.currencyFontPath).
 const CURRENCY_FONT = 'currency'
 
+// Mirrors the dashboard's PAYMENT_METHOD_LABELS (src/lib/constants.ts) so a
+// customer/admin sees the same wording ("Razorpay", not the raw "ONLINE"
+// enum value) on the printed slip as they do in the orders list.
+const PAYMENT_METHOD_LABELS = {
+  COD: 'Cash on Delivery',
+  ONLINE: 'Online (Razorpay)',
+  WALLET: 'Wallet',
+  LEDGER: 'Ledger',
+  MANUAL: 'Manual',
+}
+
+function paymentMethodLabel(rawMethod) {
+  return PAYMENT_METHOD_LABELS[rawMethod] || rawMethod || '-'
+}
+
 /**
  * Find the timeline entry that moved the order INTO its current terminal
  * status (CANCELLED/REFUNDED), if a timeline was supplied. Reversed search
@@ -297,18 +312,21 @@ function drawTotals(doc, order) {
   // from wallet just said "Cash on Delivery", giving the rider/packer no
   // way to know only ₹100 is actually still owed.
   const walletUsed = parseFloat(order.wallet_amount_used || order.walletAmountUsed || 0)
-  const methodLabel = order.payment_method || order.paymentMethod || '-'
+  const methodLabel = paymentMethodLabel(order.payment_method || order.paymentMethod)
 
   doc.font('Helvetica').fontSize(8)
   if (walletUsed > 0) {
+    // Short labels, no "Paid via"/"Balance via" prefix — this receipt is
+    // only 207pt wide, and a longer label (e.g. "Balance via Online
+    // (Razorpay)") risks colliding with the right-aligned amount at 8pt.
     const remaining = Math.max(0, total - walletUsed)
     let y = doc.y
-    doc.text('Paid via Wallet', PAGE_LEFT, y, { lineBreak: false })
+    doc.text('Wallet', PAGE_LEFT, y, { lineBreak: false })
     drawAmount(doc, walletUsed, y, { size: 8 })
     doc.y = y + 13
 
     y = doc.y
-    doc.text(`Due (${methodLabel})`, PAGE_LEFT, y, { lineBreak: false })
+    doc.text(methodLabel, PAGE_LEFT, y, { lineBreak: false })
     drawAmount(doc, remaining, y, { size: 8 })
     doc.y = y + 13
   } else {
