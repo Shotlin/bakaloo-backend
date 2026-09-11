@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit'
 import { STORE_INFO } from '../config/storeInfo.js'
+import { drawWrappedMultiScriptText, measureWrappedMultiScriptTextHeight } from './multiScriptText.js'
 
 // A4 tax invoice — deliberately separate from invoiceGenerator.js (an 80mm
 // POS receipt/packing-slip). Auto-paginates natively via PDFKit instead of
@@ -163,8 +164,10 @@ function drawBuyerBlock(doc, order) {
   doc.font('Helvetica-Bold').fontSize(10).text('Bill To', PAGE_MARGIN, y)
   doc.moveDown(0.3)
 
-  doc.font('Helvetica-Bold').fontSize(9)
-  doc.text(order.buyerCompanyName || order.customerName || 'Customer', PAGE_MARGIN, doc.y, { width: PAGE_WIDTH })
+  // Company/customer name and address are customer-typed free text — can be
+  // Hindi, Marathi, Bengali, or Gujarati script, which plain Helvetica
+  // can't render (see multiScriptText.js).
+  drawWrappedMultiScriptText(doc, order.buyerCompanyName || order.customerName || 'Customer', PAGE_MARGIN, doc.y, PAGE_WIDTH, { size: 9, font: 'Helvetica-Bold' })
   doc.font('Helvetica').fontSize(8.5)
   if (order.buyerGstin) {
     doc.text(`GSTIN: ${order.buyerGstin}`, PAGE_MARGIN, doc.y, { width: PAGE_WIDTH })
@@ -174,7 +177,7 @@ function drawBuyerBlock(doc, order) {
   }
   const addressLines = formatAddressLines(order.deliveryAddress)
   if (addressLines.length > 0) {
-    doc.text(addressLines.join(', '), PAGE_MARGIN, doc.y, { width: PAGE_WIDTH })
+    drawWrappedMultiScriptText(doc, addressLines.join(', '), PAGE_MARGIN, doc.y, PAGE_WIDTH, { size: 8.5, font: 'Helvetica' })
   }
 
   doc.moveDown(0.6)
@@ -237,14 +240,16 @@ function drawItemRow(doc, item, index, split) {
   const taxAmt = split.taxableValue > 0 ? (lineTotal / split.taxableValue) * (split.igstAmount || split.cgstAmount + split.sgstAmount) : 0
 
   const y = doc.y
+  // Catalog item names are admin-authored and can be typed in a native
+  // script just like a customer name/address (see multiScriptText.js).
   const rowHeight = Math.max(
-    doc.heightOfString(name, { width: COLS[1].width - 6 }),
+    measureWrappedMultiScriptTextHeight(doc, name, COLS[1].width - 6, { size: 7.5, font: 'Helvetica' }),
     14
   ) + 6
 
   doc.font('Helvetica').fontSize(7.5)
   doc.text(String(index + 1), colX(0) + 3, y + 3, { width: COLS[0].width - 6 })
-  doc.text(name, colX(1) + 3, y + 3, { width: COLS[1].width - 6 })
+  drawWrappedMultiScriptText(doc, name, colX(1) + 3, y + 3, COLS[1].width - 6, { size: 7.5, font: 'Helvetica' })
   doc.text(hsn, colX(2) + 3, y + 3, { width: COLS[2].width - 6 })
   doc.text(String(qty), colX(3) + 3, y + 3, { width: COLS[3].width - 6, align: 'right' })
   drawAmountAt(doc, price, colX(4) + 3, y + 3, COLS[4].width - 6, { size: 7.5 })

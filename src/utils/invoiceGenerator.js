@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit'
 import QRCode from 'qrcode'
 import { STORE_INFO } from '../config/storeInfo.js'
 import { signPickupPayload, QR_TOKEN_VERSION } from './qrToken.js'
+import { drawWrappedMultiScriptText, measureWrappedMultiScriptTextHeight } from './multiScriptText.js'
 
 const TERMINAL_BANNER_STATUS = new Set(['CANCELLED', 'REFUNDED'])
 
@@ -152,9 +153,11 @@ function detailRow(doc, label, value) {
   const valueWidth = PAGE_WIDTH - labelWidth
   const valueText = value || '-'
 
-  doc.font('Helvetica').fontSize(8)
-  const height = doc.heightOfString(valueText, { width: valueWidth })
-  doc.text(valueText, PAGE_LEFT + labelWidth, y, { width: valueWidth })
+  // A customer-typed name/address can be in Hindi, Marathi, Bengali, or
+  // Gujarati script — plain Helvetica can't render those codepoints at
+  // all (see multiScriptText.js), so this switches fonts per run instead
+  // of a single doc.text() call.
+  const height = drawWrappedMultiScriptText(doc, valueText, PAGE_LEFT + labelWidth, y, valueWidth, { size: 8, font: 'Helvetica' })
 
   doc.y = y + Math.max(height, 10) + 3
 }
@@ -197,8 +200,8 @@ function drawTerminalBanner(doc, order) {
   let noteHeight = 0
   if (transition?.changed_at) contentHeight += 12
   if (transition?.note) {
-    doc.font('Helvetica').fontSize(7.5)
-    noteHeight = doc.heightOfString(`Reason: ${transition.note}`, { width: innerWidth })
+    // Staff-typed reason — same non-Latin-script risk as a customer name.
+    noteHeight = measureWrappedMultiScriptTextHeight(doc, `Reason: ${transition.note}`, innerWidth, { size: 7.5, font: 'Helvetica' })
     contentHeight += noteHeight + 2
   }
   if (refundAmount) contentHeight += 12
@@ -218,7 +221,7 @@ function drawTerminalBanner(doc, order) {
     y += 12
   }
   if (transition?.note) {
-    doc.text(`Reason: ${transition.note}`, innerLeft, y, { width: innerWidth })
+    drawWrappedMultiScriptText(doc, `Reason: ${transition.note}`, innerLeft, y, innerWidth, { size: 7.5, font: 'Helvetica' })
     y += noteHeight + 2
   }
   if (refundAmount) {
@@ -252,8 +255,7 @@ function drawItemsTable(doc, items) {
     const price = parseFloat(item.price || 0)
     const total = parseFloat(item.total ?? qty * price)
 
-    doc.font('Helvetica-Bold').fontSize(8.5)
-    doc.text(label, PAGE_LEFT, doc.y, { width: PAGE_WIDTH })
+    drawWrappedMultiScriptText(doc, label, PAGE_LEFT, doc.y, PAGE_WIDTH, { size: 8.5, font: 'Helvetica-Bold' })
     doc.moveDown(0.1)
 
     const rowY = doc.y
