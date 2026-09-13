@@ -11,7 +11,6 @@ import { PaymentSettingsService } from '../payment-settings/payment-settings.ser
 import { CashbackService } from '../cashback/cashback.service.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
-import { LedgerRepository } from '../ledger/ledger.repository.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -28,12 +27,6 @@ export class PaymentsService {
     this.paymentSettingsService = new PaymentSettingsService()
     this.cashbackService = new CashbackService()
     this.walletService = new WalletService(new WalletRepository())
-    // Ledger-balance-toggle checkout feature (see OrdersService#placeOrder)
-    // — a plain repository is enough here, same granularity as
-    // WalletService#debitForOrder, since the account is already resolved
-    // to a specific order's ledger_amount_used by the time it reaches
-    // createPaymentOrder/completeVerifiedPayment below.
-    this.ledgerRepo = new LedgerRepository()
   }
 
   /**
@@ -68,19 +61,14 @@ export class PaymentsService {
       return { success: false, message: 'Payment already completed' }
     }
 
-    // The wallet-balance-toggle / ledger-balance-toggle checkout features
-    // may have already reserved part of this order's total against the
-    // customer's wallet or B2B credit line (persisted on the order at
-    // creation, not yet debited/drawn — see OrdersService#placeOrder and
-    // completeVerifiedPayment below). Razorpay must only ever be charged
-    // the remainder; a fully-covered order is already paymentStatus 'PAID'
-    // by the time it could reach here, so it's already rejected by the
-    // guard above. Only one of the two is ever nonzero in practice (the
-    // app never offers both toggles on the same order), but summing both
-    // is correct either way.
-    const remainder = Math.round(
-      (order.totalAmount - (order.walletAmountUsed || 0) - (order.ledgerAmountUsed || 0)) * 100
-    ) / 100
+    // The wallet-balance-toggle checkout feature may have already reserved
+    // part of this order's total against the customer's wallet (persisted
+    // on the order at creation, not yet debited — see
+    // OrdersService#placeOrder and completeVerifiedPayment below). Razorpay
+    // must only ever be charged the remainder; a fully-wallet-covered order
+    // is already paymentStatus 'PAID' by the time it could reach here, so
+    // it's already rejected by the guard above.
+    const remainder = Math.round((order.totalAmount - (order.walletAmountUsed || 0)) * 100) / 100
 
     // Create Razorpay order. The razorpay SDK throws errors carrying a
     // `statusCode` mirrored from Razorpay's own API response (e.g. 401
@@ -323,7 +311,7 @@ export class PaymentsService {
       }
 
       const { rows: [orderRow] } = await client.query(
-        `SELECT id, status, order_number, wallet_amount_used, ledger_amount_used FROM orders WHERE id = $1 FOR UPDATE`,
+        `SELECT id, status, order_number, wallet_amount_used FROM orders WHERE id = $1 FOR UPDATE`,
         [payment.orderId]
       )
       const orderStillPending = orderRow?.status === 'PENDING'
@@ -400,39 +388,6 @@ export class PaymentsService {
           )
           walletAmountUsed = 0
           await client.query(`UPDATE orders SET wallet_amount_used = 0 WHERE id = $1`, [payment.orderId])
-        }
-      }
-
-      // Ledger-balance-toggle checkout feature: same deliberate deferral as
-      // the wallet block above, for the B2B credit line instead of wallet
-      // balance — draw here, atomically with confirming the order, so a
-      // Razorpay payment that never completes never draws the ledger at
-      // all (no compensating reversal ever needed).
-      let ledgerAmountUsed = orderRow.ledger_amount_used ? parseFloat(orderRow.ledger_amount_used) : 0
-      if (ledgerAmountUsed > 0) {
-        try {
-          const ledgerAccount = await this.ledgerRepo.getForUpdateByUserId(client, payment.userId)
-          if (!ledgerAccount) {
-            throw new Error('Ledger account not found')
-          }
-          await this.ledgerRepo.draw(
-            client, ledgerAccount.id, ledgerAmountUsed,
-            `Ledger payment for order ${orderRow.order_number}`,
-            { orderId: payment.orderId }
-          )
-        } catch (err) {
-          // Money is already captured by Razorpay — never refuse to
-          // confirm an already-paid order over a ledger-side problem
-          // (mirrors the wallet block's identical philosophy). This should
-          // be rare: the credit was only just reserved at order creation,
-          // so it can only fail if the account was suspended/closed or
-          // otherwise drained by something else in between.
-          logger.warn(
-            { err: err.message, orderId: payment.orderId, ledgerAmountUsed },
-            'Ledger remainder draw failed at payment confirmation — confirming order without it'
-          )
-          ledgerAmountUsed = 0
-          await client.query(`UPDATE orders SET ledger_amount_used = 0 WHERE id = $1`, [payment.orderId])
         }
       }
 

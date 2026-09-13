@@ -153,8 +153,9 @@ export class AdminOrdersRepository {
    * `isB2B` filter on findAll() above (which matches every order from a
    * B2B customer regardless of payment method; this matches only orders
    * placed via the credit-line "Place Order" button). Joined against the
-   * customer's ledger account so the list can show their credit limit
-   * alongside each order without a second round-trip per row.
+   * customer's business account so the list can show their company name
+   * alongside each order without a second round-trip per row — there's no
+   * credit limit/balance to show since Place Order has no cap.
    */
   async findAllB2B({ status, hasPendingCollection, offset, limit }) {
     const params = []
@@ -183,12 +184,11 @@ export class AdminOrdersRepository {
     const { rows } = await query(
       `SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
               sh.name AS shop_name,
-              ba.company_name, la.monthly_credit_limit, la.hard_limit, la.current_balance
+              ba.company_name
          FROM orders o
          LEFT JOIN users u ON u.id = o.user_id
          LEFT JOIN shops sh ON sh.id = o.shop_id
          LEFT JOIN business_accounts ba ON ba.user_id = o.user_id
-         LEFT JOIN ledger_accounts la ON la.business_account_id = ba.id
          ${where}
         ORDER BY (o.b2b_approval_status = 'PENDING') DESC, o.created_at DESC
         LIMIT $${idx++} OFFSET $${idx++}`,

@@ -242,4 +242,18 @@ export class AdminOrdersController {
       return reply.code(err.statusCode || 500).send(error(err.message))
     }
   }
+
+  async setB2BPaymentDueDate(request, reply) {
+    try {
+      const data = await this.service.setB2BPaymentDueDate(
+        request.params.id,
+        request.body.dueDate,
+        request.user.id,
+        request.ip
+      )
+      return reply.send(success(data, 'Payment due date updated'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
 }

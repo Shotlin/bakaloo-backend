@@ -16,7 +16,7 @@ import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignme
 import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
 import { CashbackService } from '../../cashback/cashback.service.js'
 import { SpinWheelService } from '../../spin-wheel/spin-wheel.service.js'
-import { LedgerService } from '../../ledger/ledger.service.js'
+import { BusinessAccountsRepository } from '../../business-accounts/business-accounts.repository.js'
 import ExcelJS from 'exceljs'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -100,10 +100,7 @@ export class AdminOrdersService {
     this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
     this.cashbackService = new CashbackService()
     this.spinWheelService = new SpinWheelService()
-    // Reverses the ledger-balance-toggle portion (see
-    // OrdersService#placeOrder) of a cancelled/refunded order — see
-    // refundOrder()/cancelOrder() below.
-    this.ledgerService = new LedgerService()
+    this.businessAccountsRepo = new BusinessAccountsRepository()
   }
 
   /**
@@ -297,25 +294,6 @@ export class AdminOrdersService {
     }
 
     const oldStatus = await this.repository.updateStatus(orderId, newStatus, adminId, note)
-
-    // Reverse any ledger draw when an order is cancelled from here — this
-    // is real B2B credit, not the customer's own money, so leaving it
-    // un-reversed means they get billed next cycle for a cancelled order.
-    // Mirrors cancelOrder()'s identical reasoning; this generic path is a
-    // second way an admin can reach CANCELLED (from the status dropdown
-    // rather than the dedicated Cancel action) that must carry the same
-    // safeguard.
-    const ledgerAmountUsedOnStatusCancel = parseFloat(order.ledger_amount_used || 0)
-    if (newStatus === 'CANCELLED' && ledgerAmountUsedOnStatusCancel > 0) {
-      await this.ledgerService.repayForUser(
-        order.user_id,
-        ledgerAmountUsedOnStatusCancel,
-        note || `Reversal of ledger payment for cancelled order ${order.order_number}`,
-        { orderId }
-      ).catch((err) => {
-        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during generic status cancel')
-      })
-    }
 
     logAdminActivity(adminId, `Order status: ${oldStatus} → ${newStatus}`, 'order', orderId,
       { status: oldStatus }, { status: newStatus }, ip)
@@ -604,33 +582,16 @@ export class AdminOrdersService {
 
     const payment = await this.repository.getOrderPayment(orderId)
     // The `payment.amount` branch (a genuine gateway payment) already
-    // excludes any wallet/ledger-toggle offset — payments.service.js#createPaymentOrder
-    // only ever charges Razorpay the remainder after wallet_amount_used and
-    // ledger_amount_used. The `order.total_amount` fallback (COD, no
-    // gateway row) must subtract both explicitly, or a partial-offset COD
-    // refund would refund the wallet/ledger-covered portion too, as if it
-    // were cash the customer paid.
-    const ledgerAmountUsed = parseFloat(order.ledger_amount_used || 0)
+    // excludes any wallet offset — payments.service.js#createPaymentOrder
+    // only ever charges Razorpay the remainder after wallet_amount_used.
+    // The `order.total_amount` fallback (COD, no gateway row) must
+    // subtract it explicitly, or a partial-offset COD refund would refund
+    // the wallet-covered portion too, as if it were cash the customer paid.
     const paidAmount = payment
       ? parseFloat(payment.amount)
-      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0) - ledgerAmountUsed
+      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
     const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
     const refundAmount = paidAmount
-
-    // Reverse any ledger draw unconditionally, regardless of the admin's
-    // chosen refundTo destination for the rest — this is real B2B credit,
-    // not the customer's own money, so leaving it un-reversed means they
-    // get billed next cycle for an order that was just refunded/cancelled.
-    if (ledgerAmountUsed > 0) {
-      await this.ledgerService.repayForUser(
-        order.user_id,
-        ledgerAmountUsed,
-        reason || `Reversal of ledger payment for refunded order ${order.order_number}`,
-        { orderId }
-      ).catch((err) => {
-        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during admin refund')
-      })
-    }
 
     if (refundTo === 'original') {
       if (!hasGatewayPayment) {
@@ -820,31 +781,6 @@ export class AdminOrdersService {
     // left the store and restoring is always correct here.
     const stockRestoreResult = await this._restoreStockForCancellation(orderId, order.shop_id, adminId)
 
-    // Reverse any ledger draw unconditionally, independent of the
-    // refundTo/payment_status gate just below. That gate exists because a
-    // COD/online order that was never actually paid has no *money* to move
-    // — but a COD-partial ledger draw happens immediately at order
-    // placement (see OrdersService#placeOrder) regardless of the overall
-    // order payment_status (which only flips to PAID on full coverage), so
-    // gating this on payment_status === 'PAID' would silently skip
-    // reversing a real credit draw for the common "cancelled before
-    // delivery" case. Mirrors the condition OrdersService#cancelOrder uses
-    // for the customer self-cancel path.
-    const ledgerAmountUsedOnCancel = parseFloat(order.ledger_amount_used || 0)
-    if (
-      ledgerAmountUsedOnCancel > 0 &&
-      (order.payment_method === 'COD' || order.payment_status === 'PAID')
-    ) {
-      await this.ledgerService.repayForUser(
-        order.user_id,
-        ledgerAmountUsedOnCancel,
-        reason || `Reversal of ledger payment for cancelled order ${order.order_number}`,
-        { orderId }
-      ).catch((err) => {
-        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during admin cancel')
-      })
-    }
-
     // Refund only makes sense once money has actually changed hands — most
     // cancellations happen on PENDING/CONFIRMED orders that were never
     // paid (COD, or an online order cancelled before capture), so skip any
@@ -855,10 +791,10 @@ export class AdminOrdersService {
     if (refundTo && refundTo !== 'none' && order.payment_status === 'PAID') {
       const payment = await this.repository.getOrderPayment(orderId)
       // See refundOrder()'s identical computation above for why the COD
-      // fallback branch subtracts wallet_amount_used and ledger_amount_used.
+      // fallback branch subtracts wallet_amount_used.
       const paidAmount = payment
         ? parseFloat(payment.amount)
-        : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0) - parseFloat(order.ledger_amount_used || 0)
+        : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
       const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
 
       if (refundTo === 'original' && hasGatewayPayment) {
@@ -963,8 +899,16 @@ export class AdminOrdersService {
     if (!order.b2b_approval_status) {
       throw { statusCode: 400, message: 'This order was not placed on B2B credit' }
     }
-    const settlements = await this.repository.getB2BSettlements(orderId)
-    return { ...order, settlements }
+    const [settlements, businessAccount] = await Promise.all([
+      this.repository.getB2BSettlements(orderId),
+      this.businessAccountsRepo.findByUserId(order.user_id),
+    ])
+    return {
+      ...order,
+      settlements,
+      company_name: businessAccount?.company_name || null,
+      gst_number: businessAccount?.gst_number || null,
+    }
   }
 
   /**
@@ -1065,13 +1009,10 @@ export class AdminOrdersService {
   /**
    * Record a manual payment-collection entry against a delivered "Place
    * Order" order (e.g. ₹200 cash today, ₹500 online next week — multiple
-   * partial entries are expected, not a single all-at-once figure).
-   * Immediately repays the ledger by this amount — this is a real
-   * accounts-receivable event, not just a note, since the credit drawn at
-   * placement is only actually "settled" once the customer has paid the
-   * business back. Rejects an entry that would push the running total
-   * past the order's own total_amount — the ledger side (real credit) has
-   * no reason to ever be over-repaid for one order.
+   * partial entries are expected, not a single all-at-once figure). Rejects
+   * an entry that would push the running total past the order's own
+   * total_amount — there's no reason to ever collect more than the order
+   * itself is worth.
    */
   async recordB2BSettlement(orderId, { method, amount, note }, adminId, ip) {
     const order = await this.repository.findById(orderId)
@@ -1113,26 +1054,43 @@ export class AdminOrdersService {
       client.release()
     }
 
-    // Reverses the credit draw by exactly the amount just collected — see
-    // LedgerService#repayForUser's identical reasoning on the
-    // refund/cancel paths. Best-effort: the settlement record above is the
-    // source of truth for what the admin entered; a transient ledger
-    // hiccup here is logged, not silently lost, but never blocks the
-    // admin from recording what the customer actually paid.
-    await this.ledgerService.repayForUser(
-      order.user_id,
-      parsedAmount,
-      `Settlement (${method}) for order ${order.order_number}`,
-      { orderId }
-    ).catch((err) => {
-      logger.warn({ err: err.message, orderId }, 'Ledger repayment failed during B2B settlement recording')
-    })
-
     logAdminActivity(
       adminId,
       `Recorded ₹${parsedAmount} ${method} settlement for B2B order ${order.order_number}`,
       'order', orderId,
       { b2b_amount_settled: alreadySettled }, { b2b_amount_settled: alreadySettled + parsedAmount },
+      ip
+    )
+
+    return this.repository.findById(orderId)
+  }
+
+  /**
+   * Set (or clear, passing null) the date a B2B customer promised to pay
+   * by — e.g. "5 days later I will pay". Pure scheduling metadata: nothing
+   * automated reacts to it (no auto-charge, no auto-suspension), it's just
+   * surfaced to the admin on the B2B Orders/Collections pages.
+   */
+  async setB2BPaymentDueDate(orderId, dueDate, adminId, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+    if (!order.b2b_approval_status) {
+      throw { statusCode: 400, message: 'This order was not placed on B2B credit' }
+    }
+
+    await dbQuery(
+      `UPDATE orders SET b2b_payment_due_date = $1, updated_at = NOW() WHERE id = $2`,
+      [dueDate || null, orderId]
+    )
+
+    logAdminActivity(
+      adminId,
+      dueDate
+        ? `Set B2B payment due date for order ${order.order_number} to ${dueDate}`
+        : `Cleared B2B payment due date for order ${order.order_number}`,
+      'order', orderId,
+      { b2b_payment_due_date: order.b2b_payment_due_date || null },
+      { b2b_payment_due_date: dueDate || null },
       ip
     )
 

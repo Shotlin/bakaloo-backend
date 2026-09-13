@@ -265,9 +265,21 @@ export const recordB2BSettlementSchema = {
     type: 'object',
     required: ['method', 'amount'],
     properties: {
-      method: { type: 'string', enum: ['CASH', 'ONLINE', 'OTHER'] },
+      method: { type: 'string', enum: ['CASH', 'UPI', 'RAZORPAY', 'OTHER'] },
       amount: { type: 'number', exclusiveMinimum: 0 },
       note: { type: 'string', maxLength: 500 },
+    },
+  },
+}
+
+export const setB2BPaymentDueDateSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Set (or clear) the date a B2B customer promised to pay by',
+  params: uuidParam,
+  body: {
+    type: 'object',
+    properties: {
+      dueDate: { type: ['string', 'null'], format: 'date' },
     },
   },
 }

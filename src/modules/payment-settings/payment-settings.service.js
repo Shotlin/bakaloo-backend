@@ -14,10 +14,10 @@ const DEFAULTS = {
   codEnabled: true,
   razorpayEnabled: true,
   walletEnabled: true,
-  // Defaults to on — before this toggle existed, a B2B customer's ledger
-  // was gated only by having an ACTIVE ledger account, so flipping this
-  // default to off would silently break every existing B2B customer's
-  // checkout the moment this setting starts being read.
+  // Whether "Place Order" (B2B credit) is offered at all — defaults to on.
+  // A customer still also needs an APPROVED, b2b_enabled business account
+  // (see BusinessAccountsRepository) for the button to actually appear;
+  // this is a platform-wide kill switch on top of that per-customer gate.
   ledgerEnabled: true,
   codMinOrderAmount: 99,
   codMaxOrderAmount: 2000,

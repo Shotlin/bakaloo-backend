@@ -172,10 +172,6 @@ export const placeOrderSchema = {
       // Ignored when paymentMethod is the legacy 'WALLET' (old published
       // app), which keeps using its own separate full-payment flow.
       useWallet: { type: 'boolean', default: false },
-      // Ledger-balance-toggle checkout feature — same convention, for the
-      // B2B credit line. Ignored when paymentMethod is 'LEDGER', which
-      // keeps using its own separate full-payment payFromLedger() flow.
-      useLedger: { type: 'boolean', default: false },
     },
   },
   response: {

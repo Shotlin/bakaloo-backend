@@ -3,7 +3,7 @@ import { query } from '../../../config/database.js'
 export class AdminRefundRequestsRepository {
   async findAll({ offset, limit, status, search, startDate, endDate }) {
     let sql = `
-      SELECT rr.*, o.order_number, o.total_amount, o.wallet_amount_used, o.ledger_amount_used,
+      SELECT rr.*, o.order_number, o.total_amount, o.wallet_amount_used,
              u.name AS customer_name, u.phone AS customer_phone
       FROM refund_requests rr
       JOIN orders o ON o.id = rr.order_id
@@ -38,7 +38,7 @@ export class AdminRefundRequestsRepository {
 
   async findById(id) {
     const { rows } = await query(
-      `SELECT rr.*, o.order_number, o.total_amount, o.wallet_amount_used, o.ledger_amount_used, o.payment_method,
+      `SELECT rr.*, o.order_number, o.total_amount, o.wallet_amount_used, o.payment_method,
               u.name AS customer_name, u.phone AS customer_phone
        FROM refund_requests rr
        JOIN orders o ON o.id = rr.order_id

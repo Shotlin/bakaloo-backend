@@ -9,6 +9,7 @@ import {
   rescheduleOrderSchema, orderNotesListSchema, addOrderNoteSchema,
   reconcilePaymentSchema, razorpayDetailsSchema, bulkReconcilePaymentsSchema,
   listB2BOrdersSchema, b2bOrderDetailSchema, approveB2BOrderSchema, recordB2BSettlementSchema,
+  setB2BPaymentDueDateSchema,
 } from './orders.schema.js'
 
 /**
@@ -49,4 +50,5 @@ export default async function adminOrdersRoutes(fastify) {
   fastify.get('/b2b/:id', { schema: b2bOrderDetailSchema, preHandler: adminAuth }, ctrl.findB2BById.bind(ctrl))
   fastify.post('/b2b/:id/approve', { schema: approveB2BOrderSchema, preHandler: adminAuth }, ctrl.approveB2BOrder.bind(ctrl))
   fastify.post('/b2b/:id/settlements', { schema: recordB2BSettlementSchema, preHandler: adminAuth }, ctrl.recordB2BSettlement.bind(ctrl))
+  fastify.put('/b2b/:id/due-date', { schema: setB2BPaymentDueDateSchema, preHandler: adminAuth }, ctrl.setB2BPaymentDueDate.bind(ctrl))
 }

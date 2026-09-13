@@ -614,11 +614,11 @@ export class BillSummaryService {
       },
       razorpay: { enabled: razorpayEnabled },
       wallet: { enabled: walletEnabled },
-      // Global admin kill-switch for the B2B ledger — independent of
-      // whether this particular customer has an ACTIVE ledger account
-      // (see myLedgerAccountProvider on the Flutter side, which still
-      // gates it per-account). Both must be true for a B2B customer to
-      // see the ledger toggle / Place Order button.
+      // Global admin kill-switch for "Place Order" (B2B credit) —
+      // independent of whether this particular customer has an APPROVED,
+      // b2b_enabled business account (see myBusinessAccountProvider on the
+      // Flutter side, which still gates it per-customer). Both must be
+      // true for the Place Order button to appear.
       ledger: { enabled: ledgerEnabled },
     }
   }
