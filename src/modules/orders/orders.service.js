@@ -1766,12 +1766,15 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, deliveryOtp] = await Promise.all([
+    const [statusHistory, riderLocation, deliveryOtp, b2bSettlements] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
         : Promise.resolve(null),
       order.riderId ? this._getActiveDeliveryOtp(order.id) : Promise.resolve(null),
+      // Only a "Place Order" B2B credit order (b2bApprovalStatus set) ever
+      // has settlement rows — skip the query entirely for every other order.
+      order.b2bApprovalStatus ? this.repo.getB2BSettlements(order.id) : Promise.resolve([]),
     ])
 
     const [enriched] = await this._attachItemThumbnails([order])
@@ -1781,6 +1784,7 @@ export class OrdersService {
       deliveryOtp,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
+      b2bSettlements,
     }
   }
 

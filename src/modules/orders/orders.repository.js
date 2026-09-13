@@ -593,6 +593,29 @@ export class OrdersRepository {
   }
 
   /**
+   * Settlement history for a "Place Order" B2B credit order, oldest first —
+   * the customer's own view of how much has been collected against their
+   * order and via what method, mirroring the admin dashboard's list but
+   * without the internal `recorded_by` staff attribution.
+   */
+  async getB2BSettlements(orderId) {
+    const { rows } = await query(
+      `SELECT id, method, amount, note, created_at
+         FROM order_b2b_settlements
+        WHERE order_id = $1
+        ORDER BY created_at ASC`,
+      [orderId]
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      method: row.method,
+      amount: parseFloat(row.amount),
+      note: row.note || null,
+      createdAt: row.created_at,
+    }))
+  }
+
+  /**
    * Format snake_case row to camelCase
    */
   _format(row) {
@@ -615,6 +638,7 @@ export class OrdersRepository {
       walletAmountUsed: parseFloat(row.wallet_amount_used || 0),
       b2bApprovalStatus: row.b2b_approval_status || null,
       b2bAmountSettled: parseFloat(row.b2b_amount_settled || 0),
+      b2bPaymentDueDate: row.b2b_payment_due_date || null,
       paymentMethod: row.payment_method,
       paymentStatus: row.payment_status,
       couponCode: row.coupon_code,
