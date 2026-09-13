@@ -960,6 +960,10 @@ export class AdminOrdersService {
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
+      logger.error(
+        { err: err.message, code: err.code, stack: err.stack, orderId },
+        'B2B order approval failed'
+      )
       throw {
         statusCode: 400,
         message: `Could not approve — ${err.message}`,
