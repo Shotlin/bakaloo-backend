@@ -86,6 +86,7 @@ export class AdminNotificationsRepository {
       new: 'all_customers',
       inactive: 'no_order_30_days',
       high_value: 'high_value',
+      b2b_customers: 'custom_list',
     }
     const targetType = segmentToTargetType[segment] || 'all_customers'
     const status = scheduledAt ? 'SCHEDULED' : 'SENDING'
@@ -369,6 +370,20 @@ function buildSegmentWhere(segment, segmentValue) {
       }
       return { where: customerBaseWhere, params }
     }
+
+    case 'b2b_customers':
+      // Same APPROVED + b2b_enabled gate that decides whether a customer
+      // sees the "Place Order" B2B credit option at checkout (see
+      // BusinessAccountsRepository / orders.service.js's payment-method
+      // gate) — a customer whose business account is pending, rejected,
+      // suspended, or who has the toggle switched off never receives this.
+      return {
+        where: `${customerBaseWhere} AND u.id IN (
+          SELECT user_id FROM business_accounts
+          WHERE status = 'APPROVED' AND b2b_enabled = true
+        )`,
+        params,
+      }
 
     default:
       return { where: customerBaseWhere, params }

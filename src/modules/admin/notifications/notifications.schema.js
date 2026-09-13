@@ -45,7 +45,7 @@ export const updateTemplateSchema = {
   },
 }
 
-const VALID_SEGMENTS = ['all_customers', 'specific_user', 'store_customers', 'inactive_customers', 'cart_not_empty', 'all', 'new', 'inactive', 'high_value', 'custom_segment']
+const VALID_SEGMENTS = ['all_customers', 'specific_user', 'store_customers', 'inactive_customers', 'cart_not_empty', 'all', 'new', 'inactive', 'high_value', 'custom_segment', 'b2b_customers']
 
 export const sendBulkSchema = {
   body: {
