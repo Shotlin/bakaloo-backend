@@ -46,33 +46,44 @@ CREATE INDEX IF NOT EXISTS idx_theme_tabs_store_key_audience_status_order
 -- Data migration: clone every tab into an independent B2B counterpart.
 -- ─────────────────────────────────────────────────────────────────────────
 
--- Map of old (shared/B2C) tab id -> newly-cloned B2B tab id, keyed by the
--- (store_key, key) identity they share. Scoped to this migration's
--- transaction only.
+-- Map of old (shared/B2C) tab id -> newly-cloned B2B tab id. Scoped to this
+-- migration's transaction only.
+--
+-- Built with an explicit per-row loop rather than a single INSERT...SELECT
+-- joined back by (store_key, key): that key is only guaranteed unique
+-- among ACTIVE tabs (idx_theme_tabs_active_store_key_key_audience is a
+-- PARTIAL index — see migration 050) — two ARCHIVED tabs (e.g. a
+-- recurring seasonal tab like "navratri" recreated and archived across
+-- years) can legitimately share a key, which would make a join-based
+-- pairing ambiguous and risk mis-mapping old ids to new ids. The loop
+-- pairs each old id with its own new id directly, with no ambiguity.
 CREATE TEMP TABLE _tab_audience_migration_map (
   old_tab_id UUID PRIMARY KEY,
   new_tab_id UUID NOT NULL
 ) ON COMMIT DROP;
 
-WITH b2c_tabs AS (
-  SELECT * FROM theme_tabs WHERE audience = 'B2C'
-),
-inserted AS (
-  INSERT INTO theme_tabs (
-    store_key, key, label, image_url, text_color, sort_order,
-    status, is_default, merch_config, audience, created_at, updated_at,
-    archived_at
-  )
-  SELECT
-    store_key, key, label, image_url, text_color, sort_order,
-    status, is_default, merch_config, 'B2B', NOW(), NOW(), archived_at
-  FROM b2c_tabs
-  RETURNING id, store_key, key
-)
-INSERT INTO _tab_audience_migration_map (old_tab_id, new_tab_id)
-SELECT b2c.id, ins.id
-FROM b2c_tabs b2c
-JOIN inserted ins ON ins.store_key = b2c.store_key AND ins.key = b2c.key;
+DO $$
+DECLARE
+  src RECORD;
+  new_id UUID;
+BEGIN
+  FOR src IN SELECT * FROM theme_tabs WHERE audience = 'B2C' LOOP
+    INSERT INTO theme_tabs (
+      store_key, key, label, image_url, text_color, sort_order,
+      status, is_default, merch_config, audience, created_at, updated_at,
+      archived_at
+    )
+    VALUES (
+      src.store_key, src.key, src.label, src.image_url, src.text_color,
+      src.sort_order, src.status, src.is_default, src.merch_config, 'B2B',
+      NOW(), NOW(), src.archived_at
+    )
+    RETURNING id INTO new_id;
+
+    INSERT INTO _tab_audience_migration_map (old_tab_id, new_tab_id)
+    VALUES (src.id, new_id);
+  END LOOP;
+END $$;
 
 -- Any app_themes / section_manifests / section_manifest_versions rows an
 -- admin already explicitly authored for B2B point at the old shared tab
