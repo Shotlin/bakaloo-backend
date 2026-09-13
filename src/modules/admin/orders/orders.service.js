@@ -282,7 +282,40 @@ export class AdminOrdersService {
       throw { statusCode: 400, message: `Cannot transition from ${order.status} to ${newStatus}` }
     }
 
+    // A "Place Order" B2B credit order sits PENDING with its stock
+    // deliberately not yet deducted (see migration 128_b2b_place_order.sql)
+    // — this generic status-change path must never be used to jump it
+    // straight to CONFIRMED/CANCELLED, since that would bypass
+    // approveB2BOrder()'s fresh stock re-check and deduction entirely. The
+    // dedicated Approve action (B2B Orders page) is the only door out of
+    // PENDING for these orders.
+    if (order.b2b_approval_status === 'PENDING') {
+      throw {
+        statusCode: 400,
+        message: 'This B2B credit order is awaiting admin approval — approve it from the B2B Orders page before changing its status.',
+      }
+    }
+
     const oldStatus = await this.repository.updateStatus(orderId, newStatus, adminId, note)
+
+    // Reverse any ledger draw when an order is cancelled from here — this
+    // is real B2B credit, not the customer's own money, so leaving it
+    // un-reversed means they get billed next cycle for a cancelled order.
+    // Mirrors cancelOrder()'s identical reasoning; this generic path is a
+    // second way an admin can reach CANCELLED (from the status dropdown
+    // rather than the dedicated Cancel action) that must carry the same
+    // safeguard.
+    const ledgerAmountUsedOnStatusCancel = parseFloat(order.ledger_amount_used || 0)
+    if (newStatus === 'CANCELLED' && ledgerAmountUsedOnStatusCancel > 0) {
+      await this.ledgerService.repayForUser(
+        order.user_id,
+        ledgerAmountUsedOnStatusCancel,
+        note || `Reversal of ledger payment for cancelled order ${order.order_number}`,
+        { orderId }
+      ).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during generic status cancel')
+      })
+    }
 
     logAdminActivity(adminId, `Order status: ${oldStatus} → ${newStatus}`, 'order', orderId,
       { status: oldStatus }, { status: newStatus }, ip)
@@ -909,9 +942,9 @@ export class AdminOrdersService {
    * ones surfaced before APPROVED ones so an admin's queue always shows
    * what needs action first.
    */
-  async findAllB2B({ status, page = 1, limit = 20 } = {}) {
+  async findAllB2B({ status, hasPendingCollection, page = 1, limit = 20 } = {}) {
     const offset = (page - 1) * limit
-    const result = await this.repository.findAllB2B({ status, offset, limit })
+    const result = await this.repository.findAllB2B({ status, hasPendingCollection, offset, limit })
     return {
       orders: result.orders,
       pagination: {

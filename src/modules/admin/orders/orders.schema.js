@@ -238,6 +238,9 @@ export const listB2BOrdersSchema = {
       page: { type: 'integer', default: 1 },
       limit: { type: 'integer', default: 20, maximum: 100 },
       status: { type: 'string', enum: ['PENDING', 'APPROVED'] },
+      // The B2B Collections page's filter — approved orders with money
+      // still owed (total_amount > b2b_amount_settled).
+      hasPendingCollection: { type: 'boolean' },
     },
   },
 }

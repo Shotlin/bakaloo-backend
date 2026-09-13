@@ -22,6 +22,15 @@ export class AdminOrdersRepository {
       LEFT JOIN shops sh ON sh.id = o.shop_id
       ${needsPaymentsJoin ? 'JOIN payments p ON p.order_id = o.id' : ''}
       WHERE 1=1
+      -- "Place Order" B2B credit orders never appear in the general Orders
+      -- list, unconditionally — they live exclusively in the dedicated B2B
+      -- Orders page (findAllB2B below), which has its own approval/
+      -- settlement workflow this list doesn't support. b2b_approval_status
+      -- is NULL for every other order. Kept as an unconditional AND (not
+      -- folded into the WHERE clause itself) so countSql's
+      -- \`sql.split('WHERE 1=1')[1]\` marker-based reconstruction below
+      -- keeps working.
+      AND o.b2b_approval_status IS NULL
     `
     const params = []
     let idx = 1
@@ -85,8 +94,13 @@ export class AdminOrdersRepository {
   }
 
   async getStatsByStatus() {
+    // Excludes B2B credit orders, same as findAll() above — these tab
+    // badges belong to the general Orders page, which never shows them.
     const { rows } = await query(
-      `SELECT status, COUNT(*)::int AS count FROM orders GROUP BY status`
+      `SELECT status, COUNT(*)::int AS count
+         FROM orders
+        WHERE b2b_approval_status IS NULL
+        GROUP BY status`
     )
     return rows.reduce((acc, r) => { acc[r.status] = r.count; return acc }, {})
   }
@@ -142,13 +156,21 @@ export class AdminOrdersRepository {
    * customer's ledger account so the list can show their credit limit
    * alongside each order without a second round-trip per row.
    */
-  async findAllB2B({ status, offset, limit }) {
+  async findAllB2B({ status, hasPendingCollection, offset, limit }) {
     const params = []
     let idx = 1
     let where = 'WHERE o.b2b_approval_status IS NOT NULL'
     if (status) {
       params.push(status)
       where += ` AND o.b2b_approval_status = $${idx++}`
+    }
+    if (hasPendingCollection) {
+      // The B2B Collections page's filter — only orders where something is
+      // still owed. A PENDING (not-yet-approved) order is excluded even
+      // though its full credit draw is technically unsettled: nothing has
+      // shipped yet, so there's nothing to collect payment for in
+      // practice — collection only makes sense once the order is real.
+      where += ` AND o.b2b_approval_status = 'APPROVED' AND o.total_amount - o.b2b_amount_settled > 0.01`
     }
 
     const countRes = await query(
