@@ -873,7 +873,7 @@ export class ShopProductsRepository {
 
       transitions.push({
         shopId: stockProduct.shop_id,
-        shopProduct,
+        shopProduct: stockProduct,
         prevQty: Number(movement.quantity_before),
         newQty: Number(movement.quantity_after),
         lowStockThreshold: Number(stockProduct.low_stock_threshold),
