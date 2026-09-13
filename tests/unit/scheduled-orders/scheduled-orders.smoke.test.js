@@ -300,7 +300,13 @@ describe('ScheduledOrdersService.create — allocation + active cap', () => {
       countActiveForUser: vi.fn(),
       create: vi.fn(),
     }
-    service = new ScheduledOrdersService(repoStub, { queue })
+    // create()'s name-mandatory gate (NAME_REQUIRED) needs a named user to
+    // get past it — this describe block is about allocation/cap logic, not
+    // that gate, so stub a user who already has a name on file.
+    const usersRepository = {
+      findById: vi.fn().mockResolvedValue({ name: 'Test User' }),
+    }
+    service = new ScheduledOrdersService(repoStub, { queue, usersRepository })
   })
 
   const baseData = () => ({

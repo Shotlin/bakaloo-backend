@@ -12,10 +12,25 @@ const SECTION_SELECT = `
 export class SectionsRepository {
   async findTabById(tabId) {
     const { rows: [tab] } = await query(
-      `SELECT id, key, store_key
+      `SELECT id, key, store_key, audience
        FROM theme_tabs
        WHERE id = $1`,
       [tabId]
+    )
+    return tab || null
+  }
+
+  // B2C and B2B tabs are independent rows sharing only (store_key, key) —
+  // see migration 126. Used to find a tab's sibling in the other audience
+  // (e.g. resolving "Copy B2C to B2B"'s source tab from the B2B tab being
+  // edited).
+  async findTabByStoreAndKey(storeKey, key, audience) {
+    const { rows: [tab] } = await query(
+      `SELECT id, key, store_key, audience
+       FROM theme_tabs
+       WHERE store_key = $1 AND key = $2 AND audience = $3
+       LIMIT 1`,
+      [storeKey, key, audience]
     )
     return tab || null
   }
@@ -241,7 +256,26 @@ export class SectionsRepository {
       return { copied: 0, alreadyHadSections: true, sections: existing }
     }
 
-    const source = await this.findByTabId(tabId, fromAudience)
+    // tabId is the destination tab (the one currently being edited, whose
+    // own audience is toAudience). B2C and B2B tabs are independent rows
+    // (migration 126), so the "from" side's sections live under a
+    // different tab_id entirely — resolve that sibling tab by the shared
+    // (store_key, key) identity rather than assuming a shared tab_id.
+    const destinationTab = await this.findTabById(tabId)
+    if (!destinationTab) {
+      return { copied: 0, alreadyHadSections: false, sections: [] }
+    }
+
+    const sourceTab = await this.findTabByStoreAndKey(
+      destinationTab.store_key,
+      destinationTab.key,
+      fromAudience
+    )
+    if (!sourceTab) {
+      return { copied: 0, alreadyHadSections: false, sections: [] }
+    }
+
+    const source = await this.findByTabId(sourceTab.id, fromAudience)
     if (source.length === 0) {
       return { copied: 0, alreadyHadSections: false, sections: [] }
     }

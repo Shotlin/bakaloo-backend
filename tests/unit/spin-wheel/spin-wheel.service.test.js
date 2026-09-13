@@ -91,6 +91,11 @@ function makeWalletServiceMock(overrides = {}) {
 function makeUsersRepoMock(overrides = {}) {
   return {
     getStats: vi.fn().mockResolvedValue({ total_orders: 0, total_spent: '0' }),
+    // spin()'s name-mandatory gate (see spin-wheel.service.js) needs a named
+    // user to get past it — every describe block in this file is about
+    // prize/wallet/milestone logic, not that gate, so default to a user who
+    // already has a name on file.
+    findById: vi.fn().mockResolvedValue({ id: USER_ID, name: 'Test User' }),
     ...overrides,
   }
 }

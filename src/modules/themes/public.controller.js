@@ -136,13 +136,14 @@ export class PublicThemeController {
       return error('Tab key is required', 'BAD_REQUEST')
     }
 
-    const cacheKey = getTabHomeCacheKey(storeKey, tabKey)
+    const audience = resolveEffectiveAudience(request)
+    const cacheKey = getTabHomeCacheKey(storeKey, tabKey, audience)
     const cached = await redis.get(cacheKey)
     if (cached) {
       return success(JSON.parse(cached), 'Tab home content')
     }
 
-    const tab = await getTabDefinition(storeKey, tabKey)
+    const tab = await getTabDefinition(storeKey, tabKey, audience)
     if (!tab) {
       reply.code(404)
       return error('Tab not found', 'NOT_FOUND')
@@ -292,7 +293,7 @@ export class PublicThemeController {
       return success(parsed.data, 'Section manifest')
     }
 
-    const tab = await getTabDefinition(storeKey, tabKey)
+    const tab = await getTabDefinition(storeKey, tabKey, audience)
     if (!tab) {
       reply.code(404)
       return error('Tab not found', 'NOT_FOUND')
@@ -374,14 +375,19 @@ function normalizeStoreKey(storeKey) {
 }
 
 async function getTabManifestRows(storeKey, audience = 'B2C') {
-  // Prefer a theme flagged for the requested audience, but fall back to
-  // the B2C one when no B2B-specific theme has been configured for this
-  // tab+variant yet — a newly-approved B2B customer must never see a
-  // blank/missing theme just because an admin hasn't built B2B theming
-  // for every tab. `audience IN ($2, 'B2C')` is a no-op filter for a B2C
-  // viewer (collapses to `= 'B2C'`, unchanged from before this migration);
-  // for a B2B viewer it matches both, and `ORDER BY (audience = $2) DESC`
-  // prefers the exact-audience row when both exist.
+  // The tab bar itself is fully independent per audience (each audience
+  // owns its own theme_tabs rows — see migration 126) — no cross-audience
+  // fallback here, unlike the theme-content join below. A B2B viewer must
+  // only ever see B2B's own tab list, never B2C's tabs bleeding through.
+  //
+  // The per-tab THEME SKIN still prefers a theme flagged for the requested
+  // audience, but falls back to the B2C one when no B2B-specific theme has
+  // been configured for this tab+variant yet — a newly-approved B2B
+  // customer must never see a blank/missing theme just because an admin
+  // hasn't built B2B theming for every tab. `audience IN ($2, 'B2C')` is a
+  // no-op filter for a B2C viewer (collapses to `= 'B2C'`); for a B2B
+  // viewer it matches both, and `ORDER BY (audience = $2) DESC` prefers
+  // the exact-audience row when both exist.
   const { rows } = await query(
     `SELECT
        tab.id AS tab_id,
@@ -420,6 +426,7 @@ async function getTabManifestRows(storeKey, audience = 'B2C') {
      ) theme_b ON true
      WHERE tab.store_key = $1
        AND tab.status = 'active'
+       AND tab.audience = $2
      ORDER BY tab.sort_order ASC, tab.label ASC`,
     [storeKey, audience]
   )
@@ -488,15 +495,16 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-async function getTabDefinition(storeKey, tabKey) {
+async function getTabDefinition(storeKey, tabKey, audience = 'B2C') {
   const { rows: [tab] } = await query(
     `SELECT id, store_key, key, merch_config
      FROM theme_tabs
      WHERE store_key = $1
        AND key = $2
        AND status = 'active'
+       AND audience = $3
      LIMIT 1`,
-    [storeKey, tabKey]
+    [storeKey, tabKey, audience]
   )
   return tab || null
 }

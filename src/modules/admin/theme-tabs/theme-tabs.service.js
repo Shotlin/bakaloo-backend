@@ -36,7 +36,7 @@ function compareTabsBySortOrder(a, b) {
   return `${a.id}`.localeCompare(`${b.id}`)
 }
 
-async function rebalanceStoreTabs(storeKey, preferredTab = null) {
+async function rebalanceStoreTabs(storeKey, audience, preferredTab = null) {
   if (!storeKey) {
     return
   }
@@ -44,6 +44,7 @@ async function rebalanceStoreTabs(storeKey, preferredTab = null) {
   const activeTabs = await repo.findAll({
     storeKey,
     status: 'active',
+    audience,
   })
 
   if (!activeTabs.length) {
@@ -89,6 +90,7 @@ export class ThemeTabsService {
     return repo.findAll({
       storeKey: filters.store_key,
       status: filters.status,
+      audience: filters.audience === 'B2B' ? 'B2B' : 'B2C',
     })
   }
 
@@ -100,11 +102,16 @@ export class ThemeTabsService {
     const storeKey = data.store_key
     const key = `${data.key}`.trim()
     const status = data.status || 'active'
+    // Which audience's tab bar this tab belongs to — independent from this
+    // point on: creating/archiving it never touches the other audience's
+    // tab list, since each audience owns its own dedicated rows.
+    const audience = data.audience === 'B2B' ? 'B2B' : 'B2C'
 
-    // Only an ACTIVE tab with the same key blocks creation. Archived tabs
-    // may share a key (the unique index is partial on status='active').
+    // Only an ACTIVE tab with the same key (within the same audience)
+    // blocks creation. Archived tabs may share a key (the unique index is
+    // partial on status='active'), and B2B/B2C never collide on key.
     if (status === 'active') {
-      const conflict = await repo.findByStoreAndKey(storeKey, key, { activeOnly: true })
+      const conflict = await repo.findByStoreAndKey(storeKey, key, { activeOnly: true, audience })
       if (conflict) {
         throw buildConflictError(
           `An active tab with key "${key}" already exists for this store. Choose a different name or key.`
@@ -112,11 +119,12 @@ export class ThemeTabsService {
       }
     }
 
-    // Only one tab per store can be the app's default landing tab. Clear any
-    // existing default before inserting the new row so the DB never has to
-    // reject a transient two-defaults state (idx_theme_tabs_one_default_per_store).
+    // Only one tab per (store, audience) can be the app's default landing
+    // tab. Clear any existing default before inserting the new row so the
+    // DB never has to reject a transient two-defaults state
+    // (idx_theme_tabs_one_default_per_store_audience).
     if (status === 'active' && data.is_default) {
-      await repo.clearDefaultsExcept(storeKey, null)
+      await repo.clearDefaultsExcept(storeKey, null, audience)
     }
 
     let tab
@@ -124,6 +132,7 @@ export class ThemeTabsService {
       tab = await repo.create({
         ...data,
         key,
+        audience,
         label: `${data.label}`.trim(),
         image_url: `${data.image_url || ''}`.trim() || null,
         text_color: normalizeTextColor(data.text_color),
@@ -139,7 +148,7 @@ export class ThemeTabsService {
     }
 
     if (tab.status === 'active') {
-      await rebalanceStoreTabs(tab.store_key, tab)
+      await rebalanceStoreTabs(tab.store_key, tab.audience, tab)
     }
 
     await invalidateTabCaches()
@@ -154,6 +163,10 @@ export class ThemeTabsService {
     const storeKey = data.store_key !== undefined ? data.store_key : existing.store_key
     const nextKey = data.key !== undefined ? `${data.key}`.trim() : existing.key
     const nextStatus = data.status !== undefined ? data.status : existing.status
+    // Audience is immutable via update — a tab can't hop between B2C and
+    // B2B tab bars after creation, since its content lives under its own
+    // dedicated tab id. Any `audience` field in the payload is ignored.
+    const audience = existing.audience
 
     // A conflict is only possible when the resulting tab is ACTIVE and its
     // (store_key, key) identity changes — either the key/store changed, or an
@@ -165,7 +178,7 @@ export class ThemeTabsService {
       nextStatus === 'active' && existing.status !== 'active'
 
     if (nextStatus === 'active' && (identityChanged || reactivating) && storeKey && nextKey) {
-      const conflict = await repo.findByStoreAndKey(storeKey, nextKey, { activeOnly: true })
+      const conflict = await repo.findByStoreAndKey(storeKey, nextKey, { activeOnly: true, audience })
       if (conflict && conflict.id !== id) {
         throw buildConflictError(
           `An active tab with key "${nextKey}" already exists for this store. Choose a different name or key.`
@@ -173,9 +186,10 @@ export class ThemeTabsService {
       }
     }
 
-    // Same "clear before write" rule as create() — only one default per store.
+    // Same "clear before write" rule as create() — only one default per
+    // (store, audience).
     if (data.is_default === true) {
-      await repo.clearDefaultsExcept(storeKey, id)
+      await repo.clearDefaultsExcept(storeKey, id, audience)
     }
 
     let tab
@@ -212,11 +226,11 @@ export class ThemeTabsService {
 
     for (const storeKeyToBalance of storesToRebalance) {
       if (tab.status === 'active' && storeKeyToBalance === tab.store_key) {
-        await rebalanceStoreTabs(storeKeyToBalance, tab)
+        await rebalanceStoreTabs(storeKeyToBalance, audience, tab)
         continue
       }
 
-      await rebalanceStoreTabs(storeKeyToBalance)
+      await rebalanceStoreTabs(storeKeyToBalance, audience)
     }
 
     await invalidateTabCaches()
@@ -228,7 +242,7 @@ export class ThemeTabsService {
     const tab = await repo.archive(id)
     if (!tab) return null
 
-    await rebalanceStoreTabs(tab.store_key)
+    await rebalanceStoreTabs(tab.store_key, tab.audience)
     await invalidateTabCaches()
     logAdminActivity(adminId, 'ARCHIVE_THEME_TAB', 'theme_tab', id, null, null, ip)
     return repo.findById(id)
@@ -239,13 +253,13 @@ export class ThemeTabsService {
     if (!tab) return null
 
     if (tab.status === 'active') {
-      await rebalanceStoreTabs(tab.store_key, tab)
+      await rebalanceStoreTabs(tab.store_key, tab.audience, tab)
 
       // The restored tab may have been the store's default before it was
       // archived — reclaim that slot from whichever tab holds it now rather
       // than risk two active defaults.
       if (tab.is_default) {
-        await repo.clearDefaultsExcept(tab.store_key, tab.id)
+        await repo.clearDefaultsExcept(tab.store_key, tab.id, tab.audience)
       }
     }
     await invalidateTabCaches()

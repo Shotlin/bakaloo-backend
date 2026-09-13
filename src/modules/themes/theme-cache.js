@@ -33,6 +33,6 @@ export function getSectionPublicCacheKey(storeKey = 'zepto', tabKey = 'all', aud
   return `${SECTION_PUBLIC_CACHE_PREFIX}:${storeKey}:${tabKey}:${audience}`
 }
 
-export function getTabHomeCacheKey(storeKey = 'zepto', key = 'all') {
-  return `${TAB_HOME_CACHE_PREFIX}:${storeKey}:${key}`
+export function getTabHomeCacheKey(storeKey = 'zepto', key = 'all', audience = 'B2C') {
+  return `${TAB_HOME_CACHE_PREFIX}:${storeKey}:${key}:${audience}`
 }

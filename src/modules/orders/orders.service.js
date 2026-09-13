@@ -222,6 +222,25 @@ export class OrdersService {
       useWallet,
     } = body
 
+    // Name-mandatory gate: OTP-only signup never collects a name (see
+    // auth.service.js), and until now nothing enforced it server-side —
+    // the customer app's "What's your name?" popup was the ONLY place
+    // that ever asked, and it could be skipped for real (app
+    // backgrounded/killed mid-check, a flaky network on its one-shot
+    // profile fetch, or any session that never happens to pass through
+    // Home) with zero consequence: the order still went through and the
+    // user row was left with name = NULL indefinitely. Blocking here, the
+    // one choke point every order must pass through, closes that gap the
+    // same way the address/store-hours gates below already do.
+    const orderingUser = await this.usersRepo.findById(userId)
+    if (!orderingUser || !(orderingUser.name || '').trim()) {
+      return {
+        success: false,
+        message: 'Please add your name to your profile before placing an order',
+        code: 'NAME_REQUIRED',
+      }
+    }
+
     // Validate delivery slot
     const resolvedDeliveryMode = (deliveryMode || 'ASAP').toUpperCase()
     if (!['ASAP', 'SCHEDULED'].includes(resolvedDeliveryMode)) {

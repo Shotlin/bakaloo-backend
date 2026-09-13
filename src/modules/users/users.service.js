@@ -24,11 +24,24 @@ export class UsersService {
    * Update user profile (name, email, birthday)
    */
   async updateProfile(userId, data) {
+    // Reject a name that's present but blank/whitespace-only. The route
+    // schema's minLength:2 counts raw characters, so "  " (two spaces)
+    // would otherwise pass validation and then satisfy every "has a name"
+    // check downstream (they all trim before testing) — a loophole around
+    // the name-mandatory gates in orders/bulk-orders/scheduled-orders/spin.
+    if (data.name !== undefined) {
+      const trimmedName = data.name.trim()
+      if (trimmedName.length < 2) {
+        return { success: false, message: 'Name must be at least 2 characters', code: 'INVALID_NAME' }
+      }
+      data = { ...data, name: trimmedName }
+    }
+
     // Check email uniqueness if email is being updated
     if (data.email) {
       const taken = await this.repo.isEmailTaken(data.email, userId)
       if (taken) {
-        return { success: false, message: 'Email is already in use' }
+        return { success: false, message: 'Email is already in use', code: 'EMAIL_TAKEN' }
       }
     }
 

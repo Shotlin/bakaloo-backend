@@ -127,6 +127,12 @@ function makeService(overrides = {}) {
     paymentOffersService: {
       resolveForCheckout: vi.fn().mockResolvedValue(null),
     },
+    // placeOrder()'s name-mandatory gate (NAME_REQUIRED) needs a named user
+    // to get past it — this test is about the cart-milestone split logic,
+    // not that gate, so stub a user who already has a name on file.
+    usersRepository: {
+      findById: vi.fn().mockResolvedValue({ id: USER_ID, name: 'Test User' }),
+    },
     cashbackService: {
       createPending: vi.fn().mockResolvedValue(undefined),
       evaluateAndCredit: vi.fn().mockResolvedValue(undefined),

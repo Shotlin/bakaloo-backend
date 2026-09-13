@@ -61,6 +61,7 @@ export const listThemeTabsSchema = {
     properties: {
       store_key: { type: 'string', enum: STORE_KEYS },
       status: { type: 'string', enum: TAB_STATUSES },
+      audience: { type: 'string', enum: ['B2C', 'B2B'], default: 'B2C' },
     },
   },
 }
@@ -79,6 +80,7 @@ export const createThemeTabSchema = {
       status: { type: 'string', enum: TAB_STATUSES },
       is_default: { type: 'boolean' },
       merch_config: merchConfigSchema,
+      audience: { type: 'string', enum: ['B2C', 'B2B'], default: 'B2C' },
     },
   },
 }

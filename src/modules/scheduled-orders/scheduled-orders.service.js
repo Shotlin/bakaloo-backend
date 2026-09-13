@@ -2,6 +2,7 @@ import { logger } from '../../config/logger.js'
 import { scheduledOrdersQueue } from '../../config/bullmq.js'
 import { getClient } from '../../config/database.js'
 import { SCHEDULED_ORDERS_CONSTANTS } from './scheduled-orders.schema.js'
+import { UsersRepository } from '../users/users.repository.js'
 
 /**
  * Scheduled Orders service — customer-facing CRUD for scheduled / recurring
@@ -49,6 +50,7 @@ export class ScheduledOrdersService {
    * @param {object} [deps.ordersRepository] - For OrderSplitter (worker)
    * @param {object} [deps.orderSplitter] - Optional pre-built splitter (worker / tests)
    * @param {object} [deps.notificationsService] - Optional notifications gateway (worker)
+   * @param {object} [deps.usersRepository] - For the name-mandatory gate on create()
    */
   constructor(repository, deps = {}) {
     this.repo = repository
@@ -60,6 +62,7 @@ export class ScheduledOrdersService {
     this.ordersRepo = deps.ordersRepository || null
     this.orderSplitter = deps.orderSplitter || null
     this.notificationsService = deps.notificationsService || null
+    this.usersRepo = deps.usersRepository || new UsersRepository()
   }
 
   // ────────────────────────────────────────────────────────
@@ -249,6 +252,19 @@ export class ScheduledOrdersService {
   async create(userId, data) {
     if (!userId) {
       return { success: false, message: 'Unauthorized', code: 'UNAUTHORIZED' }
+    }
+
+    // Name-mandatory gate — same as orders.service.js#placeOrder and
+    // bulk-orders.service.js#create: a scheduled order still commits real
+    // value at scheduled_for, so a nameless account must be blocked at
+    // creation time, the same choke point those siblings use.
+    const orderingUser = await this.usersRepo.findById(userId)
+    if (!orderingUser || !(orderingUser.name || '').trim()) {
+      return {
+        success: false,
+        message: 'Please add your name to your profile before placing an order',
+        code: 'NAME_REQUIRED',
+      }
     }
 
     // Req 10.7 — at least 2 hours in the future (deterministic via static).

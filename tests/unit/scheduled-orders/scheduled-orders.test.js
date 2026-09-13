@@ -112,7 +112,13 @@ describe('ScheduledOrdersService.create — happy path edges', () => {
     repo = makeRepoStub()
     repo.isUserAllocatedToShop.mockResolvedValue(true)
     repo.countActiveForUser.mockResolvedValue(0)
-    service = new ScheduledOrdersService(repo, { queue })
+    // create()'s name-mandatory gate (NAME_REQUIRED) needs a named user to
+    // get past it — this describe block is about scheduling/enqueue logic,
+    // not that gate, so stub a user who already has a name on file.
+    const usersRepository = {
+      findById: vi.fn().mockResolvedValue({ id: USER_ID, name: 'Test User' }),
+    }
+    service = new ScheduledOrdersService(repo, { queue, usersRepository })
   })
 
   it('accepts a scheduled_for 1 day in the future (Req 10.7)', async () => {

@@ -101,7 +101,13 @@ const makeService = () => {
     findStaffRole: vi.fn(),
     findMany: vi.fn().mockResolvedValue({ items: [], total: 0 }),
   }
-  return { service: new BulkOrdersService(repo), repo }
+  // create()'s name-mandatory gate (NAME_REQUIRED) needs a named user to get
+  // past it — these tests are about order_number/allocation/JWT-wiring
+  // logic, not that gate, so stub a user who already has a name on file.
+  const usersRepo = {
+    findById: vi.fn().mockResolvedValue({ id: USER_ID, name: 'Test User' }),
+  }
+  return { service: new BulkOrdersService(repo, undefined, undefined, usersRepo), repo, usersRepo }
 }
 
 const makeTxClient = () => ({

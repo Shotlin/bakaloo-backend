@@ -1,7 +1,7 @@
 import { query } from '../../config/database.js'
 
 export class ThemeTabsRepository {
-  async findAll({ storeKey, status }) {
+  async findAll({ storeKey, status, audience }) {
     const conditions = []
     const params = []
     let idx = 1
@@ -14,6 +14,11 @@ export class ThemeTabsRepository {
     if (status) {
       conditions.push(`tab.status = $${idx++}`)
       params.push(status)
+    }
+
+    if (audience) {
+      conditions.push(`tab.audience = $${idx++}`)
+      params.push(audience)
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
@@ -89,13 +94,21 @@ export class ThemeTabsRepository {
     return tab || null
   }
 
-  async findByStoreAndKey(storeKey, key, { activeOnly = false } = {}) {
+  async findByStoreAndKey(storeKey, key, { activeOnly = false, audience } = {}) {
+    const params = [storeKey, key]
+    let audienceClause = ''
+    if (audience) {
+      params.push(audience)
+      audienceClause = `AND audience = $${params.length}`
+    }
+
     const { rows: [tab] } = await query(
       `SELECT * FROM theme_tabs
        WHERE store_key = $1 AND key = $2
        ${activeOnly ? "AND status = 'active'" : ''}
+       ${audienceClause}
        LIMIT 1`,
-      [storeKey, key]
+      params
     )
     return tab || null
   }
@@ -111,9 +124,10 @@ export class ThemeTabsRepository {
          sort_order,
          status,
          is_default,
-         merch_config
+         merch_config,
+         audience
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
        RETURNING *`,
       [
         data.store_key,
@@ -125,6 +139,7 @@ export class ThemeTabsRepository {
         data.status || 'active',
         !!data.is_default,
         JSON.stringify(data.merch_config),
+        data.audience === 'B2B' ? 'B2B' : 'B2C',
       ]
     )
     return tab
@@ -187,14 +202,15 @@ export class ThemeTabsRepository {
     return tab || null
   }
 
-  async clearDefaultsExcept(storeKey, exceptId) {
+  async clearDefaultsExcept(storeKey, exceptId, audience) {
     await query(
       `UPDATE theme_tabs
        SET is_default = false, updated_at = NOW()
        WHERE store_key = $1
+         AND audience = $2
          AND is_default = true
-         AND ($2::uuid IS NULL OR id != $2)`,
-      [storeKey, exceptId]
+         AND ($3::uuid IS NULL OR id != $3)`,
+      [storeKey, audience === 'B2B' ? 'B2B' : 'B2C', exceptId]
     )
   }
 

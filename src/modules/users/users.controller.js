@@ -28,7 +28,7 @@ export class UsersController {
     const result = await this.service.updateProfile(request.user.id, request.body)
 
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'EMAIL_TAKEN'))
+      return reply.code(400).send(error(result.message, result.code || 'UPDATE_FAILED'))
     }
 
     return reply.code(200).send(success(result.user, 'Profile updated'))

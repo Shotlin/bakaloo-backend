@@ -2,6 +2,7 @@ import { getClient } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
 import { LedgerService } from '../ledger/ledger.service.js'
 import { BusinessAccountsRepository } from '../business-accounts/business-accounts.repository.js'
+import { UsersRepository } from '../users/users.repository.js'
 
 /**
  * Bulk Orders service — business logic for the multi-vendor large-order
@@ -56,10 +57,11 @@ export class BulkOrdersService {
    * @param {LedgerService} [ledgerService] - Injectable for tests. Used only
    *   by the LEDGER payment-method confirm path.
    */
-  constructor(repository, ledgerService = new LedgerService(), businessAccountsRepository = new BusinessAccountsRepository()) {
+  constructor(repository, ledgerService = new LedgerService(), businessAccountsRepository = new BusinessAccountsRepository(), usersRepository = new UsersRepository()) {
     this.repo = repository
     this.ledgerService = ledgerService
     this.businessAccountsRepo = businessAccountsRepository
+    this.usersRepo = usersRepository
   }
 
   // ────────────────────────────────────────────────────────
@@ -213,6 +215,19 @@ export class BulkOrdersService {
   async create(userId, data) {
     if (!userId) {
       return { success: false, message: 'Unauthorized', code: 'UNAUTHORIZED' }
+    }
+
+    // Name-mandatory gate — same reasoning and same check as
+    // orders.service.js#placeOrder: OTP-only signup never collects a name,
+    // and a bulk order is a value-exchange choke point just like retail
+    // checkout, so a nameless account must be blocked here too.
+    const orderingUser = await this.usersRepo.findById(userId)
+    if (!orderingUser || !(orderingUser.name || '').trim()) {
+      return {
+        success: false,
+        message: 'Please add your name to your profile before placing an order',
+        code: 'NAME_REQUIRED',
+      }
     }
 
     // Req 9.6 — delivery_date window
