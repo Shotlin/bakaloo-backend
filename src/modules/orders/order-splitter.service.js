@@ -322,6 +322,13 @@ export class OrderSplitterService {
     payment,
     checkoutMeta = {},
     feeContext = {},
+    // B2B "Place Order" (payment_method 'B2B_CREDIT') — see migration
+    // 128_b2b_place_order.sql. Stock availability is still verified in
+    // step 1 below (so an obviously-impossible order fails fast), but the
+    // actual decrement is skipped and deferred to admin approval
+    // (ShopProductsRepository#deductStockForApprovedOrder), re-verifying
+    // stock fresh at that later point since time will have passed.
+    deferStockDeduction = false,
   }) {
     if (!client) throw new Error('createOrders requires an open pg client')
     if (!groups || groups.size === 0) {
@@ -541,31 +548,38 @@ export class OrderSplitterService {
       // this called the lower-level applyStockUpdate() directly, which
       // silently skipped the ledger and the post-commit cache
       // invalidation every other stock-mutating path relies on).
-      for (const { item, locked } of verified) {
-        const prevQty = Number(locked.stock_quantity)
-        const { stockProduct: updated } = await this.shopProductsRepo.applyStockChange(
-          client,
-          {
-            shopProductId: item.shopProductId,
-            delta: -item.quantity,
-            type: STOCK_MOVEMENT_TYPES.ORDER_DEDUCTION,
-            source: STOCK_MOVEMENT_SOURCES.ORDER,
-            orderId: order.id,
-            actor: null, // system write — no human actor for a customer checkout
-          }
-        )
+      //
+      // Skipped entirely when deferStockDeduction is set (B2B "Place
+      // Order") — availability was already checked in step 1 above, but
+      // the actual decrement happens later, at admin approval, via
+      // ShopProductsRepository#deductStockForApprovedOrder.
+      if (!deferStockDeduction) {
+        for (const { item, locked } of verified) {
+          const prevQty = Number(locked.stock_quantity)
+          const { stockProduct: updated } = await this.shopProductsRepo.applyStockChange(
+            client,
+            {
+              shopProductId: item.shopProductId,
+              delta: -item.quantity,
+              type: STOCK_MOVEMENT_TYPES.ORDER_DEDUCTION,
+              source: STOCK_MOVEMENT_SOURCES.ORDER,
+              orderId: order.id,
+              actor: null, // system write — no human actor for a customer checkout
+            }
+          )
 
-        // Record the prev→new transition for post-commit fan-out. The
-        // shopProduct object includes everything the side-effect helpers
-        // need (id, product_id, stock_quantity, sold_out_at, threshold).
-        stockTransitions.push({
-          shopId,
-          shopProduct: updated,
-          prevQty,
-          newQty: prevQty - item.quantity,
-          lowStockThreshold: Number(updated.low_stock_threshold),
-          productMeta: { product_name: item.name || null },
-        })
+          // Record the prev→new transition for post-commit fan-out. The
+          // shopProduct object includes everything the side-effect helpers
+          // need (id, product_id, stock_quantity, sold_out_at, threshold).
+          stockTransitions.push({
+            shopId,
+            shopProduct: updated,
+            prevQty,
+            newQty: prevQty - item.quantity,
+            lowStockThreshold: Number(updated.low_stock_threshold),
+            productMeta: { product_name: item.name || null },
+          })
+        }
       }
 
       // Capture the road-route lookup inputs for this order — resolved

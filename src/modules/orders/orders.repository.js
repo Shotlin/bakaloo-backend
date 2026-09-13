@@ -44,7 +44,7 @@ export class OrdersRepository {
                 handling_fee, late_night_fee, tip_amount, delivery_instructions, savings_total,
                 delivery_mode, scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
                 fee_breakdown, quick_delivery_selected, quick_delivery_surcharge_amount,
-                wallet_amount_used, buyer_gstin, buyer_company_name, created_at, updated_at`,
+                wallet_amount_used, ledger_amount_used, buyer_gstin, buyer_company_name, created_at, updated_at`,
       [
         orderData.orderNumber,
         orderData.userId,
@@ -613,6 +613,9 @@ export class OrdersRepository {
       taxAmount: parseFloat(row.tax_amount),
       totalAmount: parseFloat(row.total_amount),
       walletAmountUsed: parseFloat(row.wallet_amount_used || 0),
+      ledgerAmountUsed: parseFloat(row.ledger_amount_used || 0),
+      b2bApprovalStatus: row.b2b_approval_status || null,
+      b2bAmountSettled: parseFloat(row.b2b_amount_settled || 0),
       paymentMethod: row.payment_method,
       paymentStatus: row.payment_status,
       couponCode: row.coupon_code,

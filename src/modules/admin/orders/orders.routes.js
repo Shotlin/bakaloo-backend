@@ -8,6 +8,7 @@ import {
   refundOrderSchema, cancelOrderSchema, bulkStatusSchema,
   rescheduleOrderSchema, orderNotesListSchema, addOrderNoteSchema,
   reconcilePaymentSchema, razorpayDetailsSchema, bulkReconcilePaymentsSchema,
+  listB2BOrdersSchema, b2bOrderDetailSchema, approveB2BOrderSchema, recordB2BSettlementSchema,
 } from './orders.schema.js'
 
 /**
@@ -40,4 +41,12 @@ export default async function adminOrdersRoutes(fastify) {
   fastify.post('/bulk-reconcile-payment', { schema: bulkReconcilePaymentsSchema, preHandler: adminAuth }, ctrl.bulkReconcilePayments.bind(ctrl))
   fastify.post('/:id/cancel', { schema: cancelOrderSchema, preHandler: adminAuth }, ctrl.cancelOrder.bind(ctrl))
   fastify.post('/bulk-status', { schema: bulkStatusSchema, preHandler: adminAuth }, ctrl.bulkUpdateStatus.bind(ctrl))
+
+  // B2B "Place Order" — registered as literal "/b2b..." segments, which
+  // Fastify's router always matches ahead of the ":id" param routes above
+  // regardless of registration order (static segments take precedence).
+  fastify.get('/b2b', { schema: listB2BOrdersSchema, preHandler: adminAuth }, ctrl.findAllB2B.bind(ctrl))
+  fastify.get('/b2b/:id', { schema: b2bOrderDetailSchema, preHandler: adminAuth }, ctrl.findB2BById.bind(ctrl))
+  fastify.post('/b2b/:id/approve', { schema: approveB2BOrderSchema, preHandler: adminAuth }, ctrl.approveB2BOrder.bind(ctrl))
+  fastify.post('/b2b/:id/settlements', { schema: recordB2BSettlementSchema, preHandler: adminAuth }, ctrl.recordB2BSettlement.bind(ctrl))
 }

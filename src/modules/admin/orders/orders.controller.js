@@ -199,4 +199,47 @@ export class AdminOrdersController {
       return reply.code(err.statusCode || 500).send(error(err.message))
     }
   }
+
+  // ── B2B "Place Order" ──────────────────────────────────────────────
+
+  async findAllB2B(request, reply) {
+    try {
+      const data = await this.service.findAllB2B(request.query)
+      return reply.send(success(data, 'B2B orders fetched'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
+  async findB2BById(request, reply) {
+    try {
+      const data = await this.service.findB2BById(request.params.id)
+      return reply.send(success(data, 'B2B order details'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
+  async approveB2BOrder(request, reply) {
+    try {
+      const data = await this.service.approveB2BOrder(request.params.id, request.user.id, request.ip)
+      return reply.send(success(data, 'Order approved'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
+
+  async recordB2BSettlement(request, reply) {
+    try {
+      const data = await this.service.recordB2BSettlement(
+        request.params.id,
+        request.body,
+        request.user.id,
+        request.ip
+      )
+      return reply.send(success(data, 'Settlement recorded'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message))
+    }
+  }
 }

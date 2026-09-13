@@ -829,6 +829,60 @@ export class ShopProductsRepository {
     return { restoredCount, failedItems }
   }
 
+  /**
+   * Deduct stock for every line item of a B2B "Place Order" order whose
+   * deduction was deferred until admin approval (see migration
+   * 128_b2b_place_order.sql and OrderSplitterService#createOrders'
+   * `deferStockDeduction` option) — the counterpart to
+   * restoreStockForCancelledOrder above, but with the opposite failure
+   * philosophy: restoring stock on cancellation is best-effort (a failed
+   * line is logged and skipped, since the order is already gone either
+   * way), but deducting stock to actually fulfil an order is not — a
+   * single insufficient-stock line here throws and ABORTS THE WHOLE
+   * APPROVAL (the caller's transaction rolls back, the order stays
+   * PENDING approval), since shipping some lines and silently dropping
+   * others would be a wrong order, not a partially-restored one. Every
+   * line still goes through applyStockChange() for the same
+   * ORDER_DEDUCTION ledger row and cache-invalidation contract every
+   * other order's stock deduction gets.
+   *
+   * @param {import('pg').PoolClient} client - Transactional client.
+   * @param {object} params
+   * @param {string} params.orderId
+   * @param {Array<{shop_product_id?: string, shopProductId?: string, quantity: number, name?: string}>} params.items
+   * @param {'DASHBOARD'|'ORDER'|'JOB'|'API'} params.source
+   * @param {{ userId: string|null, shopRole: string|null }|null} [params.actor]
+   * @returns {Promise<Array<{shopId: string, shopProduct: object, prevQty: number, newQty: number, lowStockThreshold: number, productMeta: {product_name: string|null}}>>}
+   *   Stock transitions, shaped for OrderSplitterService#firePostCommitSideEffects.
+   */
+  async deductStockForApprovedOrder(client, { orderId, items, source, actor = null }) {
+    const transitions = []
+    for (const item of items || []) {
+      const shopProductId = item.shopProductId || item.shop_product_id
+      const quantity = Number(item.quantity)
+      if (!shopProductId || !Number.isFinite(quantity) || quantity <= 0) continue
+
+      const { stockProduct, movement } = await this.applyStockChange(client, {
+        shopProductId,
+        delta: -quantity,
+        type: STOCK_MOVEMENT_TYPES.ORDER_DEDUCTION,
+        source,
+        orderId,
+        actor,
+      })
+
+      transitions.push({
+        shopId: stockProduct.shop_id,
+        shopProduct,
+        prevQty: Number(movement.quantity_before),
+        newQty: Number(movement.quantity_after),
+        lowStockThreshold: Number(stockProduct.low_stock_threshold),
+        productMeta: { product_name: item.name || null },
+      })
+    }
+    return transitions
+  }
+
   // ────────────────────────────────────────────────────────
   // Bulk price update — price-only writes (R23.12)
   // ────────────────────────────────────────────────────────

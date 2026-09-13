@@ -37,6 +37,7 @@ import { SpinWheelService } from '../spin-wheel/spin-wheel.service.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
 import { LedgerService } from '../ledger/ledger.service.js'
+import { LedgerRepository } from '../ledger/ledger.repository.js'
 import { BusinessAccountsRepository } from '../business-accounts/business-accounts.repository.js'
 import { UsersRepository } from '../users/users.repository.js'
 import { CartMilestonesService } from '../cart-milestones/cart-milestones.service.js'
@@ -150,6 +151,12 @@ export class OrdersService {
     // _checkPaymentMethodAllowed() and drawn via LedgerService#payFromLedger
     // (the same two-step create-PENDING-then-pay shape as ONLINE/legacy-WALLET).
     this.ledgerService = options.ledgerService || new LedgerService()
+    // Ledger-balance-toggle checkout feature — same shape as the wallet
+    // toggle above (offsets an order's total regardless of paymentMethod),
+    // but for B2B credit instead of the customer's own money. See
+    // placeOrder()'s ledger block and cancel()'s ledger-reversal-on-
+    // self-cancel block.
+    this.ledgerRepo = options.ledgerRepository || new LedgerRepository()
     // GST invoicing snapshot at order-placement time — see placeOrder()'s
     // buyerGstin/buyerCompanyName block.
     this.businessAccountsRepo =
@@ -220,6 +227,14 @@ export class OrdersService {
       // Quick Delivery above. Ignored for the legacy paymentMethod:'WALLET'
       // (old published app), which keeps its own separate full-payment flow.
       useWallet,
+      // Ledger-balance-toggle — same convention, for the B2B credit line
+      // instead of wallet balance. Ignored for paymentMethod:'LEDGER',
+      // which keeps its own separate full-payment payFromLedger() flow.
+      // Mutually exclusive with useWallet (see the block below) — a B2B
+      // account with an active ledger never shows the wallet stripe in the
+      // app, so a client sending both would be unexpected, not a supported
+      // combo.
+      useLedger,
     } = body
 
     // Name-mandatory gate: OTP-only signup never collects a name (see
@@ -412,6 +427,18 @@ export class OrdersService {
     )
     if (paymentGateError) {
       return paymentGateError
+    }
+
+    // B2B_CREDIT ("Place Order") draws a single credit-line charge and
+    // defers stock/approval as one unit — same single-shop restriction as
+    // coupons/wallet-toggle/ledger-toggle below, so as not to introduce
+    // multi-order credit-splitting complexity.
+    if (normalizedPaymentMethod === 'B2B_CREDIT' && groupedByShop.size !== 1) {
+      return {
+        success: false,
+        message: 'Placing an order on credit is not yet supported for multi-shop carts — check out each shop separately.',
+        code: 'B2B_CREDIT_MULTI_SHOP_UNSUPPORTED',
+      }
     }
 
     // 3. Apply coupon — only meaningful when the cart is single-shop. For
@@ -637,6 +664,10 @@ export class OrdersService {
     // exactly like a COD order (already confirmed, nothing deferred).
     let walletAmountUsed = 0
     let walletFullyCoversOrder = false
+    // Ledger-balance-toggle checkout feature — same shape as wallet above,
+    // for the B2B credit line instead of the customer's own money.
+    let ledgerAmountUsed = 0
+    let ledgerFullyCoversOrder = false
     try {
       await client.query('BEGIN')
 
@@ -648,6 +679,7 @@ export class OrdersService {
         deliveryAddress,
         payment: { method: normalizedPaymentMethod, status: initialPaymentStatus },
         feeContext,
+        deferStockDeduction: normalizedPaymentMethod === 'B2B_CREDIT',
         checkoutMeta: {
           couponCode: appliedCouponCode,
           deliveryNotes: deliveryNotes || null,
@@ -663,16 +695,102 @@ export class OrdersService {
         },
       })
 
-      // Wallet-balance-toggle — applies on top of COD or ONLINE, replacing
-      // the old exclusive paymentMethod:'WALLET'. Restricted to single-shop
-      // carts, same as coupons/tip/Quick Delivery above (see method
-      // docstring) — no new multi-shop-splitting complexity introduced.
-      // Skipped entirely for the legacy paymentMethod:'WALLET' (old
-      // published app), which keeps using its own full-payment
-      // payFromWallet() flow untouched — and for LEDGER, whose own
-      // full-payment payFromLedger() flow draws the order's entire
-      // totalAmount and has no concept of a partial wallet offset on top.
-      if (useWallet && groupedByShop.size === 1 && normalizedPaymentMethod !== 'WALLET' && normalizedPaymentMethod !== 'LEDGER' && createdOrders.length === 1) {
+      // Ledger-balance-toggle / Wallet-balance-toggle — applies on top of
+      // COD or ONLINE, replacing the old exclusive paymentMethod:'WALLET'.
+      // Restricted to single-shop carts, same as coupons/tip/Quick Delivery
+      // above (see method docstring) — no new multi-shop-splitting
+      // complexity introduced. Skipped entirely for the legacy
+      // paymentMethod:'WALLET' (old published app), which keeps using its
+      // own full-payment payFromWallet() flow untouched — and for LEDGER,
+      // whose own full-payment payFromLedger() flow draws the order's
+      // entire totalAmount and has no concept of a partial offset on top.
+      //
+      // Mutually exclusive by construction (else-if, not two independent
+      // ifs): the app never shows both toggles at once (an active ledger
+      // replaces the wallet stripe entirely — see cart_screen.dart), and a
+      // single order should only ever be offset by one non-cash source.
+      const singleShopOffsetEligible =
+        groupedByShop.size === 1 &&
+        normalizedPaymentMethod !== 'WALLET' &&
+        normalizedPaymentMethod !== 'LEDGER' &&
+        normalizedPaymentMethod !== 'B2B_CREDIT' &&
+        createdOrders.length === 1
+
+      // Defense in depth for the admin ledger kill-switch — the cart
+      // already hides this toggle client-side when disabled (see
+      // bill-summary.service.js's paymentMethods.ledger.enabled), but a
+      // stale/rogue client request must not be able to draw credit while
+      // the setting is off.
+      const ledgerToggleEnabled = useLedger
+        ? (await this.paymentSettingsService.getConfig()).ledgerEnabled
+        : false
+
+      if (ledgerToggleEnabled && singleShopOffsetEligible) {
+        const orderId = createdOrders[0].id
+        const orderTotal = createdOrders[0].totalAmount
+        // FOR UPDATE lock taken here, inside this same transaction — the
+        // amount below is capped to the credit we just locked, so the draw
+        // a few lines down can never race or fail against a balance that's
+        // changed since.
+        const ledgerAccount = await this.ledgerRepo.getForUpdateByUserId(client, userId)
+        // Capped to the SOFT monthly limit (what the cart displayed as
+        // "available credit"), never the hard_limit backstop — this toggle
+        // is meant to replace the old "draw the whole order as overage"
+        // one-tap flow with a hard per-order ceiling, so what's shown as
+        // available is exactly what gets drawn. An inactive/missing/
+        // suspended account behaves as zero available credit rather than
+        // erroring — the app never offers this toggle in that case, but a
+        // stale client request degrades to "no offset applied" instead of
+        // failing the whole order.
+        const availableCredit = ledgerAccount && ledgerAccount.status === 'ACTIVE'
+          ? Math.max(0, parseFloat(ledgerAccount.monthly_credit_limit) - parseFloat(ledgerAccount.current_balance))
+          : 0
+        ledgerAmountUsed = Math.round(Math.min(availableCredit, orderTotal) * 100) / 100
+        ledgerFullyCoversOrder = ledgerAmountUsed > 0 && ledgerAmountUsed >= orderTotal
+
+        if (ledgerFullyCoversOrder) {
+          // Full coverage regardless of the chosen method — confirmed
+          // immediately, nothing left to collect via COD cash or Razorpay.
+          await this.ledgerRepo.draw(
+            client, ledgerAccount.id, ledgerAmountUsed,
+            `Ledger payment for order ${createdOrders[0].orderNumber}`, { orderId }
+          )
+          await client.query(
+            `UPDATE orders SET ledger_amount_used = $1, payment_status = 'PAID', status = 'CONFIRMED', updated_at = NOW() WHERE id = $2`,
+            [ledgerAmountUsed, orderId]
+          )
+          createdOrders[0].ledgerAmountUsed = ledgerAmountUsed
+          createdOrders[0].paymentStatus = 'PAID'
+          createdOrders[0].status = 'CONFIRMED'
+        } else if (ledgerAmountUsed > 0 && normalizedPaymentMethod === 'COD') {
+          // COD partial — draw now (real credit is extended immediately,
+          // no async gateway step to wait for); the remainder stays due in
+          // cash at delivery (see delivery.service.js's collection-amount
+          // validation, updated to account for ledger_amount_used).
+          await this.ledgerRepo.draw(
+            client, ledgerAccount.id, ledgerAmountUsed,
+            `Ledger payment for order ${createdOrders[0].orderNumber}`, { orderId }
+          )
+          await client.query(
+            `UPDATE orders SET ledger_amount_used = $1, updated_at = NOW() WHERE id = $2`,
+            [ledgerAmountUsed, orderId]
+          )
+          createdOrders[0].ledgerAmountUsed = ledgerAmountUsed
+        } else if (ledgerAmountUsed > 0) {
+          // ONLINE with a remainder — persist the intended amount only.
+          // The actual draw is deliberately deferred to
+          // PaymentsService#completeVerifiedPayment, atomically alongside
+          // confirming the order, so a Razorpay payment that's abandoned
+          // or fails never touches the ledger at all — no compensating
+          // reversal is ever needed. createPaymentOrder() reads this field
+          // back to charge Razorpay only the remainder.
+          await client.query(
+            `UPDATE orders SET ledger_amount_used = $1, updated_at = NOW() WHERE id = $2`,
+            [ledgerAmountUsed, orderId]
+          )
+          createdOrders[0].ledgerAmountUsed = ledgerAmountUsed
+        }
+      } else if (useWallet && singleShopOffsetEligible) {
         const orderId = createdOrders[0].id
         const orderTotal = createdOrders[0].totalAmount
         // FOR UPDATE lock taken here, inside this same transaction — the
@@ -723,6 +841,46 @@ export class OrdersService {
           )
           createdOrders[0].walletAmountUsed = walletAmountUsed
         }
+      }
+
+      // B2B_CREDIT ("Place Order") — draws the order's FULL total from the
+      // ledger immediately, same hard_limit-guarded overage-allowed check
+      // as the legacy exclusive LEDGER method's payFromLedger() (see
+      // migration 121's header: monthly_credit_limit is a soft/billing-
+      // only cap, hard_limit is the one figure actually enforced). Unlike
+      // every other method, this deliberately does NOT confirm the order
+      // or queue rider auto-assignment — b2b_approval_status='PENDING'
+      // holds it for an admin to approve (which is also when stock,
+      // deferred above via deferStockDeduction, actually gets deducted —
+      // see AdminOrdersService#approveB2BOrder).
+      if (normalizedPaymentMethod === 'B2B_CREDIT' && createdOrders.length === 1) {
+        const orderId = createdOrders[0].id
+        const orderTotal = createdOrders[0].totalAmount
+
+        const ledgerAccount = await this.ledgerRepo.getForUpdateByUserId(client, userId)
+        if (!ledgerAccount || ledgerAccount.status !== 'ACTIVE') {
+          const err = new Error('Your B2B credit line is not currently active')
+          err.code = 'LEDGER_NOT_ACTIVE'
+          throw err
+        }
+
+        const projectedBalance = parseFloat(ledgerAccount.current_balance) + orderTotal
+        if (projectedBalance > parseFloat(ledgerAccount.hard_limit)) {
+          const err = new Error('This order would exceed your available credit limit')
+          err.code = 'LEDGER_LIMIT_EXCEEDED'
+          throw err
+        }
+
+        await this.ledgerRepo.draw(
+          client, ledgerAccount.id, orderTotal,
+          `Ledger payment for order ${createdOrders[0].orderNumber}`, { orderId }
+        )
+        await client.query(
+          `UPDATE orders SET payment_status = 'PAID', b2b_approval_status = 'PENDING', updated_at = NOW() WHERE id = $1`,
+          [orderId]
+        )
+        createdOrders[0].paymentStatus = 'PAID'
+        createdOrders[0].b2bApprovalStatus = 'PENDING'
       }
 
       await client.query('COMMIT')
@@ -1123,16 +1281,46 @@ export class OrdersService {
       return null
     }
 
-    // LEDGER — B2B credit line. Not gated by fee_settings (it's not a
-    // platform-wide toggle like COD/Razorpay/wallet); gated on the
-    // customer actually having an ACTIVE ledger account, mirroring
+    // LEDGER — B2B credit line. Gated on both the platform-wide toggle
+    // (payment_settings.ledger_enabled — an admin kill-switch, defaults on)
+    // AND the customer actually having an ACTIVE ledger account, mirroring
     // bulk-orders.service.js#create's identical LEDGER_NOT_AVAILABLE check.
     if (normalizedPaymentMethod === 'LEDGER') {
+      if (!config.ledgerEnabled) {
+        return {
+          success: false,
+          message: 'Ledger payment is currently unavailable. Please choose another payment method.',
+          code: 'LEDGER_DISABLED',
+        }
+      }
       const ledgerAccount = await this.ledgerService.getMine(userId)
       if (!ledgerAccount || ledgerAccount.status !== 'ACTIVE') {
         return {
           success: false,
           message: 'Ledger payment requires an active B2B credit line',
+          code: 'LEDGER_NOT_AVAILABLE',
+        }
+      }
+      return null
+    }
+
+    // B2B_CREDIT — "Place Order". Same gates as LEDGER above (global
+    // toggle + an ACTIVE ledger account) — see the block in placeOrder()
+    // that actually draws the credit for why this is a separate payment
+    // method rather than reusing LEDGER's two-step payFromLedger flow.
+    if (normalizedPaymentMethod === 'B2B_CREDIT') {
+      if (!config.ledgerEnabled) {
+        return {
+          success: false,
+          message: 'Ledger payment is currently unavailable. Please choose another payment method.',
+          code: 'LEDGER_DISABLED',
+        }
+      }
+      const ledgerAccount = await this.ledgerService.getMine(userId)
+      if (!ledgerAccount || ledgerAccount.status !== 'ACTIVE') {
+        return {
+          success: false,
+          message: 'Placing an order on credit requires an active B2B credit line',
           code: 'LEDGER_NOT_AVAILABLE',
         }
       }
@@ -1351,6 +1539,26 @@ export class OrdersService {
         orderId,
       }).catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Wallet refund on cancel failed (customer cancel)')
+      })
+    }
+
+    // Reverse the ledger-balance-toggle portion of this order, if any and
+    // if it was actually drawn. Same condition/reasoning as the wallet
+    // refund just above, but more important to get right here: a wallet
+    // reversal returns the customer's own money; an unreversed LEDGER draw
+    // is real credit the customer would otherwise be billed for on their
+    // next cycle for an order they never received.
+    if (
+      order.ledgerAmountUsed > 0 &&
+      (order.paymentMethod === 'COD' || order.paymentStatus === 'PAID')
+    ) {
+      this.ledgerService.repayForUser(
+        userId,
+        order.ledgerAmountUsed,
+        `Reversal of ledger payment for cancelled order ${order.orderNumber}`,
+        { orderId }
+      ).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Ledger reversal on cancel failed (customer cancel)')
       })
     }
 

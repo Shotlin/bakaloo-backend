@@ -227,3 +227,45 @@ export const bulkStatusSchema = {
   },
 }
 
+// ── B2B "Place Order" ────────────────────────────────────────────────
+
+export const listB2BOrdersSchema = {
+  tags: ['Admin Orders'],
+  summary: 'List B2B "Place Order" credit orders',
+  querystring: {
+    type: 'object',
+    properties: {
+      page: { type: 'integer', default: 1 },
+      limit: { type: 'integer', default: 20, maximum: 100 },
+      status: { type: 'string', enum: ['PENDING', 'APPROVED'] },
+    },
+  },
+}
+
+export const b2bOrderDetailSchema = {
+  tags: ['Admin Orders'],
+  summary: 'B2B credit order details, including settlement history',
+  params: uuidParam,
+}
+
+export const approveB2BOrderSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Approve a pending B2B credit order — deducts stock and confirms it',
+  params: uuidParam,
+}
+
+export const recordB2BSettlementSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Record a manual payment-collection entry against a B2B credit order',
+  params: uuidParam,
+  body: {
+    type: 'object',
+    required: ['method', 'amount'],
+    properties: {
+      method: { type: 'string', enum: ['CASH', 'ONLINE', 'OTHER'] },
+      amount: { type: 'number', exclusiveMinimum: 0 },
+      note: { type: 'string', maxLength: 500 },
+    },
+  },
+}
+

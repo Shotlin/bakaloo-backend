@@ -195,6 +195,48 @@ export class LedgerService {
   }
 
   /**
+   * Reverse a draw against a ledger account by user id — used when an order
+   * that used the ledger-balance-toggle checkout feature (a partial or full
+   * offset, not the exclusive full-order LEDGER payment method — see
+   * OrdersService#placeOrder) is later cancelled or refunded. Unlike a
+   * wallet-balance reversal (the customer's own money, sitting unused), an
+   * unreversed ledger draw becomes real debt the customer is billed for on
+   * their next cycle for an order they never received — so this is called
+   * unconditionally on cancel/refund, not left to an admin's refund-
+   * destination choice. Best-effort by design (mirrors drawForUser): if the
+   * account was deleted/closed between the draw and this reversal, this
+   * silently no-ops rather than blocking the cancellation — callers log a
+   * warning on failure, same as the wallet-refund-on-cancel pattern.
+   *
+   * Opens its own transaction when no `client` is supplied, same as
+   * drawForUser.
+   */
+  async repayForUser(userId, amount, description, { orderId, billingCycleId, client } = {}) {
+    const account = await this.repo.findByUserId(userId)
+    if (!account) return null
+
+    if (client) {
+      const locked = await this.repo.getForUpdate(client, account.id)
+      if (!locked) return null
+      return this.repo.repay(client, account.id, amount, description, { billingCycleId, orderId })
+    }
+
+    const ownClient = await getClient()
+    try {
+      await ownClient.query('BEGIN')
+      await this.repo.getForUpdate(ownClient, account.id)
+      const result = await this.repo.repay(ownClient, account.id, amount, description, { billingCycleId, orderId })
+      await ownClient.query('COMMIT')
+      return result
+    } catch (err) {
+      await ownClient.query('ROLLBACK')
+      throw err
+    } finally {
+      ownClient.release()
+    }
+  }
+
+  /**
    * Admin manual repayment/adjustment against a ledger account (e.g.
    * recording an offline bank transfer settlement outside the automated
    * billing-cycle flow).

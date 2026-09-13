@@ -588,7 +588,7 @@ export class BillSummaryService {
 
   /** Build the cod/razorpay/wallet availability block from the resolved config + bill total. */
   _buildPaymentMethods(config, totalPayable) {
-    const { codEnabled, codMinOrderAmount, codMaxOrderAmount, razorpayEnabled, walletEnabled } = config
+    const { codEnabled, codMinOrderAmount, codMaxOrderAmount, razorpayEnabled, walletEnabled, ledgerEnabled } = config
 
     let codReason = null
     let codAvailable = codEnabled
@@ -614,6 +614,12 @@ export class BillSummaryService {
       },
       razorpay: { enabled: razorpayEnabled },
       wallet: { enabled: walletEnabled },
+      // Global admin kill-switch for the B2B ledger — independent of
+      // whether this particular customer has an ACTIVE ledger account
+      // (see myLedgerAccountProvider on the Flutter side, which still
+      // gates it per-account). Both must be true for a B2B customer to
+      // see the ledger toggle / Place Order button.
+      ledger: { enabled: ledgerEnabled },
     }
   }
 

@@ -2,6 +2,7 @@ import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { AdminOrdersRepository } from '../orders/orders.repository.js'
 import { NotificationsRepository } from '../../notifications/notifications.repository.js'
 import { NotificationsService } from '../../notifications/notifications.service.js'
+import { LedgerService } from '../../ledger/ledger.service.js'
 
 export class AdminRefundRequestsService {
   constructor(repository, fastify) {
@@ -11,6 +12,10 @@ export class AdminRefundRequestsService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    // Reverses the ledger-balance-toggle portion (see
+    // OrdersService#placeOrder) of an order whose refund request is
+    // approved — see approve() below.
+    this.ledgerService = new LedgerService()
   }
 
   async findAll(filters) {
@@ -61,9 +66,26 @@ export class AdminRefundRequestsService {
     if (!order) throw { statusCode: 404, message: 'Order not found' }
 
     const payment = await this.ordersRepository.getOrderPayment(request.order_id)
+    const ledgerAmountUsed = parseFloat(order.ledger_amount_used || 0)
     const paidAmount = payment
       ? parseFloat(payment.amount)
-      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
+      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0) - ledgerAmountUsed
+
+    // Reverse any ledger draw unconditionally — this is real B2B credit,
+    // not the customer's own money, so approving a refund without also
+    // reversing it means the customer gets billed next cycle for an order
+    // that was just refunded. See AdminOrdersService.refundOrder()'s
+    // identical reasoning.
+    if (ledgerAmountUsed > 0) {
+      await this.ledgerService.repayForUser(
+        request.user_id,
+        ledgerAmountUsed,
+        `Reversal of ledger payment for order ${order.order_number} (refund request approved)`,
+        { orderId: order.id }
+      ).catch((err) => {
+        console.error('Ledger reversal failed during refund request approval:', err?.message || err)
+      })
+    }
 
     let refundAmount
     if (request.item_scope === 'ALL') {

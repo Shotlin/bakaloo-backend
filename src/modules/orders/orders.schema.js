@@ -142,7 +142,12 @@ export const placeOrderSchema = {
     required: ['addressId', 'paymentMethod'],
     properties: {
       addressId: { type: 'string', format: 'uuid' },
-      paymentMethod: { type: 'string', enum: ['COD', 'ONLINE', 'WALLET', 'LEDGER'] },
+      // B2B_CREDIT — "Place Order": B2B-exclusive, draws the full total
+      // onto the ledger immediately (overage-allowed) but holds for admin
+      // approval before stock is deducted or the order is confirmed. See
+      // migration 128_b2b_place_order.sql. Distinct from the legacy LEDGER
+      // method, which auto-confirms via the two-step payFromLedger flow.
+      paymentMethod: { type: 'string', enum: ['COD', 'ONLINE', 'WALLET', 'LEDGER', 'B2B_CREDIT'] },
       couponCode: {
         oneOf: [
           { type: 'string', minLength: 1, maxLength: 50 },
@@ -167,6 +172,10 @@ export const placeOrderSchema = {
       // Ignored when paymentMethod is the legacy 'WALLET' (old published
       // app), which keeps using its own separate full-payment flow.
       useWallet: { type: 'boolean', default: false },
+      // Ledger-balance-toggle checkout feature — same convention, for the
+      // B2B credit line. Ignored when paymentMethod is 'LEDGER', which
+      // keeps using its own separate full-payment payFromLedger() flow.
+      useLedger: { type: 'boolean', default: false },
     },
   },
   response: {

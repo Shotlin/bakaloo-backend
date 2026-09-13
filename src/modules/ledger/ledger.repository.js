@@ -129,6 +129,25 @@ export class LedgerRepository {
   }
 
   /**
+   * Same as getForUpdate, but looked up by the customer's user id (via
+   * business_accounts) rather than the ledger account id directly — mirrors
+   * WalletRepository#getForUpdate's shape so checkout code can lock+read a
+   * customer's ledger the same way it already does their wallet. `FOR
+   * UPDATE OF la` scopes the row lock to ledger_accounts only, not the
+   * joined business_accounts row.
+   */
+  async getForUpdateByUserId(client, userId) {
+    const { rows } = await client.query(
+      `SELECT la.* FROM ledger_accounts la
+         JOIN business_accounts ba ON ba.id = la.business_account_id
+        WHERE ba.user_id = $1
+        FOR UPDATE OF la`,
+      [userId]
+    )
+    return rows[0] || null
+  }
+
+  /**
    * Draw against the ledger (increase amount owed) within a transaction.
    * Atomically guarded against hard_limit — the one figure actually
    * enforced (monthly_credit_limit is a soft/billing-only cap; overage
@@ -173,7 +192,7 @@ export class LedgerRepository {
    * this too, but the guard avoids the query throwing a raw constraint
    * violation).
    */
-  async repay(client, ledgerAccountId, amount, description, { billingCycleId } = {}) {
+  async repay(client, ledgerAccountId, amount, description, { billingCycleId, orderId } = {}) {
     const { rows: accountRows } = await client.query(
       `UPDATE ledger_accounts
           SET current_balance = GREATEST(current_balance - $1, 0), updated_at = NOW()
@@ -190,10 +209,10 @@ export class LedgerRepository {
 
     const { rows: txRows } = await client.query(
       `INSERT INTO ledger_transactions
-         (ledger_account_id, type, amount, description, billing_cycle_id, balance_after)
-       VALUES ($1, 'REPAYMENT', $2, $3, $4, $5)
+         (ledger_account_id, type, amount, description, billing_cycle_id, order_id, balance_after)
+       VALUES ($1, 'REPAYMENT', $2, $3, $4, $5, $6)
        RETURNING *`,
-      [ledgerAccountId, amount, description || 'Ledger repayment', billingCycleId || null, account.current_balance]
+      [ledgerAccountId, amount, description || 'Ledger repayment', billingCycleId || null, orderId || null, account.current_balance]
     )
 
     return { account, transaction: txRows[0] }

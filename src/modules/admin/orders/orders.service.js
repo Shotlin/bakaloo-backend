@@ -16,6 +16,7 @@ import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignme
 import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
 import { CashbackService } from '../../cashback/cashback.service.js'
 import { SpinWheelService } from '../../spin-wheel/spin-wheel.service.js'
+import { LedgerService } from '../../ledger/ledger.service.js'
 import ExcelJS from 'exceljs'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -99,6 +100,10 @@ export class AdminOrdersService {
     this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
     this.cashbackService = new CashbackService()
     this.spinWheelService = new SpinWheelService()
+    // Reverses the ledger-balance-toggle portion (see
+    // OrdersService#placeOrder) of a cancelled/refunded order — see
+    // refundOrder()/cancelOrder() below.
+    this.ledgerService = new LedgerService()
   }
 
   /**
@@ -566,16 +571,33 @@ export class AdminOrdersService {
 
     const payment = await this.repository.getOrderPayment(orderId)
     // The `payment.amount` branch (a genuine gateway payment) already
-    // excludes any wallet-toggle offset — payments.service.js#createPaymentOrder
-    // only ever charges Razorpay the remainder after wallet_amount_used.
-    // The `order.total_amount` fallback (COD, no gateway row) must
-    // subtract it explicitly, or a wallet-partial COD refund would refund
-    // the wallet-covered portion too, as if it were cash the customer paid.
+    // excludes any wallet/ledger-toggle offset — payments.service.js#createPaymentOrder
+    // only ever charges Razorpay the remainder after wallet_amount_used and
+    // ledger_amount_used. The `order.total_amount` fallback (COD, no
+    // gateway row) must subtract both explicitly, or a partial-offset COD
+    // refund would refund the wallet/ledger-covered portion too, as if it
+    // were cash the customer paid.
+    const ledgerAmountUsed = parseFloat(order.ledger_amount_used || 0)
     const paidAmount = payment
       ? parseFloat(payment.amount)
-      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
+      : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0) - ledgerAmountUsed
     const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
     const refundAmount = paidAmount
+
+    // Reverse any ledger draw unconditionally, regardless of the admin's
+    // chosen refundTo destination for the rest — this is real B2B credit,
+    // not the customer's own money, so leaving it un-reversed means they
+    // get billed next cycle for an order that was just refunded/cancelled.
+    if (ledgerAmountUsed > 0) {
+      await this.ledgerService.repayForUser(
+        order.user_id,
+        ledgerAmountUsed,
+        reason || `Reversal of ledger payment for refunded order ${order.order_number}`,
+        { orderId }
+      ).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during admin refund')
+      })
+    }
 
     if (refundTo === 'original') {
       if (!hasGatewayPayment) {
@@ -765,6 +787,31 @@ export class AdminOrdersService {
     // left the store and restoring is always correct here.
     const stockRestoreResult = await this._restoreStockForCancellation(orderId, order.shop_id, adminId)
 
+    // Reverse any ledger draw unconditionally, independent of the
+    // refundTo/payment_status gate just below. That gate exists because a
+    // COD/online order that was never actually paid has no *money* to move
+    // — but a COD-partial ledger draw happens immediately at order
+    // placement (see OrdersService#placeOrder) regardless of the overall
+    // order payment_status (which only flips to PAID on full coverage), so
+    // gating this on payment_status === 'PAID' would silently skip
+    // reversing a real credit draw for the common "cancelled before
+    // delivery" case. Mirrors the condition OrdersService#cancelOrder uses
+    // for the customer self-cancel path.
+    const ledgerAmountUsedOnCancel = parseFloat(order.ledger_amount_used || 0)
+    if (
+      ledgerAmountUsedOnCancel > 0 &&
+      (order.payment_method === 'COD' || order.payment_status === 'PAID')
+    ) {
+      await this.ledgerService.repayForUser(
+        order.user_id,
+        ledgerAmountUsedOnCancel,
+        reason || `Reversal of ledger payment for cancelled order ${order.order_number}`,
+        { orderId }
+      ).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Ledger reversal failed during admin cancel')
+      })
+    }
+
     // Refund only makes sense once money has actually changed hands — most
     // cancellations happen on PENDING/CONFIRMED orders that were never
     // paid (COD, or an online order cancelled before capture), so skip any
@@ -775,10 +822,10 @@ export class AdminOrdersService {
     if (refundTo && refundTo !== 'none' && order.payment_status === 'PAID') {
       const payment = await this.repository.getOrderPayment(orderId)
       // See refundOrder()'s identical computation above for why the COD
-      // fallback branch subtracts wallet_amount_used.
+      // fallback branch subtracts wallet_amount_used and ledger_amount_used.
       const paidAmount = payment
         ? parseFloat(payment.amount)
-        : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0)
+        : parseFloat(order.total_amount) - parseFloat(order.wallet_amount_used || 0) - parseFloat(order.ledger_amount_used || 0)
       const hasGatewayPayment = !!(payment && payment.status === 'PAID' && payment.razorpay_payment_id)
 
       if (refundTo === 'original' && hasGatewayPayment) {
@@ -852,6 +899,211 @@ export class AdminOrdersService {
       refundTo: appliedRefundTo,
       ...(stockRestoreWarning && { stockRestoreWarning }),
     }
+  }
+
+  // ── B2B "Place Order" — see migration 128_b2b_place_order.sql ─────────
+
+  /**
+   * List B2B "Place Order" orders (b2b_approval_status IS NOT NULL) for
+   * the dedicated B2B Orders dashboard section, newest-first with PENDING
+   * ones surfaced before APPROVED ones so an admin's queue always shows
+   * what needs action first.
+   */
+  async findAllB2B({ status, page = 1, limit = 20 } = {}) {
+    const offset = (page - 1) * limit
+    const result = await this.repository.findAllB2B({ status, offset, limit })
+    return {
+      orders: result.orders,
+      pagination: {
+        page, limit, total: result.total,
+        totalPages: Math.ceil(result.total / limit),
+      },
+    }
+  }
+
+  async findB2BById(orderId) {
+    // this.findById() (not this.repository.findById()) returns the flat,
+    // dashboard-shaped object — order fields spread at the top level
+    // alongside items/timeline/payment/delivery/etc. — matching what
+    // OrderDetail expects on the frontend.
+    const order = await this.findById(orderId)
+    if (!order.b2b_approval_status) {
+      throw { statusCode: 400, message: 'This order was not placed on B2B credit' }
+    }
+    const settlements = await this.repository.getB2BSettlements(orderId)
+    return { ...order, settlements }
+  }
+
+  /**
+   * Approve a pending "Place Order" order: deducts stock now (deferred
+   * until this exact moment — see OrderSplitterService#createOrders'
+   * deferStockDeduction option), confirms the order, and fires the same
+   * customer notification/realtime update every other confirmation does.
+   * Deliberately never queues rider auto-assignment — B2B deliveries are
+   * distributed manually by an admin, not through the rider-assignment
+   * system.
+   *
+   * Stock is re-verified fresh at this point (not trusted from
+   * placement time — real time has passed and other orders may have
+   * consumed it): if any line is now short, the WHOLE approval is
+   * rejected (see ShopProductsRepository#deductStockForApprovedOrder's
+   * docstring for why this is all-or-nothing, unlike stock restoration).
+   */
+  async approveB2BOrder(orderId, adminId, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+    if (order.b2b_approval_status !== 'PENDING') {
+      throw {
+        statusCode: 400,
+        message: order.b2b_approval_status === 'APPROVED'
+          ? 'This order has already been approved'
+          : 'This order was not placed on B2B credit',
+      }
+    }
+
+    const items = await this.repository.getOrderItems(orderId)
+
+    const client = await getClient()
+    let transitions = []
+    try {
+      await client.query('BEGIN')
+      transitions = await this.shopProductsRepo.deductStockForApprovedOrder(client, {
+        orderId,
+        items,
+        source: 'DASHBOARD',
+        actor: { userId: adminId, shopRole: null },
+      })
+      await client.query(
+        `UPDATE orders
+            SET b2b_approval_status = 'APPROVED', b2b_approved_by = $1, b2b_approved_at = NOW(),
+                status = 'CONFIRMED', updated_at = NOW()
+          WHERE id = $2`,
+        [adminId, orderId]
+      )
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw {
+        statusCode: 400,
+        message: `Could not approve — ${err.message}`,
+      }
+    } finally {
+      client.release()
+    }
+
+    // Post-commit, mirroring OrderSplitterService#firePostCommitSideEffects
+    // (cache invalidation + low-stock fan-out) — never allowed to affect
+    // the approval's own transaction.
+    if (order.shop_id) {
+      try {
+        await new ShopProductsService(this.shopProductsRepo).invalidateShopCache(order.shop_id)
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Shop cache invalidation failed after B2B approval (non-blocking)')
+      }
+    }
+    const shopProductsService = new ShopProductsService(this.shopProductsRepo)
+    for (const transition of transitions) {
+      try {
+        await shopProductsService.handleStockTransitionSideEffects?.(transition)
+      } catch (err) {
+        logger.error(
+          { err: err.message, orderId, shopProductId: transition.shopProduct?.id },
+          'Stock transition side effects failed after B2B approval'
+        )
+      }
+    }
+
+    logAdminActivity(
+      adminId,
+      `Approved B2B credit order ${order.order_number}`,
+      'order', orderId,
+      { b2b_approval_status: 'PENDING' }, { b2b_approval_status: 'APPROVED', status: 'CONFIRMED' },
+      ip
+    )
+
+    await this._queueNotification(order.user_id, buildCustomerOrderEventNotification({
+      orderId, orderNumber: order.order_number, timelineType: 'CONFIRMED', status: 'CONFIRMED',
+    }))
+    this._emitOrderStatus(order, 'CONFIRMED')
+
+    return this.repository.findById(orderId)
+  }
+
+  /**
+   * Record a manual payment-collection entry against a delivered "Place
+   * Order" order (e.g. ₹200 cash today, ₹500 online next week — multiple
+   * partial entries are expected, not a single all-at-once figure).
+   * Immediately repays the ledger by this amount — this is a real
+   * accounts-receivable event, not just a note, since the credit drawn at
+   * placement is only actually "settled" once the customer has paid the
+   * business back. Rejects an entry that would push the running total
+   * past the order's own total_amount — the ledger side (real credit) has
+   * no reason to ever be over-repaid for one order.
+   */
+  async recordB2BSettlement(orderId, { method, amount, note }, adminId, ip) {
+    const order = await this.repository.findById(orderId)
+    if (!order) throw { statusCode: 404, message: 'Order not found' }
+    if (!order.b2b_approval_status) {
+      throw { statusCode: 400, message: 'This order was not placed on B2B credit' }
+    }
+    const parsedAmount = parseFloat(amount)
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      throw { statusCode: 400, message: 'Settlement amount must be a positive number' }
+    }
+
+    const alreadySettled = parseFloat(order.b2b_amount_settled || 0)
+    const orderTotal = parseFloat(order.total_amount)
+    if (alreadySettled + parsedAmount > orderTotal + 0.01) {
+      throw {
+        statusCode: 400,
+        message: `This would settle ₹${(alreadySettled + parsedAmount).toFixed(2)}, more than the order's own total of ₹${orderTotal.toFixed(2)}.`,
+      }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO order_b2b_settlements (order_id, method, amount, note, recorded_by)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [orderId, method, parsedAmount, note || null, adminId]
+      )
+      await client.query(
+        `UPDATE orders SET b2b_amount_settled = b2b_amount_settled + $1, updated_at = NOW() WHERE id = $2`,
+        [parsedAmount, orderId]
+      )
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw { statusCode: 400, message: `Could not record settlement — ${err.message}` }
+    } finally {
+      client.release()
+    }
+
+    // Reverses the credit draw by exactly the amount just collected — see
+    // LedgerService#repayForUser's identical reasoning on the
+    // refund/cancel paths. Best-effort: the settlement record above is the
+    // source of truth for what the admin entered; a transient ledger
+    // hiccup here is logged, not silently lost, but never blocks the
+    // admin from recording what the customer actually paid.
+    await this.ledgerService.repayForUser(
+      order.user_id,
+      parsedAmount,
+      `Settlement (${method}) for order ${order.order_number}`,
+      { orderId }
+    ).catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Ledger repayment failed during B2B settlement recording')
+    })
+
+    logAdminActivity(
+      adminId,
+      `Recorded ₹${parsedAmount} ${method} settlement for B2B order ${order.order_number}`,
+      'order', orderId,
+      { b2b_amount_settled: alreadySettled }, { b2b_amount_settled: alreadySettled + parsedAmount },
+      ip
+    )
+
+    return this.repository.findById(orderId)
   }
 
   async bulkUpdateStatus(orderIds, newStatus, adminId, ip) {

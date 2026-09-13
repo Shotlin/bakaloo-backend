@@ -133,6 +133,60 @@ export class AdminOrdersRepository {
     return rows[0] || null
   }
 
+  /**
+   * List "Place Order" B2B-credit orders (b2b_approval_status IS NOT
+   * NULL) for the dedicated B2B Orders dashboard page — narrower than the
+   * `isB2B` filter on findAll() above (which matches every order from a
+   * B2B customer regardless of payment method; this matches only orders
+   * placed via the credit-line "Place Order" button). Joined against the
+   * customer's ledger account so the list can show their credit limit
+   * alongside each order without a second round-trip per row.
+   */
+  async findAllB2B({ status, offset, limit }) {
+    const params = []
+    let idx = 1
+    let where = 'WHERE o.b2b_approval_status IS NOT NULL'
+    if (status) {
+      params.push(status)
+      where += ` AND o.b2b_approval_status = $${idx++}`
+    }
+
+    const countRes = await query(
+      `SELECT COUNT(*) FROM orders o ${where}`,
+      params
+    )
+    const total = parseInt(countRes.rows[0].count)
+
+    params.push(limit, offset)
+    const { rows } = await query(
+      `SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
+              sh.name AS shop_name,
+              ba.company_name, la.monthly_credit_limit, la.hard_limit, la.current_balance
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+         LEFT JOIN shops sh ON sh.id = o.shop_id
+         LEFT JOIN business_accounts ba ON ba.user_id = o.user_id
+         LEFT JOIN ledger_accounts la ON la.business_account_id = ba.id
+         ${where}
+        ORDER BY (o.b2b_approval_status = 'PENDING') DESC, o.created_at DESC
+        LIMIT $${idx++} OFFSET $${idx++}`,
+      params
+    )
+    return { orders: rows, total }
+  }
+
+  async getB2BSettlements(orderId) {
+    const { rows } = await query(
+      `SELECT s.*, u.name AS recorded_by_name
+         FROM order_b2b_settlements s
+         LEFT JOIN users u ON u.id = s.recorded_by
+        WHERE s.order_id = $1
+        ORDER BY s.created_at DESC`,
+      [orderId]
+    )
+    return rows
+  }
+
   /** Most recent QR pickup token for the order — surfaced as "QR status" on the admin order card. */
   async getOrderPickupToken(orderId) {
     const { rows } = await query(

@@ -4,6 +4,7 @@ const KEYS = [
   'cod_enabled',
   'razorpay_enabled',
   'wallet_enabled',
+  'ledger_enabled',
   'cod_min_order_amount',
   'cod_max_amount',
   'business_upi_id',
@@ -13,6 +14,11 @@ const DEFAULTS = {
   codEnabled: true,
   razorpayEnabled: true,
   walletEnabled: true,
+  // Defaults to on — before this toggle existed, a B2B customer's ledger
+  // was gated only by having an ACTIVE ledger account, so flipping this
+  // default to off would silently break every existing B2B customer's
+  // checkout the moment this setting starts being read.
+  ledgerEnabled: true,
   codMinOrderAmount: 99,
   codMaxOrderAmount: 2000,
   businessUpiId: null,
@@ -39,6 +45,7 @@ export class PaymentSettingsService {
       codEnabled: this._toBoolean(raw.cod_enabled, DEFAULTS.codEnabled),
       razorpayEnabled: this._toBoolean(raw.razorpay_enabled, DEFAULTS.razorpayEnabled),
       walletEnabled: this._toBoolean(raw.wallet_enabled, DEFAULTS.walletEnabled),
+      ledgerEnabled: this._toBoolean(raw.ledger_enabled, DEFAULTS.ledgerEnabled),
       codMinOrderAmount: this._toNumber(raw.cod_min_order_amount, DEFAULTS.codMinOrderAmount),
       codMaxOrderAmount: this._toNumber(raw.cod_max_amount, DEFAULTS.codMaxOrderAmount),
       businessUpiId: this._toStringOrNull(raw.business_upi_id),
