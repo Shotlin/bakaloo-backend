@@ -295,7 +295,10 @@ export class BulkOrdersRepository {
              sp.stock_quantity,
              sp.is_available,
              sp.max_order_qty,
-             sp.bulk_order_eligible
+             sp.bulk_order_eligible,
+             sp.bulk_min_quantity,
+             sp.bulk_sale_start_at,
+             sp.bulk_sale_end_at
         FROM shop_products sp
         JOIN unnest($2::uuid[]) AS t(product_id)
           ON t.product_id = sp.product_id

@@ -44,6 +44,14 @@ export const createShopProductSchema = z
     // excluded from bulk purchasing, e.g. a low-margin or hard-to-source
     // item). Defaults true so nothing changes for existing bulk-order flow.
     bulk_order_eligible: z.boolean().default(true),
+    // Minimum quantity of THIS listing a bulk-order line must request to
+    // qualify (on top of bulk_orders' own whole-order minimums). Null means
+    // no per-listing minimum.
+    bulk_min_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
+    // Optional bulk-sale window — both null means always eligible whenever
+    // bulk_order_eligible is on.
+    bulk_sale_start_at: z.string().datetime().optional().nullable(),
+    bulk_sale_end_at: z.string().datetime().optional().nullable(),
   })
   .superRefine((data, ctx) => {
     // Requirement 3.9 — sale_price must be < price when both are set
@@ -58,6 +66,17 @@ export const createShopProductSchema = z
         code: z.ZodIssueCode.custom,
         path: ['sale_price'],
         message: 'sale_price must be less than price',
+      })
+    }
+    if (
+      data.bulk_sale_start_at &&
+      data.bulk_sale_end_at &&
+      new Date(data.bulk_sale_end_at) <= new Date(data.bulk_sale_start_at)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bulk_sale_end_at'],
+        message: 'bulk_sale_end_at must be after bulk_sale_start_at',
       })
     }
   })
@@ -81,6 +100,9 @@ export const updateShopProductSchema = z
     is_available: z.boolean().optional(),
     is_featured: z.boolean().optional(),
     bulk_order_eligible: z.boolean().optional(),
+    bulk_min_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
+    bulk_sale_start_at: z.string().datetime().optional().nullable(),
+    bulk_sale_end_at: z.string().datetime().optional().nullable(),
   })
   .refine(
     (data) =>
@@ -92,9 +114,25 @@ export const updateShopProductSchema = z
       data.max_order_qty !== undefined ||
       data.is_available !== undefined ||
       data.is_featured !== undefined ||
-      data.bulk_order_eligible !== undefined,
+      data.bulk_order_eligible !== undefined ||
+      data.bulk_min_quantity !== undefined ||
+      data.bulk_sale_start_at !== undefined ||
+      data.bulk_sale_end_at !== undefined,
     { message: 'At least one field must be provided' }
   )
+  .superRefine((data, ctx) => {
+    if (
+      data.bulk_sale_start_at &&
+      data.bulk_sale_end_at &&
+      new Date(data.bulk_sale_end_at) <= new Date(data.bulk_sale_start_at)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bulk_sale_end_at'],
+        message: 'bulk_sale_end_at must be after bulk_sale_start_at',
+      })
+    }
+  })
 
 // ─── STOCK UPDATE ────────────────────────────────────────
 // Two modes: absolute set (`stock_quantity`) or delta (`delta`, +/-).

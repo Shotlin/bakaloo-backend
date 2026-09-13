@@ -87,7 +87,8 @@ export class ShopProductsRepository {
     id, shop_id, product_id,
     price, sale_price, cost_price, wholesale_price,
     stock_quantity, low_stock_threshold, max_order_qty,
-    is_available, is_featured, bulk_order_eligible, sold_out_at,
+    is_available, is_featured, bulk_order_eligible,
+    bulk_min_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at,
     approval_status, approved_at, approved_by, rejection_reason,
     deleted_at, created_at, updated_at
   `
@@ -108,12 +109,14 @@ export class ShopProductsRepository {
         shop_id, product_id,
         price, sale_price, cost_price, wholesale_price,
         stock_quantity, low_stock_threshold, max_order_qty,
-        is_available, is_featured, bulk_order_eligible, sold_out_at
+        is_available, is_featured, bulk_order_eligible,
+        bulk_min_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at
       ) VALUES (
         $1, $2,
         $3, $4, $5, $6,
         $7, $8, $9,
-        $10, $11, $12, $13
+        $10, $11, $12,
+        $13, $14, $15, $16
       )
       RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
       [
@@ -129,6 +132,9 @@ export class ShopProductsRepository {
         data.is_available,
         data.is_featured ?? false,
         data.bulk_order_eligible ?? true,
+        data.bulk_min_quantity ?? null,
+        data.bulk_sale_start_at ?? null,
+        data.bulk_sale_end_at ?? null,
         soldOutAt,
       ]
     )
@@ -161,7 +167,9 @@ export class ShopProductsRepository {
       `UPDATE shop_products SET
         price = $3, sale_price = $4, cost_price = $5, wholesale_price = $6,
         stock_quantity = $7, low_stock_threshold = $8, max_order_qty = $9,
-        is_available = $10, is_featured = $11, bulk_order_eligible = $12, sold_out_at = $13,
+        is_available = $10, is_featured = $11, bulk_order_eligible = $12,
+        bulk_min_quantity = $13, bulk_sale_start_at = $14, bulk_sale_end_at = $15,
+        sold_out_at = $16,
         approval_status = 'APPROVED', approved_at = NULL, approved_by = NULL,
         rejection_reason = NULL,
         deleted_at = NULL, updated_at = NOW()
@@ -180,6 +188,9 @@ export class ShopProductsRepository {
         data.is_available,
         data.is_featured ?? false,
         data.bulk_order_eligible ?? true,
+        data.bulk_min_quantity ?? null,
+        data.bulk_sale_start_at ?? null,
+        data.bulk_sale_end_at ?? null,
         soldOutAt,
       ]
     )
@@ -391,6 +402,9 @@ export class ShopProductsRepository {
       'is_available',
       'is_featured',
       'bulk_order_eligible',
+      'bulk_min_quantity',
+      'bulk_sale_start_at',
+      'bulk_sale_end_at',
     ]
 
     for (const key of updatable) {

@@ -674,6 +674,33 @@ export class BulkOrdersService {
         })
         continue
       }
+      // Optional bulk-sale window (see 130_bulk_order_min_qty_and_window.sql)
+      // — either side null means unbounded on that side. Checked before the
+      // minimum-quantity rule below since a closed window makes the item
+      // wholly ineligible regardless of how much was requested.
+      const now = Date.now()
+      const windowStart = sp.bulk_sale_start_at ? new Date(sp.bulk_sale_start_at).getTime() : null
+      const windowEnd = sp.bulk_sale_end_at ? new Date(sp.bulk_sale_end_at).getTime() : null
+      if ((windowStart !== null && now < windowStart) || (windowEnd !== null && now > windowEnd)) {
+        failed.push({
+          product_id: productId,
+          requested: qty,
+          available: Number(sp.stock_quantity),
+          reason: 'BULK_SALE_WINDOW_CLOSED',
+        })
+        continue
+      }
+      const minQuantity = sp.bulk_min_quantity != null ? Number(sp.bulk_min_quantity) : null
+      if (minQuantity !== null && qty < minQuantity) {
+        failed.push({
+          product_id: productId,
+          requested: qty,
+          available: Number(sp.stock_quantity),
+          reason: 'BELOW_BULK_MINIMUM',
+          minimum: minQuantity,
+        })
+        continue
+      }
       if (Number(sp.stock_quantity) < qty) {
         failed.push({
           product_id: productId,
