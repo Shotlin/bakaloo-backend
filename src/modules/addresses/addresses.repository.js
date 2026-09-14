@@ -10,7 +10,7 @@ export class AddressesRepository {
   async findByUser(userId) {
     const { rows } = await query(
       `SELECT id, label, address_line1, address_line2, landmark, city, state, pincode,
-              lat, lng, is_default, created_at
+              lat, lng, receiver_name, receiver_phone, is_default, created_at
        FROM addresses
        WHERE user_id = $1 AND deleted_at IS NULL
        ORDER BY is_default DESC, created_at DESC`,
@@ -27,7 +27,7 @@ export class AddressesRepository {
   async findByIdAndUser(id, userId) {
     const { rows } = await query(
       `SELECT id, label, address_line1, address_line2, landmark, city, state, pincode,
-              lat, lng, is_default, created_at, updated_at
+              lat, lng, receiver_name, receiver_phone, is_default, created_at, updated_at
        FROM addresses
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [id, userId]
@@ -40,9 +40,9 @@ export class AddressesRepository {
    */
   async create(userId, data) {
     const { rows } = await query(
-      `INSERT INTO addresses (user_id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at`,
+      `INSERT INTO addresses (user_id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, receiver_name, receiver_phone, is_default)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, receiver_name, receiver_phone, is_default, created_at`,
       [
         userId,
         data.label || 'Home',
@@ -54,6 +54,8 @@ export class AddressesRepository {
         data.pincode,
         data.lat || null,
         data.lng || null,
+        data.receiverName || null,
+        data.receiverPhone || null,
         data.isDefault || false,
       ]
     )
@@ -78,6 +80,8 @@ export class AddressesRepository {
       pincode: 'pincode',
       lat: 'lat',
       lng: 'lng',
+      receiverName: 'receiver_name',
+      receiverPhone: 'receiver_phone',
     }
 
     for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
@@ -95,7 +99,7 @@ export class AddressesRepository {
     const { rows } = await query(
       `UPDATE addresses SET ${fields.join(', ')}
        WHERE id = $${idx} AND user_id = $${idx + 1} AND deleted_at IS NULL
-       RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at, updated_at`,
+       RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, receiver_name, receiver_phone, is_default, created_at, updated_at`,
       params
     )
     return rows[0] ? this._format(rows[0]) : null
@@ -146,7 +150,7 @@ export class AddressesRepository {
       const { rows } = await client.query(
         `UPDATE addresses SET is_default = true, updated_at = NOW()
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-         RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at, updated_at`,
+         RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, receiver_name, receiver_phone, is_default, created_at, updated_at`,
         [id, userId]
       )
       await client.query('COMMIT')
@@ -185,6 +189,8 @@ export class AddressesRepository {
       pincode:      row.pincode,
       lat:          row.lat ? parseFloat(row.lat) : null,
       lng:          row.lng ? parseFloat(row.lng) : null,
+      receiverName:  row.receiver_name,
+      receiverPhone: row.receiver_phone,
       isDefault:    row.is_default,
       createdAt:    row.created_at,
       updatedAt:    row.updated_at,
