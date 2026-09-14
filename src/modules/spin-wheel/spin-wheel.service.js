@@ -1,6 +1,7 @@
 import { getClient } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
+import { buildCloudinaryUrl } from '../../config/cloudinary.js'
 import { SpinWheelRepository } from './spin-wheel.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { WalletService } from '../wallet/wallet.service.js'
@@ -62,6 +63,26 @@ export class SpinWheelService {
       value: p.value,
       displayOrder: p.displayOrder,
     }))
+  }
+
+  /**
+   * Popup background image + banner-box copy — deliberately excludes
+   * dailyFreeSpins/triggerMode (not the client's business, same spirit as
+   * getActivePrizesForCustomer excluding winProbability/linkedCouponId).
+   * backgroundImageUrl is null when no admin upload exists yet, which the
+   * app reads as "keep using the bundled default asset".
+   */
+  async getAppearanceForCustomer() {
+    const settings = await this.repo.getSettings()
+    const backgroundImageUrl = settings?.backgroundImagePublicId
+      ? buildCloudinaryUrl(settings.backgroundImagePublicId, 'spinBackground')
+      : (settings?.backgroundImageUrl || null)
+    return {
+      backgroundImageUrl,
+      bannerTitle: settings?.bannerTitle || null,
+      bannerSubtitle: settings?.bannerSubtitle || null,
+      bannerTagline: settings?.bannerTagline || null,
+    }
   }
 
   async getEligibility(userId) {

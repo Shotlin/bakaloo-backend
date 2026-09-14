@@ -119,7 +119,10 @@ export class SpinWheelRepository {
 
   async getSettings() {
     const { rows } = await query(
-      'SELECT id, daily_free_spins, trigger_mode, updated_at FROM spin_wheel_settings LIMIT 1'
+      `SELECT id, daily_free_spins, trigger_mode,
+              background_image_url, background_image_public_id,
+              banner_title, banner_subtitle, banner_tagline, updated_at
+       FROM spin_wheel_settings LIMIT 1`
     )
     return rows[0] ? this._formatSettings(rows[0]) : null
   }
@@ -128,18 +131,28 @@ export class SpinWheelRepository {
     const fields = []
     const params = []
     let idx = 1
-    if (data.dailyFreeSpins !== undefined) {
-      fields.push(`daily_free_spins = $${idx++}`)
-      params.push(data.dailyFreeSpins)
+    const fieldMap = {
+      dailyFreeSpins: 'daily_free_spins',
+      triggerMode: 'trigger_mode',
+      backgroundImageUrl: 'background_image_url',
+      backgroundImagePublicId: 'background_image_public_id',
+      bannerTitle: 'banner_title',
+      bannerSubtitle: 'banner_subtitle',
+      bannerTagline: 'banner_tagline',
     }
-    if (data.triggerMode !== undefined) {
-      fields.push(`trigger_mode = $${idx++}`)
-      params.push(data.triggerMode)
+    for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
+      if (data[jsKey] !== undefined) {
+        fields.push(`${dbKey} = $${idx++}`)
+        params.push(data[jsKey])
+      }
     }
     if (fields.length === 0) return this.getSettings()
     fields.push('updated_at = NOW()')
     const { rows } = await query(
-      `UPDATE spin_wheel_settings SET ${fields.join(', ')} RETURNING id, daily_free_spins, trigger_mode, updated_at`,
+      `UPDATE spin_wheel_settings SET ${fields.join(', ')}
+       RETURNING id, daily_free_spins, trigger_mode,
+                 background_image_url, background_image_public_id,
+                 banner_title, banner_subtitle, banner_tagline, updated_at`,
       params
     )
     return rows[0] ? this._formatSettings(rows[0]) : null
@@ -367,6 +380,11 @@ export class SpinWheelRepository {
       id: row.id,
       dailyFreeSpins: row.daily_free_spins,
       triggerMode: row.trigger_mode,
+      backgroundImageUrl: row.background_image_url,
+      backgroundImagePublicId: row.background_image_public_id,
+      bannerTitle: row.banner_title,
+      bannerSubtitle: row.banner_subtitle,
+      bannerTagline: row.banner_tagline,
       updatedAt: row.updated_at,
     }
   }

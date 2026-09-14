@@ -15,6 +15,11 @@ export const CLOUDINARY_DELIVERY_PROFILES = {
   card: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 640, height: 640, crop: 'fill' }],
   banner: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1440, height: 720, crop: 'fill' }],
   detail: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1280, height: 1280, crop: 'limit' }],
+  // Portrait popup background (Spin & Win, etc.) — caps delivery width at
+  // 1080 (retina-sharp on any phone) without forcing a crop, since admins
+  // upload arbitrary aspect ratios; crop:'limit' only downscales, never
+  // upscales or distorts.
+  spinBackground: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1080, crop: 'limit' }],
   avatar: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 320, height: 320, crop: 'fill', gravity: 'face' }],
 }
 

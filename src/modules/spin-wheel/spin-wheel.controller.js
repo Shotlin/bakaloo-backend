@@ -23,6 +23,12 @@ export class SpinWheelController {
     return reply.code(200).send(success(prizes, 'Spin wheel config fetched'))
   }
 
+  /** GET /appearance */
+  async appearance(request, reply) {
+    const data = await this.service.getAppearanceForCustomer()
+    return reply.code(200).send(success(data, 'Spin wheel appearance fetched'))
+  }
+
   /** GET /eligibility */
   async eligibility(request, reply) {
     const data = await this.service.getEligibility(request.user.id)

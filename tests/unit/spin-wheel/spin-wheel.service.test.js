@@ -292,6 +292,55 @@ describe('SpinWheelService.spin — eligibility + resolution', () => {
   })
 })
 
+describe('SpinWheelService.getAppearanceForCustomer — background image + banner copy', () => {
+  it('derives a spinBackground-profile Cloudinary URL when a public id is on file (positive)', async () => {
+    const repo = makeRepoMock({
+      getSettings: vi.fn().mockResolvedValue({
+        backgroundImagePublicId: 'bakaloo/spin-wheel/abc123',
+        backgroundImageUrl: 'https://res.cloudinary.com/demo/image/upload/abc123.png',
+        bannerTitle: 'Win up to ₹100 off',
+        bannerSubtitle: 'on your next order',
+        bannerTagline: 'Good Deals\nEveryday!',
+      }),
+    })
+    const service = makeService({ repo })
+    const result = await service.getAppearanceForCustomer()
+    expect(result.backgroundImageUrl).toContain('w_1080')
+    expect(result.backgroundImageUrl).toContain('abc123')
+    expect(result.bannerTitle).toBe('Win up to ₹100 off')
+  })
+
+  it('falls back to the raw stored url when there is no public id (positive)', async () => {
+    const repo = makeRepoMock({
+      getSettings: vi.fn().mockResolvedValue({
+        backgroundImagePublicId: null,
+        backgroundImageUrl: 'https://example.com/custom-bg.png',
+        bannerTitle: 'Win up to ₹100 off',
+        bannerSubtitle: 'on your next order',
+        bannerTagline: 'Good Deals\nEveryday!',
+      }),
+    })
+    const service = makeService({ repo })
+    const result = await service.getAppearanceForCustomer()
+    expect(result.backgroundImageUrl).toBe('https://example.com/custom-bg.png')
+  })
+
+  it('returns null backgroundImageUrl when no admin upload exists yet — app keeps its bundled default (negative)', async () => {
+    const repo = makeRepoMock({
+      getSettings: vi.fn().mockResolvedValue({
+        backgroundImagePublicId: null,
+        backgroundImageUrl: null,
+        bannerTitle: 'Win up to ₹100 off',
+        bannerSubtitle: 'on your next order',
+        bannerTagline: 'Good Deals\nEveryday!',
+      }),
+    })
+    const service = makeService({ repo })
+    const result = await service.getAppearanceForCustomer()
+    expect(result.backgroundImageUrl).toBeNull()
+  })
+})
+
 describe('SpinWheelService.evaluateMilestones — dedup + repeating multi-threshold math', () => {
   it('a non-repeating rule grants exactly once even if evaluated twice (positive + dedup)', async () => {
     let granted = 0

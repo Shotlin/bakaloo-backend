@@ -8,6 +8,11 @@ export const configSchema = {
   summary: 'Active prizes for rendering the wheel',
 }
 
+export const appearanceSchema = {
+  tags: ['Spin & Win'],
+  summary: 'Popup background image + banner-box copy for rendering the dialog',
+}
+
 export const eligibilitySchema = {
   tags: ['Spin & Win'],
   summary: 'How many spins the current user has right now',
@@ -98,6 +103,15 @@ export const updateSettingsSchema = {
     properties: {
       dailyFreeSpins: { type: 'integer', minimum: 0 },
       triggerMode: { type: 'string', enum: TRIGGER_MODES },
+      // Popup appearance — background_image_url/public_id come from the
+      // generic POST /uploads/image endpoint (dashboard uploads first, then
+      // PUTs the returned url/publicId here); null clears back to the app's
+      // bundled default image.
+      backgroundImageUrl: { type: ['string', 'null'], format: 'uri' },
+      backgroundImagePublicId: { type: ['string', 'null'] },
+      bannerTitle: { type: 'string', minLength: 1, maxLength: 80 },
+      bannerSubtitle: { type: 'string', minLength: 1, maxLength: 80 },
+      bannerTagline: { type: 'string', minLength: 1, maxLength: 80 },
     },
   },
 }

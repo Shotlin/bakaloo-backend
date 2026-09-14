@@ -3,6 +3,7 @@ import { SpinWheelService } from './spin-wheel.service.js'
 import { SpinWheelRepository } from './spin-wheel.repository.js'
 import {
   configSchema,
+  appearanceSchema,
   eligibilitySchema,
   spinSchema,
   listPrizesSchema,
@@ -40,6 +41,11 @@ export default async function spinWheelRoutes(fastify) {
     schema: configSchema,
     preHandler: [fastify.authenticate],
   }, controller.config.bind(controller))
+
+  fastify.get('/appearance', {
+    schema: appearanceSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.appearance.bind(controller))
 
   fastify.get('/eligibility', {
     schema: eligibilitySchema,
