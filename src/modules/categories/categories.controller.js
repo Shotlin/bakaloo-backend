@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
 
 /**
  * Categories controller — thin HTTP layer
@@ -39,7 +40,8 @@ export class CategoriesController {
     const result = await this.service.getProducts(
       request.params.id,
       request.query,
-      customerContext
+      customerContext,
+      resolveEffectivePriceMode(request, request?.query?.priceMode === 'wholesale')
     )
     if (!result) {
       return reply.code(404).send(error('Category not found', 'NOT_FOUND'))

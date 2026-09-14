@@ -24,13 +24,8 @@ export class CategoriesService {
   /**
    * Resolve the customer's allocated shop_ids for product visibility.
    *
-   * FIX: When the customer has ZERO allocations (hasn't set a delivery
-   * address yet), return null instead of []. Returning null causes the
-   * caller to skip the allocation filter entirely (anonymous/unscoped
-   * behavior) so real users who haven't added an address still see products.
-   *
-   * Once the user adds an address and allocation runs, the next request
-   * correctly scopes to their allocated shops.
+   * A customer request must never fall back to the master catalog. Empty or
+   * failed allocation lookup is deliberately fail-closed.
    *
    * @param {{ userId?: string }|null|undefined} customerContext
    * @returns {Promise<string[]|null>}
@@ -43,10 +38,10 @@ export class CategoriesService {
       )
       if (Array.isArray(ids) && ids.length === 0) {
         logger.debug(
-          { customerId: customerContext.userId, action: 'categories.allocation_fallback' },
-          'Customer has no allocated shops — falling back to anonymous visibility'
+          { customerId: customerContext.userId, action: 'categories.allocation_empty' },
+          'Customer has no allocated shops — returning no storefront products'
         )
-        return null
+        return []
       }
       return Array.isArray(ids) ? ids : null
     } catch (err) {
@@ -56,9 +51,9 @@ export class CategoriesService {
           err: err.message,
           action: 'categories.resolve_allocations',
         },
-        'Failed to resolve customer allocations; falling back to anonymous visibility'
+        'Failed to resolve customer allocations; returning no storefront products'
       )
-      return null
+      return []
     }
   }
 
@@ -114,7 +109,7 @@ export class CategoriesService {
    * @param {{ userId?: string }|null} [customerContext] - When present the
    *   product list is scoped to the customer's allocated shops.
    */
-  async getProducts(categoryId, filters, customerContext = null) {
+  async getProducts(categoryId, filters, customerContext = null, priceMode = 'retail') {
     // Verify category exists
     const category = this._normalizeCategory(await this.repo.findById(categoryId))
     if (!category) return null
@@ -141,6 +136,7 @@ export class CategoriesService {
       inStock: filters.inStock,
       groupOptions: filters.groupOptions === true || filters.groupOptions === 'true',
       allocatedShopIds,
+      priceMode,
       categoryType: category.category_type,
     })
 

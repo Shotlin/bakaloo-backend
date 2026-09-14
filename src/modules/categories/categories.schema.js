@@ -75,6 +75,8 @@ export const getCategoryProductsSchema = {
       sort: { type: 'string', enum: ['price_asc', 'price_desc', 'newest', 'popular'] },
       inStock: { type: 'boolean' },
       groupOptions: { type: 'boolean', default: false },
+      // The server verifies B2B entitlement before honoring this hint.
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
     },
   },
 }

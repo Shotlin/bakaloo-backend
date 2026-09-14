@@ -77,6 +77,26 @@ describe('CategoriesRepository.findProducts — BUNDLE category (positive)', () 
 })
 
 describe('CategoriesRepository.findProducts — STANDARD category / multi-category (positive + negative)', () => {
+  it('uses the assigned shop listing price for wholesale category cards', async () => {
+    databaseMock.query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    databaseMock.query.mockResolvedValueOnce({ rows: [{ total: 0 }], rowCount: 1 })
+
+    const repo = new CategoriesRepository()
+    await repo.findProducts(CATEGORY_ID, {
+      limit: 20,
+      offset: 0,
+      allocatedShopIds: ['22222222-2222-2222-2222-222222222222'],
+      priceMode: 'wholesale',
+      categoryType: 'STANDARD',
+    })
+
+    const [dataSql, dataParams] = databaseMock.query.mock.calls[0]
+    expect(dataSql).toContain('LEFT JOIN LATERAL')
+    expect(dataSql).toMatch(/COALESCE\(shop_price\.sp_wholesale_price, shop_price\.sp_price\) AS price/)
+    expect(dataSql).not.toMatch(/p\.price AS price/)
+    expect(dataParams.filter((value) => Array.isArray(value)).length).toBe(2)
+  })
+
   it('membership is the union of the real category_id AND any cross-listing via category_products (multi-category)', async () => {
     databaseMock.query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
     databaseMock.query.mockResolvedValueOnce({ rows: [{ total: 0 }], rowCount: 1 })

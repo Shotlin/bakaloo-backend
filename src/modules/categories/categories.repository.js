@@ -1,4 +1,5 @@
 import { query, getClient } from '../../config/database.js'
+import { buildShopPriceJoin } from '../products/products.repository.js'
 
 /**
  * Product count for a category, counting BOTH a product's primary
@@ -287,7 +288,7 @@ export class CategoriesRepository {
    */
   async findProducts(
     categoryId,
-    { limit, offset, sort, inStock, groupOptions = false, allocatedShopIds = null, categoryType = 'STANDARD' }
+    { limit, offset, sort, inStock, groupOptions = false, allocatedShopIds = null, priceMode = 'retail', categoryType = 'STANDARD' }
   ) {
     const isBundle = categoryType === 'BUNDLE'
     const conditions = ['p.is_active = true']
@@ -297,10 +298,6 @@ export class CategoriesRepository {
     conditions.push(
       isBundle ? 'cp.category_id IS NOT NULL' : '(p.category_id = $1 OR cp.category_id IS NOT NULL)'
     )
-
-    if (inStock) {
-      conditions.push('p.stock_quantity > 0')
-    }
 
     // Customer shop-allocation visibility (additive — only when scoped).
     if (Array.isArray(allocatedShopIds)) {
@@ -323,6 +320,16 @@ export class CategoriesRepository {
       }
     }
 
+    // Category pages must use the exact same shop-price resolver as search,
+    // product detail and the cart. Previously this path only used the shop
+    // listing for visibility, then selected p.price from the master catalog.
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, paramIdx, priceMode)
+    paramIdx = shopPrice.nextIdx
+
+    if (inStock) {
+      conditions.push(`${shopPrice.stockExpr} > 0`)
+    }
+
     // Two equivalent ORDER BY clauses per sort choice: `inner` uses real
     // table aliases for the plain query, `outer` uses the flattened column
     // names exposed by the groupOptions CTE (which can't see `p.`/`cp.`
@@ -330,8 +337,8 @@ export class CategoriesRepository {
     // nondeterministic — this closes the "sometimes alphabetical, sometimes
     // by upload date" gap the admin reported.
     const sortMap = {
-      price_asc: { inner: 'p.price ASC, p.id ASC', outer: 'price ASC, id ASC' },
-      price_desc: { inner: 'p.price DESC, p.id ASC', outer: 'price DESC, id ASC' },
+      price_asc: { inner: `${shopPrice.priceExpr} ASC, p.id ASC`, outer: 'price ASC, id ASC' },
+      price_desc: { inner: `${shopPrice.priceExpr} DESC, p.id ASC`, outer: 'price DESC, id ASC' },
       newest: { inner: 'p.created_at DESC, p.id ASC', outer: 'created_at DESC, id ASC' },
       popular: { inner: 'p.total_sold DESC, p.id ASC', outer: 'total_sold DESC, id ASC' },
     }
@@ -358,7 +365,10 @@ export class CategoriesRepository {
          AND sib.is_active = true), 1)`
 
     const selectCols = `
-      p.id, p.name, p.slug, p.price, p.sale_price, p.stock_quantity,
+      p.id, p.name, p.slug,
+      ${shopPrice.priceExpr} AS price,
+      ${shopPrice.salePriceExpr} AS sale_price,
+      ${shopPrice.stockExpr} AS stock_quantity,
       p.category_id, p.unit, p.thumbnail_url, p.is_featured, p.total_sold,
       p.product_family_id, p.option_label, p.option_sort_order,
       p.is_default_option, p.food_type, p.origin_tag,
@@ -374,11 +384,12 @@ export class CategoriesRepository {
           SELECT ${selectCols}, cp.rank AS category_rank,
             ROW_NUMBER() OVER (
               PARTITION BY COALESCE(p.product_family_id, p.id)
-              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, ${shopPrice.priceExpr} ASC
             ) AS rn
           FROM products p
           LEFT JOIN product_families pf ON pf.id = p.product_family_id
           ${categoryProductsJoin}
+          ${shopPrice.joinSql}
           WHERE ${where}
         )
         SELECT id, name, slug, price, sale_price, stock_quantity, category_id,
@@ -400,10 +411,11 @@ export class CategoriesRepository {
           SELECT p.id,
             ROW_NUMBER() OVER (
               PARTITION BY COALESCE(p.product_family_id, p.id)
-              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.price ASC
+              ORDER BY p.is_default_option DESC, p.option_sort_order ASC, ${shopPrice.priceExpr} ASC
             ) AS rn
           FROM products p
           ${categoryProductsJoin}
+          ${shopPrice.joinSql}
           WHERE ${where}
         )
         SELECT COUNT(*)::int AS total FROM ranked WHERE rn = 1`,
@@ -418,6 +430,7 @@ export class CategoriesRepository {
        FROM products p
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
        ${categoryProductsJoin}
+       ${shopPrice.joinSql}
        WHERE ${where}
        ORDER BY ${orderSpec.inner}
        LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
@@ -428,6 +441,7 @@ export class CategoriesRepository {
       `SELECT COUNT(*)::int AS total
        FROM products p
        ${categoryProductsJoin}
+       ${shopPrice.joinSql}
        WHERE ${where}`,
       params
     )

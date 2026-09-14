@@ -110,7 +110,10 @@ export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode
   // negotiated rate, so retail promotions don't stack on top of it.
   const noSalePrice = 'NULL::decimal'
 
-  if (!Array.isArray(allocatedShopIds) || allocatedShopIds.length === 0) {
+  // Only anonymous/admin callers may use master-catalog fields. A customer
+  // context, including an empty allocation, is shop-scoped and must never
+  // silently substitute the master price.
+  if (!Array.isArray(allocatedShopIds)) {
     return {
       joinSql: '',
       priceExpr: isWholesale ? 'COALESCE(p.wholesale_price, p.price)' : 'p.price',
@@ -127,33 +130,33 @@ export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode
   }
   params.push(allocatedShopIds)
   const idx = startIdx
-  // The LATERAL join's own ORDER BY picks the single best-matching shop
-  // row — it must rank shops by the SAME effective price this call will
-  // actually display, or a multi-shop customer could see one shop's price
-  // but have another shop's (higher) price be the one actually charged.
-  const bestRowOrderExpr = isWholesale
-    ? 'COALESCE(sp.wholesale_price, sp.price)'
-    : 'COALESCE(sp.sale_price, sp.price)'
+  // AllocationService orders the array primary-shop first. Keep that identity
+  // intact: choosing the cheapest row across several serving shops can render
+  // a different shop's price than the cart will charge.
+  const selectedShopOrderExpr = `array_position($${idx}::uuid[], sp.shop_id)`
   return {
     joinSql: `LEFT JOIN LATERAL (
-      SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price,
+      SELECT sp.id AS sp_shop_product_id, sp.shop_id AS sp_shop_id,
+             sp.price AS sp_price, sp.sale_price AS sp_sale_price,
              sp.wholesale_price AS sp_wholesale_price,
              sp.stock_quantity AS sp_stock_quantity,
              sp.bulk_min_quantity AS sp_bulk_min_quantity,
              sp.bulk_max_quantity AS sp_bulk_max_quantity,
              sp.bulk_order_eligible AS sp_bulk_order_eligible
         FROM shop_products sp
+        JOIN shops s ON s.id = sp.shop_id
        WHERE sp.product_id = p.id
          AND sp.shop_id = ANY($${idx}::uuid[])
          AND sp.is_available = true AND sp.deleted_at IS NULL
-       ORDER BY ${bestRowOrderExpr} ASC
+         AND s.is_active = true AND s.deleted_at IS NULL
+       ORDER BY ${selectedShopOrderExpr} ASC
        LIMIT 1
     ) shop_price ON true`,
     priceExpr: isWholesale
-      ? 'COALESCE(shop_price.sp_wholesale_price, p.wholesale_price, shop_price.sp_price, p.price)'
-      : 'COALESCE(shop_price.sp_price, p.price)',
-    salePriceExpr: isWholesale ? noSalePrice : 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
-    stockExpr: 'COALESCE(shop_price.sp_stock_quantity, p.stock_quantity)',
+      ? 'COALESCE(shop_price.sp_wholesale_price, shop_price.sp_price)'
+      : 'shop_price.sp_price',
+    salePriceExpr: isWholesale ? noSalePrice : 'shop_price.sp_sale_price',
+    stockExpr: 'shop_price.sp_stock_quantity',
     bulkMinQuantityExpr: 'shop_price.sp_bulk_min_quantity',
     bulkMaxQuantityExpr: 'shop_price.sp_bulk_max_quantity',
     bulkOrderEligibleExpr: 'shop_price.sp_bulk_order_eligible',

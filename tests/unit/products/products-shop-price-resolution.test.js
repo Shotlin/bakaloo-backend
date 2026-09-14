@@ -36,8 +36,9 @@ describe('ProductsRepository — customer-facing price resolution', () => {
 
     const [sql, params] = queryMock.mock.calls[0]
     expect(sql).toContain('LEFT JOIN LATERAL')
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_sale_price, p\.sale_price\) AS sale_price/)
+    expect(sql).toMatch(/shop_price\.sp_price AS price/)
+    expect(sql).toMatch(/shop_price\.sp_sale_price AS sale_price/)
+    expect(sql).not.toMatch(/p\.price\) AS price/)
     // The allocatedShopIds array is bound once for visibility and once
     // for the price join — both must carry the real shop id array.
     expect(params.filter((p) => Array.isArray(p) && p.includes(SHOP_A)).length).toBe(2)
@@ -58,7 +59,7 @@ describe('ProductsRepository — customer-facing price resolution', () => {
 
     const [sql] = queryMock.mock.calls[0]
     expect(sql).toContain('LEFT JOIN LATERAL')
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
+    expect(sql).toMatch(/shop_price\.sp_price AS price/)
   })
 
   it('findMany() (groupOptions branch) resolves price from shop_products when scoped to a customer', async () => {
@@ -67,7 +68,7 @@ describe('ProductsRepository — customer-facing price resolution', () => {
 
     const [sql] = queryMock.mock.calls[0]
     expect(sql).toContain('LEFT JOIN LATERAL')
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_price, p\.price\) AS price/)
+    expect(sql).toMatch(/shop_price\.sp_price AS price/)
   })
 
   it('does not apply the shop-price join for admin listing calls', async () => {
@@ -85,7 +86,7 @@ describe('ProductsRepository — customer-facing stock resolution', () => {
     await repo.findById('product-1', [SHOP_A])
 
     const [sql] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) AS stock_quantity/)
+    expect(sql).toMatch(/shop_price\.sp_stock_quantity AS stock_quantity/)
   })
 
   it('findById() falls back to master stock_quantity for admin/anonymous callers', async () => {
@@ -100,12 +101,12 @@ describe('ProductsRepository — customer-facing stock resolution', () => {
     const repo = new ProductsRepository()
     await repo.findMany({ allocatedShopIds: [SHOP_A], status: 'out_of_stock' })
     let [sql] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) = 0/)
+    expect(sql).toMatch(/shop_price\.sp_stock_quantity = 0/)
 
     queryMock.mockClear()
     await repo.findMany({ allocatedShopIds: [SHOP_A], inStock: true })
     ;[sql] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+    expect(sql).toMatch(/shop_price\.sp_stock_quantity > 0/)
   })
 
   it('findMany() count query joins shop_products too, so a customer-scoped stock filter does not reference an undefined alias', async () => {
@@ -123,12 +124,12 @@ describe('ProductsRepository — customer-facing stock resolution', () => {
     const repo = new ProductsRepository()
     await repo.findRelated('product-1', 'cat-1', 10, [SHOP_A])
     let [sql] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+    expect(sql).toMatch(/shop_price\.sp_stock_quantity > 0/)
 
     queryMock.mockClear()
     await repo.findPairWith('product-1', 'cat-1', 10, [SHOP_A])
     ;[sql] = queryMock.mock.calls[0]
-    expect(sql).toMatch(/COALESCE\(shop_price\.sp_stock_quantity, p\.stock_quantity\) > 0/)
+    expect(sql).toMatch(/shop_price\.sp_stock_quantity > 0/)
   })
 })
 
