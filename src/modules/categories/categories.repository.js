@@ -374,6 +374,11 @@ export class CategoriesRepository {
       p.is_default_option, p.food_type, p.origin_tag,
       p.custom_badges, p.display_delivery_minutes,
       p.avg_rating, p.rating_count, p.net_quantity,
+      ${shopPrice.shopProductIdExpr} AS shop_product_id,
+      ${shopPrice.shopIdExpr} AS shop_id,
+      ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+      ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+      ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
       p.created_at,
       pf.name AS family_name,
       ${optionCountExpr} AS option_count`
@@ -398,6 +403,8 @@ export class CategoriesRepository {
                is_default_option, food_type, origin_tag,
                custom_badges, display_delivery_minutes,
                avg_rating, rating_count, net_quantity,
+               shop_product_id, shop_id,
+               bulk_min_quantity, bulk_max_quantity, bulk_order_eligible,
                created_at, family_name, option_count
         FROM ranked
         WHERE rn = 1

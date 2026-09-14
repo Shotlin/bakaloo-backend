@@ -93,6 +93,9 @@ describe('CategoriesRepository.findProducts — STANDARD category / multi-catego
     const [dataSql, dataParams] = databaseMock.query.mock.calls[0]
     expect(dataSql).toContain('LEFT JOIN LATERAL')
     expect(dataSql).toMatch(/COALESCE\(shop_price\.sp_wholesale_price, shop_price\.sp_price\) AS price/)
+    expect(dataSql).toMatch(/shop_price\.sp_shop_product_id AS shop_product_id/)
+    expect(dataSql).toMatch(/shop_price\.sp_shop_id AS shop_id/)
+    expect(dataSql).toMatch(/shop_price\.sp_bulk_min_quantity AS bulk_min_quantity/)
     expect(dataSql).not.toMatch(/p\.price AS price/)
     expect(dataParams.filter((value) => Array.isArray(value)).length).toBe(2)
   })

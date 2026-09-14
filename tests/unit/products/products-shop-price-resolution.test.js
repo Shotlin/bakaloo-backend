@@ -60,6 +60,17 @@ describe('ProductsRepository — customer-facing price resolution', () => {
     const [sql] = queryMock.mock.calls[0]
     expect(sql).toContain('LEFT JOIN LATERAL')
     expect(sql).toMatch(/shop_price\.sp_price AS price/)
+    expect(sql).toMatch(/shop_price\.sp_shop_product_id AS shop_product_id/)
+    expect(sql).toMatch(/shop_price\.sp_shop_id AS shop_id/)
+  })
+
+  it('fullTextSearch() returns the same exact shop listing identity as its price', async () => {
+    const repo = new ProductsRepository()
+    await repo.fullTextSearch('onion', { allocatedShopIds: [SHOP_A] })
+
+    const [sql] = queryMock.mock.calls[0]
+    expect(sql).toMatch(/shop_price\.sp_shop_product_id AS shop_product_id/)
+    expect(sql).toMatch(/shop_price\.sp_shop_id AS shop_id/)
   })
 
   it('findMany() (groupOptions branch) resolves price from shop_products when scoped to a customer', async () => {

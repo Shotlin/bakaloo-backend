@@ -102,7 +102,7 @@ export function buildCustomerVisibilitySnippet(allocatedShopIds, params, startId
  *   ever reached via resolveEffectivePriceMode() (src/utils/price-mode.js),
  *   which already re-verifies the caller's live B2B status server-side —
  *   this function trusts whatever mode it's given.
- * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, bulkMinQuantityExpr: string, bulkMaxQuantityExpr: string, bulkOrderEligibleExpr: string, nextIdx: number }}
+ * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, shopProductIdExpr: string, shopIdExpr: string, bulkMinQuantityExpr: string, bulkMaxQuantityExpr: string, bulkOrderEligibleExpr: string, nextIdx: number }}
  */
 export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'retail') {
   const isWholesale = priceMode === 'wholesale'
@@ -119,6 +119,8 @@ export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode
       priceExpr: isWholesale ? 'COALESCE(p.wholesale_price, p.price)' : 'p.price',
       salePriceExpr: isWholesale ? noSalePrice : 'p.sale_price',
       stockExpr: 'p.stock_quantity',
+      shopProductIdExpr: 'NULL::uuid',
+      shopIdExpr: 'NULL::uuid',
       // Bulk-order settings live only on the per-shop listing (shop_products)
       // — there's no master-product-level fallback the way wholesale_price
       // has, so with no shop context there's simply no per-listing limit.
@@ -157,6 +159,11 @@ export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode
       : 'shop_price.sp_price',
     salePriceExpr: isWholesale ? noSalePrice : 'shop_price.sp_sale_price',
     stockExpr: 'shop_price.sp_stock_quantity',
+    // The client must receive the exact listing used for the displayed
+    // price. Cart mutations use this identity to update/remove the same
+    // shop row, even when a product exists in more than one allocated shop.
+    shopProductIdExpr: 'shop_price.sp_shop_product_id',
+    shopIdExpr: 'shop_price.sp_shop_id',
     bulkMinQuantityExpr: 'shop_price.sp_bulk_min_quantity',
     bulkMaxQuantityExpr: 'shop_price.sp_bulk_max_quantity',
     bulkOrderEligibleExpr: 'shop_price.sp_bulk_order_eligible',
@@ -297,6 +304,8 @@ export class ProductsRepository {
             p.is_default_option, p.food_type, p.origin_tag,
             p.custom_badges, p.display_delivery_minutes,
             p.avg_rating, p.rating_count, p.net_quantity,
+            ${shopPrice.shopProductIdExpr} AS shop_product_id,
+            ${shopPrice.shopIdExpr} AS shop_id,
             p.created_at,
             ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
             ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
@@ -322,6 +331,7 @@ export class ProductsRepository {
                is_default_option, food_type, origin_tag,
                custom_badges, display_delivery_minutes,
                avg_rating, rating_count, net_quantity,
+               shop_product_id, shop_id,
                bulk_min_quantity, bulk_max_quantity, bulk_order_eligible,
                category_name, family_name, option_count
         FROM ranked
@@ -367,6 +377,8 @@ export class ProductsRepository {
         p.is_default_option, p.food_type, p.origin_tag,
         p.custom_badges, p.display_delivery_minutes,
         p.avg_rating, p.rating_count, p.net_quantity,
+        ${shopPrice.shopProductIdExpr} AS shop_product_id,
+        ${shopPrice.shopIdExpr} AS shop_id,
         ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
         ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
         ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
@@ -455,6 +467,8 @@ export class ProductsRepository {
           ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
+          ${shopPrice.shopProductIdExpr} AS shop_product_id,
+          ${shopPrice.shopIdExpr} AS shop_id,
           ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
           ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
           ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
@@ -486,6 +500,8 @@ export class ProductsRepository {
           ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
+          ${shopPrice.shopProductIdExpr} AS shop_product_id,
+          ${shopPrice.shopIdExpr} AS shop_id,
           ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
           ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
           ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
@@ -529,6 +545,8 @@ export class ProductsRepository {
         stock_quantity,
         unit,
         thumbnail_url,
+        shop_product_id,
+        shop_id,
         bulk_min_quantity,
         bulk_max_quantity,
         bulk_order_eligible,
@@ -785,6 +803,8 @@ export class ProductsRepository {
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
               p.low_stock_threshold, p.max_order_qty,
+              ${shopPrice.shopProductIdExpr} AS shop_product_id,
+              ${shopPrice.shopIdExpr} AS shop_id,
               ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
               ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
               ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
@@ -839,6 +859,8 @@ export class ProductsRepository {
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
               p.low_stock_threshold, p.max_order_qty,
+              ${shopPrice.shopProductIdExpr} AS shop_product_id,
+              ${shopPrice.shopIdExpr} AS shop_id,
               ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
               ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
               ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
@@ -1139,6 +1161,8 @@ export class ProductsRepository {
                 p.custom_badges, p.display_delivery_minutes,
                 p.avg_rating, p.rating_count, p.net_quantity,
                 p.category_id, p.max_order_qty,
+                ${shopPrice.shopProductIdExpr} AS shop_product_id,
+                ${shopPrice.shopIdExpr} AS shop_id,
                 ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
                 ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
                 ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible
@@ -1178,6 +1202,8 @@ export class ProductsRepository {
               p.custom_badges, p.display_delivery_minutes,
               p.avg_rating, p.rating_count, p.net_quantity,
               p.category_id, p.max_order_qty,
+              ${shopPrice.shopProductIdExpr} AS shop_product_id,
+              ${shopPrice.shopIdExpr} AS shop_id,
               ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
               ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
               ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible
