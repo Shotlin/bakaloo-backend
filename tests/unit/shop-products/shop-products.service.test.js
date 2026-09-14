@@ -948,12 +948,12 @@ describe('ShopProductsRepository — SQL safety', () => {
     expect(sql).toMatch(/INSERT INTO shop_products/i)
     // shop_id, product_id, price, sale_price, cost_price, wholesale_price,
     // stock_quantity, low_stock_threshold, max_order_qty, is_available,
-    // is_featured, bulk_order_eligible, bulk_min_quantity,
+    // is_featured, bulk_order_eligible, bulk_min_quantity, bulk_max_quantity,
     // bulk_sale_start_at, bulk_sale_end_at, sold_out_at
-    for (let i = 1; i <= 16; i++) {
+    for (let i = 1; i <= 17; i++) {
       expect(sql).toContain(`$${i}`)
     }
-    expect(params).toHaveLength(16)
+    expect(params).toHaveLength(17)
     // Column list must be explicit
     expect(sql).toMatch(/shop_id,\s*product_id/)
   })

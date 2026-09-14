@@ -285,7 +285,9 @@ export class BulkOrdersRepository {
    *   stock_quantity: number,
    *   is_available: boolean,
    *   max_order_qty: number,
-   *   bulk_order_eligible: boolean
+   *   bulk_order_eligible: boolean,
+   *   bulk_min_quantity: number|null,
+   *   bulk_max_quantity: number|null
    * }>>}
    */
   async findShopProductsForValidation(client, shopId, productIds) {
@@ -297,6 +299,7 @@ export class BulkOrdersRepository {
              sp.max_order_qty,
              sp.bulk_order_eligible,
              sp.bulk_min_quantity,
+             sp.bulk_max_quantity,
              sp.bulk_sale_start_at,
              sp.bulk_sale_end_at
         FROM shop_products sp

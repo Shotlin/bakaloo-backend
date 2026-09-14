@@ -701,6 +701,17 @@ export class BulkOrdersService {
         })
         continue
       }
+      const maxQuantity = sp.bulk_max_quantity != null ? Number(sp.bulk_max_quantity) : null
+      if (maxQuantity !== null && qty > maxQuantity) {
+        failed.push({
+          product_id: productId,
+          requested: qty,
+          available: Number(sp.stock_quantity),
+          reason: 'ABOVE_BULK_MAXIMUM',
+          maximum: maxQuantity,
+        })
+        continue
+      }
       if (Number(sp.stock_quantity) < qty) {
         failed.push({
           product_id: productId,

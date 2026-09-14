@@ -48,6 +48,8 @@ export const createShopProductSchema = z
     // qualify (on top of bulk_orders' own whole-order minimums). Null means
     // no per-listing minimum.
     bulk_min_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
+    // Ceiling for the same line — null means no per-listing maximum.
+    bulk_max_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
     // Optional bulk-sale window — both null means always eligible whenever
     // bulk_order_eligible is on.
     bulk_sale_start_at: z.string().datetime().optional().nullable(),
@@ -66,6 +68,19 @@ export const createShopProductSchema = z
         code: z.ZodIssueCode.custom,
         path: ['sale_price'],
         message: 'sale_price must be less than price',
+      })
+    }
+    if (
+      data.bulk_min_quantity !== undefined &&
+      data.bulk_min_quantity !== null &&
+      data.bulk_max_quantity !== undefined &&
+      data.bulk_max_quantity !== null &&
+      data.bulk_max_quantity < data.bulk_min_quantity
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bulk_max_quantity'],
+        message: 'bulk_max_quantity must be greater than or equal to bulk_min_quantity',
       })
     }
     if (
@@ -101,6 +116,7 @@ export const updateShopProductSchema = z
     is_featured: z.boolean().optional(),
     bulk_order_eligible: z.boolean().optional(),
     bulk_min_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
+    bulk_max_quantity: z.number().int().min(1).max(MAX_ORDER_QTY_MAX).optional().nullable(),
     bulk_sale_start_at: z.string().datetime().optional().nullable(),
     bulk_sale_end_at: z.string().datetime().optional().nullable(),
   })
@@ -116,11 +132,25 @@ export const updateShopProductSchema = z
       data.is_featured !== undefined ||
       data.bulk_order_eligible !== undefined ||
       data.bulk_min_quantity !== undefined ||
+      data.bulk_max_quantity !== undefined ||
       data.bulk_sale_start_at !== undefined ||
       data.bulk_sale_end_at !== undefined,
     { message: 'At least one field must be provided' }
   )
   .superRefine((data, ctx) => {
+    if (
+      data.bulk_min_quantity !== undefined &&
+      data.bulk_min_quantity !== null &&
+      data.bulk_max_quantity !== undefined &&
+      data.bulk_max_quantity !== null &&
+      data.bulk_max_quantity < data.bulk_min_quantity
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bulk_max_quantity'],
+        message: 'bulk_max_quantity must be greater than or equal to bulk_min_quantity',
+      })
+    }
     if (
       data.bulk_sale_start_at &&
       data.bulk_sale_end_at &&

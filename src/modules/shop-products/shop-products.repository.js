@@ -88,7 +88,7 @@ export class ShopProductsRepository {
     price, sale_price, cost_price, wholesale_price,
     stock_quantity, low_stock_threshold, max_order_qty,
     is_available, is_featured, bulk_order_eligible,
-    bulk_min_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at,
+    bulk_min_quantity, bulk_max_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at,
     approval_status, approved_at, approved_by, rejection_reason,
     deleted_at, created_at, updated_at
   `
@@ -110,13 +110,13 @@ export class ShopProductsRepository {
         price, sale_price, cost_price, wholesale_price,
         stock_quantity, low_stock_threshold, max_order_qty,
         is_available, is_featured, bulk_order_eligible,
-        bulk_min_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at
+        bulk_min_quantity, bulk_max_quantity, bulk_sale_start_at, bulk_sale_end_at, sold_out_at
       ) VALUES (
         $1, $2,
         $3, $4, $5, $6,
         $7, $8, $9,
         $10, $11, $12,
-        $13, $14, $15, $16
+        $13, $14, $15, $16, $17
       )
       RETURNING ${ShopProductsRepository.SELECT_COLUMNS}`,
       [
@@ -133,6 +133,7 @@ export class ShopProductsRepository {
         data.is_featured ?? false,
         data.bulk_order_eligible ?? true,
         data.bulk_min_quantity ?? null,
+        data.bulk_max_quantity ?? null,
         data.bulk_sale_start_at ?? null,
         data.bulk_sale_end_at ?? null,
         soldOutAt,
@@ -168,8 +169,8 @@ export class ShopProductsRepository {
         price = $3, sale_price = $4, cost_price = $5, wholesale_price = $6,
         stock_quantity = $7, low_stock_threshold = $8, max_order_qty = $9,
         is_available = $10, is_featured = $11, bulk_order_eligible = $12,
-        bulk_min_quantity = $13, bulk_sale_start_at = $14, bulk_sale_end_at = $15,
-        sold_out_at = $16,
+        bulk_min_quantity = $13, bulk_max_quantity = $14, bulk_sale_start_at = $15, bulk_sale_end_at = $16,
+        sold_out_at = $17,
         approval_status = 'APPROVED', approved_at = NULL, approved_by = NULL,
         rejection_reason = NULL,
         deleted_at = NULL, updated_at = NOW()
@@ -189,6 +190,7 @@ export class ShopProductsRepository {
         data.is_featured ?? false,
         data.bulk_order_eligible ?? true,
         data.bulk_min_quantity ?? null,
+        data.bulk_max_quantity ?? null,
         data.bulk_sale_start_at ?? null,
         data.bulk_sale_end_at ?? null,
         soldOutAt,
@@ -306,6 +308,10 @@ export class ShopProductsRepository {
           sp.is_available,
           sp.is_featured,
           sp.bulk_order_eligible,
+          sp.bulk_min_quantity,
+          sp.bulk_max_quantity,
+          sp.bulk_sale_start_at,
+          sp.bulk_sale_end_at,
           sp.sold_out_at,
           sp.approval_status,
           sp.approved_at,
@@ -320,6 +326,7 @@ export class ShopProductsRepository {
                           AS product_image_url,
           p.category_id   AS product_category_id,
           c.name          AS product_category_name,
+          p.unit          AS product_unit,
           s.name          AS shop_name
         FROM shop_products sp
         LEFT JOIN products p ON p.id = sp.product_id
@@ -348,11 +355,17 @@ export class ShopProductsRepository {
       price: row.price,
       sale_price: row.sale_price,
       cost_price: row.cost_price,
+      wholesale_price: row.wholesale_price,
       stock_quantity: row.stock_quantity,
       low_stock_threshold: row.low_stock_threshold,
       max_order_qty: row.max_order_qty,
       is_available: row.is_available,
       is_featured: row.is_featured ?? false,
+      bulk_order_eligible: row.bulk_order_eligible,
+      bulk_min_quantity: row.bulk_min_quantity,
+      bulk_max_quantity: row.bulk_max_quantity,
+      bulk_sale_start_at: row.bulk_sale_start_at,
+      bulk_sale_end_at: row.bulk_sale_end_at,
       sold_out_at: row.sold_out_at,
       approval_status: row.approval_status,
       approved_at: row.approved_at,
@@ -369,6 +382,7 @@ export class ShopProductsRepository {
         image_url: row.product_image_url ?? null,
         category_id: row.product_category_id ?? null,
         category_name: row.product_category_name ?? null,
+        unit: row.product_unit ?? null,
       },
       shop_name: row.shop_name ?? null,
     }))
@@ -403,6 +417,7 @@ export class ShopProductsRepository {
       'is_featured',
       'bulk_order_eligible',
       'bulk_min_quantity',
+      'bulk_max_quantity',
       'bulk_sale_start_at',
       'bulk_sale_end_at',
     ]
