@@ -925,7 +925,7 @@ describe('ShopProductsRepository — SQL safety', () => {
     expect(dataSql).not.toContain('milk')
   })
 
-  it('create uses ten parameterized placeholders and names every column explicitly', async () => {
+  it('create uses one parameterized placeholder per column and names every column explicitly', async () => {
     const repo = new ShopProductsRepository()
     query.mockResolvedValue({
       rows: [{ id: SHOP_PRODUCT_ID }],
@@ -946,10 +946,14 @@ describe('ShopProductsRepository — SQL safety', () => {
 
     const [sql, params] = query.mock.calls[0]
     expect(sql).toMatch(/INSERT INTO shop_products/i)
-    for (let i = 1; i <= 10; i++) {
+    // shop_id, product_id, price, sale_price, cost_price, wholesale_price,
+    // stock_quantity, low_stock_threshold, max_order_qty, is_available,
+    // is_featured, bulk_order_eligible, bulk_min_quantity,
+    // bulk_sale_start_at, bulk_sale_end_at, sold_out_at
+    for (let i = 1; i <= 16; i++) {
       expect(sql).toContain(`$${i}`)
     }
-    expect(params).toHaveLength(10)
+    expect(params).toHaveLength(16)
     // Column list must be explicit
     expect(sql).toMatch(/shop_id,\s*product_id/)
   })

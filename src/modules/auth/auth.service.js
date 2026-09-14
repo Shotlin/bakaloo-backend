@@ -18,7 +18,66 @@ const REFRESH_TOKEN_PREFIX = 'refresh:'
 // token takes over on the next request. This grace key absorbs that race
 // instead of punishing the loser of it.
 const REFRESH_TOKEN_GRACE_PREFIX = 'refresh:grace:'
-const REFRESH_TOKEN_GRACE_SECONDS = 30
+// Comfortably longer than the Flutter client's own worst-case timeout
+// budget for this call (25s connect + 40s receive, see AppConstants in
+// app_constants.dart) — a refresh request that's merely slow (congested
+// mobile network, brief server load), not truly concurrent, must still
+// find its presented token in grace by the time it actually lands, or it
+// gets hard-rejected as "invalid" even though nothing about the session
+// was ever actually wrong.
+const REFRESH_TOKEN_GRACE_SECONDS = 60
+// Serializes the read-check-rotate-write sequence in refreshToken() below
+// per user. Without this, two renewal calls presenting the SAME
+// still-current token that land close enough together (the exact case the
+// grace key above was meant to absorb — e.g. the app's cold-start
+// refreshSession() racing an in-flight request's interceptor-triggered
+// refresh) can both read `stored === refreshToken` as true before either
+// writes, and both independently rotate: each mints its own new token
+// pair and unconditionally overwrites the single refresh:<userId> key, so
+// whichever pair the client doesn't happen to persist is silently
+// orphaned — it matches neither the new current value nor the grace value
+// (which only ever remembers the ONE shared pre-rotation token both calls
+// presented), so its next use is a hard, unrecoverable "Invalid or
+// expired refresh token" even though the underlying session was never
+// actually compromised. Holding this lock across the whole
+// read-decide-write section makes the second caller observe the first
+// caller's completed rotation (current value changed, grace now holds the
+// shared old token) instead of racing it — the existing grace-branch logic
+// then converges it onto the same winning pair with no further rotation,
+// exactly as it already does for a simple late-duplicate call.
+const REFRESH_LOCK_PREFIX = 'refresh:lock:'
+const REFRESH_LOCK_TTL_MS = 3000
+const REFRESH_LOCK_MAX_WAIT_MS = 1500
+const REFRESH_LOCK_RETRY_MS = 25
+
+/**
+ * Best-effort per-user mutual exclusion for token refresh. Returns the lock
+ * key (pass to releaseRefreshLock) once acquired, or null if the wait
+ * window elapsed without acquiring it — callers should proceed WITHOUT the
+ * lock in that case (fail open) rather than reject a legitimate refresh
+ * over lock contention; losing the lock only reopens the pre-existing race
+ * window for that one request, it never makes anything worse.
+ */
+async function acquireRefreshLock(userId) {
+  const key = `${REFRESH_LOCK_PREFIX}${userId}`
+  const deadline = Date.now() + REFRESH_LOCK_MAX_WAIT_MS
+  do {
+    const acquired = await redis.set(key, '1', 'PX', REFRESH_LOCK_TTL_MS, 'NX')
+    if (acquired === 'OK') return key
+    await new Promise((resolve) => setTimeout(resolve, REFRESH_LOCK_RETRY_MS))
+  } while (Date.now() < deadline)
+  return null
+}
+
+async function releaseRefreshLock(key) {
+  if (!key) return
+  try {
+    await redis.del(key)
+  } catch {
+    // Best-effort — a failed unlock just means the lock expires on its own
+    // TTL a little later; never let this fail the request it's guarding.
+  }
+}
 const SMS_SESSION_PREFIX = 'sms:session:'
 // Short-lived token issued when a staff member logs in but has multiple shop
 // assignments and must select one before getting a full session JWT.
@@ -376,68 +435,80 @@ export class AuthService {
     try {
       const decoded = verifyToken(refreshToken, env.JWT_REFRESH_SECRET)
 
-      const stored = await redis.get(`${REFRESH_TOKEN_PREFIX}${decoded.id}`)
+      // Serializes everything below per user (see REFRESH_LOCK_PREFIX above)
+      // so two renewal calls presenting the same still-current token can
+      // never both pass the equality check before either writes — the
+      // second one always observes the first's completed rotation instead
+      // of racing it. Best-effort: proceeds without the lock if it
+      // couldn't be acquired in time rather than rejecting a legitimate
+      // refresh over contention.
+      const lockKey = await acquireRefreshLock(decoded.id)
+      try {
+        const stored = await redis.get(`${REFRESH_TOKEN_PREFIX}${decoded.id}`)
 
-      if (stored !== refreshToken) {
-        // Not the current token. It may still be the one we rotated away
-        // from a moment ago — a duplicate renewal call already in flight
-        // when this user's session last rotated (see REFRESH_TOKEN_GRACE_
-        // PREFIX above). Accept it without rotating again so that call
-        // converges on the same session instead of failing outright.
-        const grace = stored
-          ? await redis.get(`${REFRESH_TOKEN_GRACE_PREFIX}${decoded.id}`)
-          : null
-        if (!stored || grace !== refreshToken) {
-          return { success: false, message: 'Invalid or expired refresh token' }
+        if (stored !== refreshToken) {
+          // Not the current token. It may still be the one we rotated away
+          // from a moment ago — a duplicate renewal call already in flight
+          // when this user's session last rotated (see REFRESH_TOKEN_GRACE_
+          // PREFIX above). Accept it without rotating again so that call
+          // converges on the same session instead of failing outright.
+          const grace = stored
+            ? await redis.get(`${REFRESH_TOKEN_GRACE_PREFIX}${decoded.id}`)
+            : null
+          if (!stored || grace !== refreshToken) {
+            return { success: false, message: 'Invalid or expired refresh token' }
+          }
+
+          const user = await this.repo.findById(decoded.id)
+          if (!user || !user.is_active) {
+            return { success: false, message: 'User account is not active' }
+          }
+
+          const accessToken = signAccessToken({
+            id: user.id,
+            phone: user.phone,
+            role: user.role,
+          })
+
+          return { success: true, accessToken, refreshToken: stored }
         }
 
+        // Check user still exists and is active
         const user = await this.repo.findById(decoded.id)
         if (!user || !user.is_active) {
           return { success: false, message: 'User account is not active' }
         }
 
-        const accessToken = signAccessToken({
-          id: user.id,
-          phone: user.phone,
-          role: user.role,
-        })
+        // Generate new token pair (rotate refresh token)
+        const payload = { id: user.id, phone: user.phone, role: user.role }
+        const tokens = generateTokenPair(payload)
 
-        return { success: true, accessToken, refreshToken: stored }
-      }
+        // Keep the just-superseded token valid for a short grace window so a
+        // duplicate renewal call already in flight with it still succeeds
+        // (see REFRESH_TOKEN_GRACE_PREFIX above) instead of forcing a false
+        // logout.
+        await redis.set(
+          `${REFRESH_TOKEN_GRACE_PREFIX}${user.id}`,
+          refreshToken,
+          'EX',
+          REFRESH_TOKEN_GRACE_SECONDS
+        )
 
-      // Check user still exists and is active
-      const user = await this.repo.findById(decoded.id)
-      if (!user || !user.is_active) {
-        return { success: false, message: 'User account is not active' }
-      }
+        // Update refresh token in Redis
+        await redis.set(
+          `${REFRESH_TOKEN_PREFIX}${user.id}`,
+          tokens.refreshToken,
+          'EX',
+          refreshTokenTtlSeconds()
+        )
 
-      // Generate new token pair (rotate refresh token)
-      const payload = { id: user.id, phone: user.phone, role: user.role }
-      const tokens = generateTokenPair(payload)
-
-      // Keep the just-superseded token valid for a short grace window so a
-      // duplicate renewal call already in flight with it still succeeds
-      // (see REFRESH_TOKEN_GRACE_PREFIX above) instead of forcing a false
-      // logout.
-      await redis.set(
-        `${REFRESH_TOKEN_GRACE_PREFIX}${user.id}`,
-        refreshToken,
-        'EX',
-        REFRESH_TOKEN_GRACE_SECONDS
-      )
-
-      // Update refresh token in Redis
-      await redis.set(
-        `${REFRESH_TOKEN_PREFIX}${user.id}`,
-        tokens.refreshToken,
-        'EX',
-        refreshTokenTtlSeconds()
-      )
-
-      return {
-        success: true,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
+        return {
+          success: true,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+        }
+      } finally {
+        await releaseRefreshLock(lockKey)
       }
     } catch (err) {
       logger.warn({ err: err.message }, 'Refresh token verification failed')

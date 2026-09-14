@@ -37,7 +37,13 @@ vi.mock('../../src/utils/sms.js', () => ({
 
 vi.mock('../../src/config/redis.js', () => ({
   redis: {
-    set: vi.fn(),
+    // Real Redis SET (including a granted NX lock) resolves to 'OK' — the
+    // per-user refresh lock in auth.service.js checks for this exact value
+    // to know it acquired the lock immediately, so a bare `vi.fn()` here
+    // (which resolves to `undefined`) would make every refreshToken() call
+    // in this suite spend the full REFRESH_LOCK_MAX_WAIT_MS retrying before
+    // proceeding lock-less.
+    set: vi.fn(async () => 'OK'),
     get: vi.fn(),
     del: vi.fn(),
   },
@@ -111,7 +117,7 @@ describe('AuthService#refreshToken — rotation grace window', () => {
       `refresh:grace:${USER_ID}`,
       CURRENT_TOKEN,
       'EX',
-      30
+      60
     )
     expect(redis.set).toHaveBeenCalledWith(
       `refresh:${USER_ID}`,
