@@ -523,10 +523,16 @@ export class ShopProductsService {
       await cacheDeletePattern('products:list:*')
       await cacheDeletePattern('products:featured*')
       await cacheDeletePattern('products:slug:*')
+      // Keyed by whichever sibling productId a client happened to request
+      // options for (products:options:v1:scope:priceMode:productId), so a
+      // single shop_product edit can't be targeted precisely the way
+      // products:detail:*:id can — blanket bust, same tradeoff already
+      // accepted for list/featured/slug above.
+      await cacheDeletePattern('products:options:*')
     } catch (err) {
       logger.error(
         { err: err.message, action: 'shop_products.invalidate_customer_list_caches_failed' },
-        'Failed to invalidate customer-facing product list/featured/slug caches'
+        'Failed to invalidate customer-facing product list/featured/slug/options caches'
       )
     }
   }

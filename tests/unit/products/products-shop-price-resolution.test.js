@@ -184,18 +184,26 @@ describe('ProductsRepository — query/params placeholder-count consistency', ()
   })
 })
 
+// Rebuilt on buildShopPriceJoin()/buildCustomerVisibilitySnippet() — the
+// same LATERAL join every sibling method (findById, findMany, ...) already
+// uses — instead of its own bespoke post-query JS merge
+// (_fetchShopDataForProducts, removed). Postgres itself now does the
+// COALESCE-to-shop-price resolution these mocks stand in for, so there's
+// no separate "shop data" query to mock, and no sp_* keys ever reach JS to
+// begin with — the join's inner columns are aliased inside the LATERAL
+// subquery and never selected in the outer query.
 describe('ProductsRepository.findFamilyOptions — overwrites price, never leaves both fields', () => {
   it('overwrites price/sale_price from the matched shop listing and drops the redundant sp_* keys (standalone product)', async () => {
     const repo = new ProductsRepository()
     queryMock
       .mockResolvedValueOnce({
-        rows: [{ id: 'product-1', price: '290.00', sale_price: null, product_family_id: null }],
+        rows: [{ id: 'product-1', product_family_id: null }],
       })
       .mockResolvedValueOnce({
         rows: [{
-          product_id: 'product-1', shop_product_id: 'sp-1', shop_id: SHOP_A,
-          sp_price: '150.00', sp_sale_price: null,
-          stock_quantity: 98, max_order_qty: 100, is_available: true,
+          id: 'product-1', name: 'Product 1', slug: 'product-1',
+          price: '150.00', sale_price: null, stock_quantity: 98,
+          bulk_min_quantity: null, bulk_max_quantity: null, bulk_order_eligible: null,
         }],
       })
 
@@ -219,21 +227,23 @@ describe('ProductsRepository.findFamilyOptions — overwrites price, never leave
     const repo = new ProductsRepository()
     queryMock
       .mockResolvedValueOnce({
-        rows: [{ id: 'product-500g', price: '290.00', sale_price: null, product_family_id: 'family-1' }],
+        rows: [{ id: 'product-500g', product_family_id: 'family-1' }],
       })
       .mockResolvedValueOnce({
         rows: [{ id: 'family-1', name: 'Sumul Malai Peda' }],
       })
       .mockResolvedValueOnce({
         rows: [
-          { id: 'product-100g', price: '150.00', sale_price: null, product_family_id: 'family-1' },
-          { id: 'product-500g', price: '290.00', sale_price: null, product_family_id: 'family-1' },
-        ],
-      })
-      .mockResolvedValueOnce({
-        rows: [
-          { product_id: 'product-100g', shop_product_id: 'sp-100', shop_id: SHOP_A, sp_price: '290.00', sp_sale_price: null, stock_quantity: 100, max_order_qty: 100, is_available: true },
-          { product_id: 'product-500g', shop_product_id: 'sp-500', shop_id: SHOP_A, sp_price: '150.00', sp_sale_price: null, stock_quantity: 98, max_order_qty: 100, is_available: true },
+          {
+            id: 'product-100g', name: '100g', slug: '100g',
+            price: '290.00', sale_price: null, stock_quantity: 100,
+            bulk_min_quantity: null, bulk_max_quantity: null, bulk_order_eligible: null,
+          },
+          {
+            id: 'product-500g', name: '500g', slug: '500g',
+            price: '150.00', sale_price: null, stock_quantity: 98,
+            bulk_min_quantity: null, bulk_max_quantity: null, bulk_order_eligible: null,
+          },
         ],
       })
 

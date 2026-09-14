@@ -145,9 +145,11 @@ export class ProductsController {
   /** GET /:id/options — All purchasable options for a product family */
   async getOptions(request, reply) {
     const customerContext = resolveCustomerContext(request)
+    const priceMode = resolvePriceMode(request)
     const result = await this.service.getProductOptions(
       request.params.id,
-      customerContext
+      customerContext,
+      priceMode
     )
     if (!result) {
       return reply.code(404).send(error('Product not found', 'NOT_FOUND'))
