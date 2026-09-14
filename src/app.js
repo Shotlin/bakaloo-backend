@@ -221,6 +221,16 @@ export const buildApp = async () => {
     prefix: '/api/v1/banners',
   })
 
+  // Nav buttons (public) — the resolved 5th bottom-nav slot for mobile
+  await app.register(import('./modules/nav-buttons/nav-buttons.routes.js'), {
+    prefix: '/api/v1/nav-buttons',
+  })
+
+  // Webview (public) — identity handoff for a nav-button WEBVIEW destination
+  await app.register(import('./modules/webview/webview.routes.js'), {
+    prefix: '/api/v1/webview',
+  })
+
   // Tutorials (public) — active in-app tutorial videos for mobile/web
   await app.register(import('./modules/tutorials/tutorials.routes.js'), {
     prefix: '/api/v1/tutorials',
