@@ -41,7 +41,7 @@ describe('AdminBannersService.getActiveForStoreStatus', () => {
 
     const result = await svc.getActiveForStoreStatus()
 
-    expect(findActiveForStoreStatusMock).toHaveBeenCalledWith(true, 'B2C')
+    expect(findActiveForStoreStatusMock).toHaveBeenCalledWith(true, 'B2C', 'HOME', null)
     expect(result).toHaveLength(1)
     expect(result[0].id).toBe('b1')
   })
@@ -55,7 +55,7 @@ describe('AdminBannersService.getActiveForStoreStatus', () => {
 
     const result = await svc.getActiveForStoreStatus()
 
-    expect(findActiveForStoreStatusMock).toHaveBeenCalledWith(false, 'B2C')
+    expect(findActiveForStoreStatusMock).toHaveBeenCalledWith(false, 'B2C', 'HOME', null)
     expect(result.map((b) => b.id)).toEqual(['b1', 'b2'])
   })
 

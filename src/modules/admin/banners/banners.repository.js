@@ -8,7 +8,9 @@ export class AdminBannersRepository {
               COALESCE(cta_text, 'none') AS link_type,
               cta_link AS link_value,
               display_order AS sort_order,
-              is_active, start_date, end_date, trigger_type, audience, created_at, updated_at
+              is_active, start_date, end_date, trigger_type, audience,
+              placement, target_segment_id, image_width, image_height,
+              created_at, updated_at
        FROM banners ORDER BY display_order ASC, created_at DESC`
     )
     return rows
@@ -21,38 +23,61 @@ export class AdminBannersRepository {
               COALESCE(cta_text, 'none') AS link_type,
               cta_link AS link_value,
               display_order AS sort_order,
-              is_active, start_date, end_date, trigger_type, audience, created_at, updated_at
+              is_active, start_date, end_date, trigger_type, audience,
+              placement, target_segment_id, image_width, image_height,
+              created_at, updated_at
        FROM banners WHERE id = $1`,
       [id]
     )
     return b || null
   }
 
-  async create({ title, subtitle, imageUrl, ctaText, ctaLink, bannerType, isActive, startDate, endDate, triggerType, audience }) {
+  async create({
+    title, subtitle, imageUrl, ctaText, ctaLink, bannerType, isActive,
+    startDate, endDate, triggerType, audience,
+    placement, targetSegmentId, imageWidth, imageHeight,
+  }) {
     // Get the highest display_order
     const { rows: [{ max: maxOrder }] } = await query('SELECT COALESCE(MAX(display_order), 0) AS max FROM banners')
     const { rows: [b] } = await query(
-      `INSERT INTO banners (title, subtitle, image_url, cta_text, cta_link, banner_type, is_active, start_date, end_date, display_order, trigger_type, audience)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO banners (
+         title, subtitle, image_url, cta_text, cta_link, banner_type, is_active,
+         start_date, end_date, display_order, trigger_type, audience,
+         placement, target_segment_id, image_width, image_height
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING id, title, subtitle, image_url,
                 CASE WHEN banner_type = 'hero' THEN 'carousel' ELSE COALESCE(banner_type, 'carousel') END AS banner_type,
                 COALESCE(cta_text, 'none') AS link_type,
                 cta_link AS link_value,
                 display_order AS sort_order,
-                is_active, start_date, end_date, trigger_type, audience, created_at, updated_at`,
-      [title, subtitle || null, imageUrl, ctaText || null, ctaLink || null, bannerType || 'hero', isActive !== false, startDate || null, endDate || null, (maxOrder || 0) + 1, triggerType || 'ALWAYS', audience || 'B2C']
+                is_active, start_date, end_date, trigger_type, audience,
+                placement, target_segment_id, image_width, image_height,
+                created_at, updated_at`,
+      [
+        title, subtitle || null, imageUrl, ctaText || null, ctaLink || null, bannerType || 'hero',
+        isActive !== false, startDate || null, endDate || null, (maxOrder || 0) + 1,
+        triggerType || 'ALWAYS', audience || 'B2C',
+        placement || 'HOME', targetSegmentId || null, imageWidth || null, imageHeight || null,
+      ]
     )
     return b
   }
 
   async update(id, data) {
     const sets = []; const params = []; let idx = 1
-    const fields = ['title', 'subtitle', 'image_url', 'cta_text', 'cta_link', 'banner_type', 'is_active', 'start_date', 'end_date', 'trigger_type', 'audience']
+    const fields = [
+      'title', 'subtitle', 'image_url', 'cta_text', 'cta_link', 'banner_type',
+      'is_active', 'start_date', 'end_date', 'trigger_type', 'audience',
+      'placement', 'target_segment_id', 'image_width', 'image_height',
+    ]
     const bodyMap = {
       title: 'title', subtitle: 'subtitle', image_url: 'imageUrl',
       cta_text: 'ctaText', cta_link: 'ctaLink', banner_type: 'bannerType',
       is_active: 'isActive', start_date: 'startDate', end_date: 'endDate',
       trigger_type: 'triggerType', audience: 'audience',
+      placement: 'placement', target_segment_id: 'targetSegmentId',
+      image_width: 'imageWidth', image_height: 'imageHeight',
     }
 
     for (const col of fields) {
@@ -73,7 +98,9 @@ export class AdminBannersRepository {
                 COALESCE(cta_text, 'none') AS link_type,
                 cta_link AS link_value,
                 display_order AS sort_order,
-                is_active, start_date, end_date, trigger_type, audience, created_at, updated_at`,
+                is_active, start_date, end_date, trigger_type, audience,
+                placement, target_segment_id, image_width, image_height,
+                created_at, updated_at`,
       params
     )
     return b
@@ -129,22 +156,42 @@ export class AdminBannersRepository {
    * a B2C viewer sees audience IN ('B2C','ALL'); a B2B viewer sees
    * audience IN ('B2B','ALL'). Matches the original ask directly: B2B
    * promotional content is shown to everyone, not gated behind B2B status.
+   *
+   * `placement` scoping: which screen is asking (HOME by default, for
+   * backward compatibility with the only caller that existed before this
+   * column — the home section-builder). A banner authored for one
+   * placement never bleeds into another.
+   *
+   * `userId` / segment scoping: a banner with target_segment_id set only
+   * qualifies for a signed-in member of that segment (same
+   * customer_segment_members join pattern coupons.target_segment_id and
+   * cart_milestones.applicable_segment_id already use) — an anonymous
+   * viewer (userId null) never matches a segment-targeted banner. NULL
+   * target_segment_id (the common case) always qualifies, same as today.
    */
-  async findActiveForStoreStatus(isOpen, audience = 'B2C') {
+  async findActiveForStoreStatus(isOpen, audience = 'B2C', placement = 'HOME', userId = null) {
     const { rows } = await query(
-      `SELECT id, title, subtitle, image_url,
-              CASE WHEN banner_type = 'hero' THEN 'carousel' ELSE COALESCE(banner_type, 'carousel') END AS banner_type,
-              COALESCE(cta_text, 'none') AS link_type,
-              cta_link AS link_value,
-              trigger_type
-       FROM banners
-       WHERE is_active = true
-         AND (start_date IS NULL OR start_date <= NOW())
-         AND (end_date IS NULL OR end_date >= NOW())
-         AND (trigger_type = 'ALWAYS' OR (trigger_type = 'STORE_CLOSED' AND $1 = false))
-         AND audience IN ($2, 'ALL')
-       ORDER BY display_order ASC`,
-      [isOpen, audience]
+      `SELECT b.id, b.title, b.subtitle, b.image_url,
+              CASE WHEN b.banner_type = 'hero' THEN 'carousel' ELSE COALESCE(b.banner_type, 'carousel') END AS banner_type,
+              COALESCE(b.cta_text, 'none') AS link_type,
+              b.cta_link AS link_value,
+              b.trigger_type, b.image_width, b.image_height
+       FROM banners b
+       WHERE b.is_active = true
+         AND b.placement = $3
+         AND (b.start_date IS NULL OR b.start_date <= NOW())
+         AND (b.end_date IS NULL OR b.end_date >= NOW())
+         AND (b.trigger_type = 'ALWAYS' OR (b.trigger_type = 'STORE_CLOSED' AND $1 = false))
+         AND b.audience IN ($2, 'ALL')
+         AND (
+           b.target_segment_id IS NULL
+           OR ($4::uuid IS NOT NULL AND EXISTS (
+             SELECT 1 FROM customer_segment_members csm
+              WHERE csm.segment_id = b.target_segment_id AND csm.user_id = $4
+           ))
+         )
+       ORDER BY b.display_order ASC`,
+      [isOpen, audience, placement, userId]
     )
     return rows
   }

@@ -23,6 +23,10 @@ export const createBannerSchema = {
       endDate: { type: 'string', format: 'date-time' },
       triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'], default: 'ALWAYS' },
       audience: { type: 'string', enum: ['B2C', 'B2B', 'ALL'], default: 'B2C' },
+      placement: { type: 'string', enum: ['HOME', 'PROFILE'], default: 'HOME' },
+      targetSegmentId: { type: ['string', 'null'], pattern: uuidPattern },
+      imageWidth: { type: ['integer', 'null'], minimum: 1 },
+      imageHeight: { type: ['integer', 'null'], minimum: 1 },
     },
   },
 }
@@ -46,6 +50,10 @@ export const updateBannerSchema = {
       endDate: { type: ['string', 'null'], format: 'date-time' },
       triggerType: { type: 'string', enum: ['ALWAYS', 'STORE_CLOSED'] },
       audience: { type: 'string', enum: ['B2C', 'B2B', 'ALL'] },
+      placement: { type: 'string', enum: ['HOME', 'PROFILE'] },
+      targetSegmentId: { type: ['string', 'null'], pattern: uuidPattern },
+      imageWidth: { type: ['integer', 'null'], minimum: 1 },
+      imageHeight: { type: ['integer', 'null'], minimum: 1 },
     },
   },
 }

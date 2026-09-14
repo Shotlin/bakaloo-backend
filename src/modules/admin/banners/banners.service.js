@@ -35,6 +35,10 @@ export class AdminBannersService {
       endDate: data.endDate,
       triggerType: data.triggerType,
       audience: data.audience,
+      placement: data.placement,
+      targetSegmentId: data.targetSegmentId,
+      imageWidth: data.imageWidth,
+      imageHeight: data.imageHeight,
     }
     const banner = await repo.create(mapped)
     logAdminActivity(adminId, 'CREATE_BANNER', 'banner', banner.id, null, null, ip)
@@ -53,6 +57,10 @@ export class AdminBannersService {
       ...(data.endDate !== undefined && { endDate: data.endDate }),
       ...(data.triggerType !== undefined && { triggerType: data.triggerType }),
       ...(data.audience !== undefined && { audience: data.audience }),
+      ...(data.placement !== undefined && { placement: data.placement }),
+      ...(data.targetSegmentId !== undefined && { targetSegmentId: data.targetSegmentId }),
+      ...(data.imageWidth !== undefined && { imageWidth: data.imageWidth }),
+      ...(data.imageHeight !== undefined && { imageHeight: data.imageHeight }),
     }
     const banner = await repo.update(id, mapped)
     logAdminActivity(adminId, 'UPDATE_BANNER', 'banner', id, null, null, ip)
@@ -81,9 +89,9 @@ export class AdminBannersService {
    * 'STORE_CLOSED' banners only included while the store is closed — and by
    * audience (B2C/B2B viewer sees their own banners plus every 'ALL' one).
    */
-  async getActiveForStoreStatus(audience = 'B2C') {
+  async getActiveForStoreStatus(audience = 'B2C', placement = 'HOME', userId = null) {
     const { isOpen } = await this.storeStatusService.isOpen()
-    return this._normalizeBanners(await repo.findActiveForStoreStatus(isOpen, audience))
+    return this._normalizeBanners(await repo.findActiveForStoreStatus(isOpen, audience, placement, userId))
   }
 
   _normalizeBanners(banners = []) {

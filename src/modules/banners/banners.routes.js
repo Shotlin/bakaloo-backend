@@ -24,9 +24,27 @@ export default async function bannerRoutes(fastify) {
     }
   }
 
-  fastify.get('/', { preHandler: [tryAttachUser] }, async (request, reply) => {
+  fastify.get('/', {
+    // placement MUST be declared here: the global ajv removeAdditional:'all'
+    // (src/app.js) silently strips any query param this route doesn't
+    // list, before the handler ever sees it — exactly the bug class that
+    // caused the B2B/wholesale pricing split earlier in products.schema.js.
+    // Omitting it here would make every request fall back to 'HOME' no
+    // matter what the caller actually asked for.
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          placement: { type: 'string', enum: ['HOME', 'PROFILE'], default: 'HOME' },
+        },
+      },
+    },
+    preHandler: [tryAttachUser],
+  }, async (request, reply) => {
     const audience = resolveEffectiveAudience(request)
-    const banners = await svc.getActiveForStoreStatus(audience)
+    const placement = request.query?.placement === 'PROFILE' ? 'PROFILE' : 'HOME'
+    const userId = request.user?.id || null
+    const banners = await svc.getActiveForStoreStatus(audience, placement, userId)
     return success(banners, 'Active banners fetched')
   })
 }
