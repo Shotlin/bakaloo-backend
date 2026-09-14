@@ -11,7 +11,7 @@ export class AdminNavButtonsController {
 
   async getById(request, reply) {
     const btn = await svc.getById(request.params.id)
-    if (!btn) return error('Nav button not found', 404)
+    if (!btn) return reply.code(404).send(error('Nav button not found', 'NOT_FOUND'))
     return success(btn, 'Nav button fetched')
   }
 
@@ -22,13 +22,13 @@ export class AdminNavButtonsController {
 
   async update(request, reply) {
     const btn = await svc.update(request.params.id, request.body, request.user.id, request.ip)
-    if (!btn) return error('Nav button not found', 404)
+    if (!btn) return reply.code(404).send(error('Nav button not found', 'NOT_FOUND'))
     return success(btn, 'Nav button updated')
   }
 
   async remove(request, reply) {
     const ok = await svc.remove(request.params.id, request.user.id, request.ip)
-    if (!ok) return error('Nav button not found', 404)
+    if (!ok) return reply.code(404).send(error('Nav button not found', 'NOT_FOUND'))
     return success(null, 'Nav button deleted')
   }
 

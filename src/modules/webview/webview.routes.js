@@ -32,18 +32,18 @@ export default async function webviewRoutes(fastify) {
   }, async (request, reply) => {
     const token = request.query?.token
     if (!token || typeof token !== 'string') {
-      return error('Missing token', 400)
+      return reply.code(400).send(error('Missing token', 'MISSING_TOKEN'))
     }
 
     let payload
     try {
       payload = verifyToken(token, env.JWT_ACCESS_SECRET)
     } catch {
-      return error('Invalid or expired token', 401)
+      return reply.code(401).send(error('Invalid or expired token', 'INVALID_TOKEN'))
     }
 
     if (payload.purpose !== WEBVIEW_TOKEN_PURPOSE) {
-      return error('Invalid or expired token', 401)
+      return reply.code(401).send(error('Invalid or expired token', 'INVALID_TOKEN'))
     }
 
     return success(
