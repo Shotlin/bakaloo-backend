@@ -31,6 +31,8 @@ const cartItemResponse = {
     thumbnailUrl: { type: ['string', 'null'] },
     stockQuantity:{ type: 'integer' },
     maxOrderQty:  { type: 'integer' },
+    bulkMinQuantity: { type: ['integer', 'null'] },
+    bulkMaxQuantity: { type: ['integer', 'null'] },
     subtotal:     { type: 'number' },
     lineTotal:    { type: 'number' },
     inStock:      { type: 'boolean' },

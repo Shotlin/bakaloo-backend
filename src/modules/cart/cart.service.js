@@ -1087,6 +1087,24 @@ export class CartService {
       thumbnailUrl: sp.thumbnail_url,
       stockQuantity: Number(sp.stock_quantity),
       maxOrderQty: Number(sp.max_order_qty),
+      // Same rule as buildShopPriceJoin (products.repository.js): bulk
+      // quantity bounds are a wholesale-mode concept and must never reach
+      // a retail-mode line — a stale line added while wholesale was active
+      // still carries its real mode via item.priceMode, but the display
+      // fields here follow THIS response's priceMode so the cart screen's
+      // stepper only ever enforces a bulk floor/ceiling on a genuinely
+      // wholesale line. Reported: decrementing a wholesale Onion line
+      // (bulk min 5) went 5→4→3... one at a time instead of being
+      // blocked/removed at the minimum — the cart response never sent the
+      // bulk bounds for the stepper to enforce in the first place.
+      bulkMinQuantity:
+        priceMode === 'wholesale' && sp.bulk_min_quantity != null
+          ? Number(sp.bulk_min_quantity)
+          : null,
+      bulkMaxQuantity:
+        priceMode === 'wholesale' && sp.bulk_max_quantity != null
+          ? Number(sp.bulk_max_quantity)
+          : null,
       subtotal: lineTotal,
       lineTotal,
       inStock: Number(sp.stock_quantity) > 0,
