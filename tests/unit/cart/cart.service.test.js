@@ -360,10 +360,11 @@ describe('CartService.addItem — shop auto-resolution', () => {
     expect(repo.findShopProductsForProduct).toHaveBeenCalledWith(USER_ID, PROD_1)
     // Service must lookup using the resolved shopId
     expect(repo.findShopProductForUser).toHaveBeenCalledWith(USER_ID, PROD_1, SHOP_A)
-    // Saved line has the resolved shopId
+    // Saved line has the resolved shopId (and the default 'retail' priceMode
+    // tag every new line now carries — see CartService._filterByMode)
     const saved = repo.saveCart.mock.calls[0][1]
     expect(saved).toEqual([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2, priceMode: 'retail' },
     ])
   })
 
@@ -448,9 +449,12 @@ describe('CartService.addItem — line consolidation', () => {
     const saved = repo.saveCart.mock.calls[0][1]
     expect(saved).toHaveLength(2)
     expect(saved).toEqual(
+      // The SHOP_A line is the untouched fixture object (no priceMode key,
+      // since it isn't the line being added/mutated this call); the new
+      // SHOP_B line is freshly pushed and carries the default 'retail' tag.
       expect.arrayContaining([
         { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
-        { productId: PROD_1, shopId: SHOP_B, quantity: 4 },
+        { productId: PROD_1, shopId: SHOP_B, quantity: 4, priceMode: 'retail' },
       ])
     )
   })
@@ -744,10 +748,14 @@ describe('CartService.validateCart', () => {
     })
     expect(result.failed).toHaveLength(1)
 
-    // Persisted cart drops the failed line
+    // Persisted cart drops the failed line. Every validated line is now
+    // re-saved with its priceMode tag (defaulted to 'retail' here — see
+    // validateCart's otherModeItems merge, which keeps the other mode's
+    // lines out of this call's own output but still passes them through
+    // to saveCart unchanged).
     expect(repo.saveCart).toHaveBeenCalledTimes(1)
     expect(repo.saveCart.mock.calls[0][1]).toEqual([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2, priceMode: 'retail' },
     ])
   })
 
@@ -864,7 +872,7 @@ describe('CartService — wholesale price mode', () => {
   it('validateCart charges the shop wholesale price, with no sale-price tier', async () => {
     const repo = makeRepoMock()
     repo.getCart.mockResolvedValueOnce([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 2 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2, priceMode: 'wholesale' },
     ])
     repo.findShopProductsForCart.mockResolvedValueOnce([
       makeSpRow({
@@ -885,7 +893,7 @@ describe('CartService — wholesale price mode', () => {
   it('validateCart falls back to the shop retail price when no wholesale price is configured', async () => {
     const repo = makeRepoMock()
     repo.getCart.mockResolvedValueOnce([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1, priceMode: 'wholesale' },
     ])
     repo.findShopProductsForCart.mockResolvedValueOnce([
       makeSpRow({
@@ -904,7 +912,7 @@ describe('CartService — wholesale price mode', () => {
   it('validateCart still rejects SHOP_PRICE_NOT_SET in wholesale mode when every tier is unset', async () => {
     const repo = makeRepoMock()
     repo.getCart.mockResolvedValueOnce([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 1, priceMode: 'wholesale' },
     ])
     repo.findShopProductsForCart.mockResolvedValueOnce([
       makeSpRow({
@@ -926,7 +934,7 @@ describe('CartService — wholesale price mode', () => {
   it('getCart resolves wholesale pricing end to end', async () => {
     const repo = makeRepoMock()
     repo.getCart.mockResolvedValueOnce([
-      { productId: PROD_1, shopId: SHOP_A, quantity: 3 },
+      { productId: PROD_1, shopId: SHOP_A, quantity: 3, priceMode: 'wholesale' },
     ])
     repo.findShopProductsForCart.mockResolvedValueOnce([
       makeSpRow({
@@ -1092,7 +1100,9 @@ describe('CartService.addItem — shopProductId identity (Phase 3)', () => {
     expect(repo.findShopProductForUser).not.toHaveBeenCalled()
 
     const saved = repo.saveCart.mock.calls[0][1]
-    expect(saved).toEqual([{ productId: PROD_1, shopId: SHOP_A, quantity: 2 }])
+    expect(saved).toEqual([
+      { productId: PROD_1, shopId: SHOP_A, quantity: 2, priceMode: 'retail' },
+    ])
   })
 
   it('rejects mismatched productId vs shopProductId with CART_ITEM_IDENTITY_CONFLICT', async () => {
@@ -1184,12 +1194,15 @@ describe('CartService — multi-option same family stays as separate cart lines 
     await service.addItem(USER_ID, { productId: PROD_2, quantity: 1 })
 
     // saveCart was called twice; the second call must contain BOTH lines.
+    // PROD_1 is the untouched fixture object from the first add (no
+    // priceMode key); PROD_2 is this call's freshly-pushed line, which
+    // carries the default 'retail' tag.
     const lastSave = repo.saveCart.mock.calls.at(-1)[1]
     expect(lastSave).toHaveLength(2)
     expect(lastSave).toEqual(
       expect.arrayContaining([
         { productId: PROD_1, shopId: SHOP_A, quantity: 1 },
-        { productId: PROD_2, shopId: SHOP_A, quantity: 1 },
+        { productId: PROD_2, shopId: SHOP_A, quantity: 1, priceMode: 'retail' },
       ])
     )
   })

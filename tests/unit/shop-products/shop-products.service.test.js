@@ -326,10 +326,18 @@ describe('ShopProductsService.create', () => {
       ADMIN_ACTOR
     )
 
-    expect(cacheDeletePattern).toHaveBeenCalledTimes(1)
+    // 1 dashboard-cache bust (own namespace) + 3 customer-facing blanket
+    // busts (list/featured/slug — no per-product detail bust here since
+    // this mock's created row carries no product_id, so
+    // _invalidateCustomerProductDetailCache's own `if (!productId) return`
+    // guard skips it).
+    expect(cacheDeletePattern).toHaveBeenCalledTimes(4)
     expect(cacheDeletePattern).toHaveBeenCalledWith(
       `bakaloo:shop-products:v1:${SHOP_ID}:*`
     )
+    expect(cacheDeletePattern).toHaveBeenCalledWith('products:list:*')
+    expect(cacheDeletePattern).toHaveBeenCalledWith('products:featured*')
+    expect(cacheDeletePattern).toHaveBeenCalledWith('products:slug:*')
   })
 
   it('does NOT invalidate cache when authorization fails', async () => {
@@ -695,7 +703,11 @@ describe('ShopProductsService.updateStock', () => {
 
     expect(result.success).toBe(true)
     expect(calls).toContain('COMMIT')
-    expect(cacheDeletePattern).toHaveBeenCalledTimes(1)
+    // 1 dashboard-cache bust + 3 customer-facing blanket busts (list/
+    // featured/slug) — see the matching comment on the create() test above
+    // for why there's no 4th, per-product detail bust in this particular
+    // mock (applyStockUpdate's mocked return carries no product_id).
+    expect(cacheDeletePattern).toHaveBeenCalledTimes(4)
 
     // Locate the COMMIT call's invocation order
     const commitCallIdx = client.query.mock.calls.findIndex(

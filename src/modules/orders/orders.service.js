@@ -844,7 +844,14 @@ export class OrdersService {
     // This prevents the "cart disappeared but payment failed" bug.
     if (paymentAlreadyConfirmedAtCreation) {
       try {
-        await this.cartService.clearCart(userId)
+        // Scoped to the mode this order was actually placed under — a
+        // COD order placed in retail must never clear out a pending
+        // wholesale cart the customer hasn't checked out yet (or vice
+        // versa). ONLINE/WALLET payments defer this to their own
+        // confirmation step (payments.service.js / wallet.service.js),
+        // which — lacking any persisted per-order price mode to recover
+        // at that later, async point — still clears both modes there.
+        await this.cartService.clearCart(userId, priceMode)
       } catch (err) {
         logStepFailure('clear_cart', err)
       }

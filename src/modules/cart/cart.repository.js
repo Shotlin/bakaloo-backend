@@ -14,8 +14,8 @@ const CART_ACTIVITY_ZSET = 'cart-activity'
 /**
  * Cart repository
  *
- * - Redis: cart line items (`{ productId, shopId, quantity }`), tip and
- *   delivery instructions
+ * - Redis: cart line items (`{ productId, shopId, quantity, priceMode }`),
+ *   tip and delivery instructions
  * - PostgreSQL: per-shop product lookups gated on the customer's active
  *   user_shop_allocations and the shop's `is_active` flag (Requirements
  *   5.2, 5.3, 5.4, 5.5, 12.2)
@@ -28,9 +28,16 @@ export class CartRepository {
   // ────────────────────────────────────────────────────────
 
   /**
-   * Get all items in user's cart from Redis. Each item is shaped as
-   * `{ productId, shopId, quantity }`. Legacy entries without shopId are
-   * filtered out so multi-vendor checkout can group safely (Requirement 5.6).
+   * Get all items in user's cart from Redis, across BOTH price modes —
+   * callers that only want the customer's currently-visible cart must
+   * filter by `priceMode` themselves (see CartService._filterByMode).
+   *
+   * Each item is shaped as `{ productId, shopId, quantity, priceMode }`.
+   * `priceMode` defaults to 'retail' for entries saved before this field
+   * existed, so pre-existing carts keep showing under retail exactly as
+   * they did before — nothing is silently hidden by this change alone.
+   * Legacy entries without shopId are filtered out so multi-vendor
+   * checkout can group safely (Requirement 5.6).
    */
   async getCart(userId) {
     const data = await redis.get(`${CART_PREFIX}${userId}`)
@@ -48,12 +55,16 @@ export class CartRepository {
         productId: item.productId,
         shopId: item.shopId,
         quantity: Number(item.quantity),
+        priceMode: item.priceMode === 'wholesale' ? 'wholesale' : 'retail',
       }))
   }
 
   /**
    * Save entire cart to Redis. Caller must pass the new array shape
-   * `{ productId, shopId, quantity }`.
+   * `{ productId, shopId, quantity, priceMode }` — this OVERWRITES the
+   * full stored array, so a caller mutating one price mode's lines must
+   * pass through the other mode's lines unchanged alongside them (see
+   * CartService.addItem/updateItem/removeItem/validateCart).
    */
   async saveCart(userId, items) {
     const normalized = (items || [])
@@ -62,6 +73,7 @@ export class CartRepository {
         productId: i.productId,
         shopId: i.shopId,
         quantity: Number(i.quantity),
+        priceMode: i.priceMode === 'wholesale' ? 'wholesale' : 'retail',
       }))
     await redis.set(
       `${CART_PREFIX}${userId}`,
@@ -73,11 +85,34 @@ export class CartRepository {
   }
 
   /**
-   * Clear cart
+   * Clear cart.
+   *
+   * @param {string} userId
+   * @param {'retail'|'wholesale'|null} [priceMode] - Omitted (default):
+   *   wipes the whole stored cart, both modes — the original behavior,
+   *   unchanged, and what every payment-confirmation call site
+   *   (payments.service.js / wallet.service.js, which have no reliable way
+   *   to recover which mode a given order was placed under) still gets.
+   *   Passed explicitly: removes only that mode's lines, leaving the
+   *   other mode's pending cart untouched — used when the caller DOES know
+   *   the mode (the cart controller's own "Clear cart" button, and
+   *   orders.service.js/ledger.service.js right after a COD/ledger order
+   *   in a known mode actually confirms).
    */
-  async clearCart(userId) {
-    await redis.del(`${CART_PREFIX}${userId}`)
-    await redis.zrem(CART_ACTIVITY_ZSET, userId)
+  async clearCart(userId, priceMode = null) {
+    if (!priceMode) {
+      await redis.del(`${CART_PREFIX}${userId}`)
+      await redis.zrem(CART_ACTIVITY_ZSET, userId)
+      return
+    }
+    const items = await this.getCart(userId)
+    const remaining = items.filter((i) => i.priceMode !== priceMode)
+    if (remaining.length === 0) {
+      await redis.del(`${CART_PREFIX}${userId}`)
+      await redis.zrem(CART_ACTIVITY_ZSET, userId)
+      return
+    }
+    await this.saveCart(userId, remaining)
   }
 
   /**

@@ -523,6 +523,16 @@ export class LedgerService {
       // Clear cart and send notification AFTER successful ledger draw —
       // same ordering rationale as payFromWallet (never clear/notify on a
       // draw that didn't actually happen).
+      //
+      // NOT scoped to a price mode here (unlike orders.service.js's own
+      // post-order clearCart call): LEDGER eligibility (config.ledgerEnabled
+      // + an ACTIVE ledger_accounts row — see
+      // orders.service.js#_checkPaymentMethodAllowed) is never actually
+      // conditioned on priceMode==='wholesale', so an order paid this way
+      // isn't reliably one or the other. Nothing here persists which mode
+      // THIS order was placed under by the time this async draw confirms,
+      // so — same as payments.service.js/wallet.service.js — this clears
+      // the whole cart rather than risk clearing the wrong mode.
       try {
         const { CartRepository } = await import('../cart/cart.repository.js')
         const cartRepo = new CartRepository()

@@ -582,8 +582,11 @@ export class ProductsService {
    *
    * @param {string} productId
    * @param {{ userId?: string }|null} [customerContext]
+   * @param {'retail'|'wholesale'} [priceMode='retail'] - Cache key MUST
+   *   carry this (same as every other cached read here) or a wholesale
+   *   viewer could be served a cached retail result, or vice versa.
    */
-  async getProductOptions(productId, customerContext = null) {
+  async getProductOptions(productId, customerContext = null, priceMode = 'retail') {
     const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
 
     if (Array.isArray(allocatedShopIds) && allocatedShopIds.length === 0) {
@@ -591,11 +594,11 @@ export class ProductsService {
     }
 
     const scope = this._scopeKey(allocatedShopIds)
-    const cacheKey = `products:options:${CACHE_VERSION}:${scope}:${productId}`
+    const cacheKey = `products:options:${CACHE_VERSION}:${scope}:${priceMode}:${productId}`
     const cached = await cacheGet(cacheKey)
     if (cached) return cached
 
-    const result = await this.repo.findFamilyOptions(productId, allocatedShopIds)
+    const result = await this.repo.findFamilyOptions(productId, allocatedShopIds, priceMode)
     if (!result) return null
 
     // Normalize image URLs on options

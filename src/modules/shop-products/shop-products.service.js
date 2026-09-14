@@ -368,6 +368,11 @@ export class ShopProductsService {
     // events below), which let the Store → Inventory page keep serving a
     // stale cached stock number for up to CACHE_TTL_SECONDS after an order.
     await this.invalidateShopCache(shopId)
+    // A stock change flips is_available (and, at 0, hides the product from
+    // customers) — the customer-facing caches need the same bust as the
+    // dashboard's own, or Category/Search/detail can keep showing an
+    // out-of-stock (or just-restocked) item in the wrong state.
+    await this._invalidateCustomerProductCache(shopProduct.product_id)
 
     // Resolve product name (best-effort, single PK lookup).
     let resolvedName = productMeta?.product_name ?? shopProduct.product_name
@@ -468,6 +473,64 @@ export class ShopProductsService {
     await cacheDeletePattern(`${CACHE_PREFIX}:${shopId}:*`)
   }
 
+  /**
+   * Bust the CUSTOMER-facing product caches (products.service.js) for one
+   * product. invalidateShopCache() above only ever clears this module's own
+   * `bakaloo:shop-products:v1:*` namespace — the dashboard's own listing
+   * pages — which is a completely separate cache from the one customers'
+   * product list/detail/search/featured reads are served from. Nothing
+   * previously invalidated that second cache when a shop_product's price,
+   * wholesale price, bulk-order settings, or stock changed, so a dashboard
+   * edit could take up to CACHE_TTL_DETAIL/CACHE_TTL_LIST (products.service.js
+   * — 15 / 10 minutes) to reach a customer, even across their app's own
+   * cold restart, since this cache lives server-side. Reported: wholesale
+   * price and bulk minimum/maximum set in the dashboard didn't show up on
+   * Category, Search, or the product detail page.
+   *
+   * Scoped by product_id where the key supports it (`products:detail:*:id`);
+   * list/featured/slug caches have no per-product key to target, so — same
+   * as products.service.js's own create()/update() do for themselves — they
+   * get a blanket SCAN-based bust rather than staying stale.
+   *
+   * Split into two halves (detail vs. list/featured/slug) so bulkPriceUpdate()
+   * can bust up to 500 products' detail entries individually without also
+   * re-running the same three blanket SCANs 500 times — it calls
+   * _invalidateCustomerProductDetailCache() per item and
+   * _invalidateCustomerProductListCaches() once after the loop. Every other
+   * call site just wants both together, via this method.
+   * @param {string} productId
+   */
+  async _invalidateCustomerProductCache(productId) {
+    await this._invalidateCustomerProductDetailCache(productId)
+    await this._invalidateCustomerProductListCaches()
+  }
+
+  /** @param {string} productId */
+  async _invalidateCustomerProductDetailCache(productId) {
+    if (!productId) return
+    try {
+      await cacheDeletePattern(`products:detail:*:${productId}`)
+    } catch (err) {
+      logger.error(
+        { err: err.message, productId, action: 'shop_products.invalidate_customer_detail_cache_failed' },
+        'Failed to invalidate customer-facing product detail cache'
+      )
+    }
+  }
+
+  async _invalidateCustomerProductListCaches() {
+    try {
+      await cacheDeletePattern('products:list:*')
+      await cacheDeletePattern('products:featured*')
+      await cacheDeletePattern('products:slug:*')
+    } catch (err) {
+      logger.error(
+        { err: err.message, action: 'shop_products.invalidate_customer_list_caches_failed' },
+        'Failed to invalidate customer-facing product list/featured/slug caches'
+      )
+    }
+  }
+
   // ────────────────────────────────────────────────────────
   // CRUD
   // ────────────────────────────────────────────────────────
@@ -548,6 +611,7 @@ export class ShopProductsService {
     }
 
     await this.invalidateShopCache(shopId)
+    await this._invalidateCustomerProductCache(created.product_id)
 
     logger.info(
       {
@@ -671,6 +735,7 @@ export class ShopProductsService {
     }
 
     await this.invalidateShopCache(shopId)
+    await this._invalidateCustomerProductCache(existing.product_id)
 
     logger.info(
       {
@@ -725,6 +790,7 @@ export class ShopProductsService {
     }
 
     await this.invalidateShopCache(shopId)
+    await this._invalidateCustomerProductCache(existing.product_id)
 
     logger.info(
       {
@@ -1279,6 +1345,14 @@ export class ShopProductsService {
       // R23.13: SCAN-based cache invalidation after COMMIT. One pattern
       // delete covers every cached page for the shop.
       await this.invalidateShopCache(shopId)
+      // Customer-facing side: bust each touched product's detail cache
+      // individually, then the list/featured/slug blanket patterns ONCE for
+      // the whole batch — not once per item, since this loop can cover up
+      // to 500 products.
+      for (const item of afterSnapshots) {
+        await this._invalidateCustomerProductDetailCache(item.product_id)
+      }
+      await this._invalidateCustomerProductListCaches()
 
       logger.info(
         {
@@ -1427,6 +1501,7 @@ export class ShopProductsService {
       // R23.13: SCAN-based cache invalidation after COMMIT (the
       // approval state is part of the listing payload).
       await this.invalidateShopCache(updated.shop_id)
+      await this._invalidateCustomerProductCache(updated.product_id)
 
       logger.info(
         {
@@ -1539,6 +1614,7 @@ export class ShopProductsService {
       await client.query('COMMIT')
 
       await this.invalidateShopCache(updated.shop_id)
+      await this._invalidateCustomerProductCache(updated.product_id)
 
       logger.info(
         {

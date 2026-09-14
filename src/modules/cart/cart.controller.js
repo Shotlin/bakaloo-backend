@@ -110,9 +110,11 @@ export class CartController {
     return reply.code(200).send(success(result.cart, 'Item removed from cart'))
   }
 
-  /** DELETE / */
+  /** DELETE / — clears only the caller's current price-mode view of the
+   * cart (Requirement: a B2B line the customer can't currently see must
+   * survive them clearing their visible B2C cart, and vice versa). */
   async clear(request, reply) {
-    await this.service.clearCart(request.user.id)
+    await this.service.clearCart(request.user.id, this._resolvePriceMode(request))
     return reply.code(200).send(success(null, 'Cart cleared'))
   }
 

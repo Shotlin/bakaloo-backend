@@ -73,13 +73,34 @@ export class CartService {
   // ────────────────────────────────────────────────────────
 
   /**
+   * A raw Redis cart line carries a `priceMode` tag set at add-time — the
+   * cart is really two independent carts (retail + wholesale) sharing one
+   * Redis key. Every read/mutation below narrows to the CURRENT request's
+   * mode before doing anything customer-visible, so:
+   *   - a product added while wholesale pricing was active never shows up
+   *     (or gets touched by update/remove) while browsing retail, and
+   *     vice versa — switching modes shows a genuinely different cart:
+   *   - checkout (validateCart) only ever charges/places the current
+   *     mode's lines, never the other mode's untouched pending items.
+   * The other mode's lines are never lost — they simply aren't part of
+   * the array this returns, and reappear as soon as the viewer switches
+   * back. @see saveCart's note on callers needing to preserve them.
+   *
+   * @param {Array<{priceMode?: string}>} items
+   * @param {'retail'|'wholesale'} priceMode
+   */
+  _filterByMode(items, priceMode) {
+    return items.filter((i) => (i.priceMode || 'retail') === priceMode)
+  }
+
+  /**
    * Get an enriched view of the cart for the API.
    *
    * @param {string} userId
    * @param {'retail'|'wholesale'} [priceMode='retail']
    */
   async getCart(userId, priceMode = 'retail') {
-    const cartItems = await this.repo.getCart(userId)
+    const cartItems = this._filterByMode(await this.repo.getCart(userId), priceMode)
     if (cartItems.length === 0) {
       return this._emptyEnriched(userId)
     }
@@ -302,9 +323,17 @@ export class CartService {
       }
     }
 
+    // cartItems holds BOTH modes' lines (Redis stores one array per user);
+    // existingIndex is deliberately scoped to (product, shop, CURRENT mode)
+    // so adding a product while wholesale is active never merges into a
+    // retail-mode line for the same product sitting untouched in the other
+    // "cart" — see _filterByMode's docstring above.
     const cartItems = await this.repo.getCart(userId)
     const existingIndex = cartItems.findIndex(
-      (i) => i.productId === resolvedProductId && i.shopId === resolvedShopId
+      (i) =>
+        i.productId === resolvedProductId &&
+        i.shopId === resolvedShopId &&
+        (i.priceMode || 'retail') === priceMode
     )
     const existingQty = existingIndex >= 0 ? cartItems[existingIndex].quantity : 0
     const newQty = existingQty + qty
@@ -322,12 +351,20 @@ export class CartService {
     // Admin-configured category/product purchase-limit check (separate from
     // the SKU-level max_order_qty above). Evaluated against the PROJECTED
     // cart — i.e. including this add — so a category cap counts every
-    // matching product already in the cart, not just this line. Resolves
-    // to { ok: true } immediately for any product with no active rule, so
-    // unrestricted categories never pay the extra query.
+    // matching product already in the cart, not just this line. Scoped to
+    // the current mode's items only: a retail cap must never be tripped by
+    // quantity sitting in an untouched wholesale line (and vice versa) —
+    // they're separate orders. Resolves to { ok: true } immediately for any
+    // product with no active rule, so unrestricted categories never pay the
+    // extra query.
+    const currentModeItems = this._filterByMode(cartItems, priceMode)
     const projectedItemsForLimit = existingIndex >= 0
-      ? cartItems.map((it, idx) => (idx === existingIndex ? { ...it, quantity: newQty } : it))
-      : [...cartItems, { productId: resolvedProductId, shopId: resolvedShopId, quantity: newQty }]
+      ? currentModeItems.map((it) =>
+          it.productId === resolvedProductId && it.shopId === resolvedShopId
+            ? { ...it, quantity: newQty }
+            : it
+        )
+      : [...currentModeItems, { productId: resolvedProductId, shopId: resolvedShopId, quantity: newQty }]
     const limitCheck = await this.purchaseLimitsService.evaluate(userId, {
       productId: resolvedProductId,
       cartItems: projectedItemsForLimit,
@@ -358,7 +395,9 @@ export class CartService {
     if (existingIndex >= 0) {
       cartItems[existingIndex].quantity = newQty
     } else {
-      if (cartItems.length >= MAX_CART_ITEMS) {
+      // Distinct-item cap is per mode too — a full retail cart from past
+      // shopping must never block adding a first wholesale item.
+      if (currentModeItems.length >= MAX_CART_ITEMS) {
         return {
           success: false,
           message: `Cart is limited to ${MAX_CART_ITEMS} distinct items`,
@@ -370,6 +409,7 @@ export class CartService {
         productId: resolvedProductId,
         shopId: resolvedShopId,
         quantity: newQty,
+        priceMode,
       })
     }
 
@@ -381,13 +421,17 @@ export class CartService {
         shopId: resolvedShopId,
         shopProductId: sp.shop_product_id,
         quantity: newQty,
+        priceMode,
         action: 'cart_item_added',
       },
       'Cart item added/updated'
     )
     await this._maybeMarkRecovered(userId)
 
-    return { success: true, cart: await this._enrichCart(userId, cartItems, priceMode) }
+    return {
+      success: true,
+      cart: await this._enrichCart(userId, this._filterByMode(cartItems, priceMode), priceMode),
+    }
   }
 
   /**
@@ -444,11 +488,16 @@ export class CartService {
     }
 
     const cartItems = await this.repo.getCart(userId)
+    // Scoped to the CURRENT mode — once a product can have both a retail
+    // and a wholesale line (same productId+shopId, different priceMode),
+    // matching on identity alone would hit both and wrongly report
+    // CART_ITEM_AMBIGUOUS for what the viewer sees as exactly one line.
     const matches = cartItems
       .map((item, idx) => ({ item, idx }))
       .filter(({ item }) => {
         if (item.productId !== resolvedProductId) return false
         if (resolvedShopId && item.shopId !== resolvedShopId) return false
+        if ((item.priceMode || 'retail') !== priceMode) return false
         return true
       })
 
@@ -512,10 +561,13 @@ export class CartService {
     }
 
     // Admin-configured category/product purchase-limit check — see the
-    // matching block in addItem() above for the full rationale. `qty` here
-    // is the absolute new quantity for this line (not a delta), so the
+    // matching block in addItem() above for the full rationale, including
+    // why this is scoped to the current mode's items only. `qty` here is
+    // the absolute new quantity for this line (not a delta), so the
     // projection simply replaces this line's quantity in place.
-    const projectedItemsForLimit = cartItems.map((it, i) => (i === idx ? { ...it, quantity: qty } : it))
+    const projectedItemsForLimit = this._filterByMode(cartItems, priceMode).map((it) =>
+      it.productId === item.productId && it.shopId === item.shopId ? { ...it, quantity: qty } : it
+    )
     const limitCheck = await this.purchaseLimitsService.evaluate(userId, {
       productId: item.productId,
       cartItems: projectedItemsForLimit,
@@ -543,7 +595,10 @@ export class CartService {
     await this.repo.saveCart(userId, cartItems)
     await this._maybeMarkRecovered(userId)
 
-    return { success: true, cart: await this._enrichCart(userId, cartItems, priceMode) }
+    return {
+      success: true,
+      cart: await this._enrichCart(userId, this._filterByMode(cartItems, priceMode), priceMode),
+    }
   }
 
   /**
@@ -585,9 +640,13 @@ export class CartService {
     }
 
     const cartItems = await this.repo.getCart(userId)
+    // Mode-scoped for the same reason as updateItem() above — otherwise a
+    // product present in both a retail and a wholesale line would always
+    // look ambiguous, and removing "it" could delete the wrong one.
     const matches = cartItems.filter((i) => {
       if (i.productId !== resolvedProductId) return false
       if (resolvedShopId && i.shopId !== resolvedShopId) return false
+      if ((i.priceMode || 'retail') !== priceMode) return false
       return true
     })
 
@@ -606,21 +665,31 @@ export class CartService {
     const filtered = cartItems.filter((i) => {
       if (i.productId !== resolvedProductId) return true
       if (resolvedShopId && i.shopId !== resolvedShopId) return true
+      if ((i.priceMode || 'retail') !== priceMode) return true
       return false
     })
 
     await this.repo.saveCart(userId, filtered)
     await this._maybeMarkRecovered(userId)
-    return { success: true, cart: await this._enrichCart(userId, filtered, priceMode) }
+    return {
+      success: true,
+      cart: await this._enrichCart(userId, this._filterByMode(filtered, priceMode), priceMode),
+    }
   }
 
   /**
-   * Clear the entire cart, including extras (tip + delivery instructions).
-   * Used by the checkout success path so post-order users do not see stale
-   * carts (Requirement 5.6 — atomicity around checkout).
+   * Clear the cart, including extras (tip + delivery instructions). Used by
+   * the checkout success path so post-order users do not see stale carts
+   * (Requirement 5.6 — atomicity around checkout).
+   *
+   * @param {string} userId
+   * @param {'retail'|'wholesale'|null} [priceMode] - Omitted: wipes both
+   *   modes' lines (the original behavior). Passed: clears only that
+   *   mode's lines, leaving the other mode's pending cart untouched — see
+   *   CartRepository.clearCart's docstring for which callers pass which.
    */
-  async clearCart(userId) {
-    await this.repo.clearCart(userId)
+  async clearCart(userId, priceMode = null) {
+    await this.repo.clearCart(userId, priceMode)
     await this.repo.clearExtras(userId)
   }
 
@@ -638,7 +707,12 @@ export class CartService {
    * subsequent retry by the customer reflects the current reality.
    */
   async validateCart(userId, priceMode = 'retail') {
-    const cartItems = await this.repo.getCart(userId)
+    // Checkout only ever processes the CURRENT mode's lines — the other
+    // mode's pending cart (if any) must survive untouched, including past
+    // the saveCart() call below that persists this function's result back
+    // to Redis. allCartItems is kept around for exactly that merge.
+    const allCartItems = await this.repo.getCart(userId)
+    const cartItems = this._filterByMode(allCartItems, priceMode)
     if (cartItems.length === 0) {
       return {
         valid: false,
@@ -769,15 +843,20 @@ export class CartService {
     }
 
     // Persist validated items back to Redis (drops failed entries so the
-    // user's next view shows the current cart state).
-    await this.repo.saveCart(
-      userId,
-      validItems.map((i) => ({
+    // user's next view shows the current cart state). saveCart() overwrites
+    // the WHOLE stored array, so the other mode's untouched lines are
+    // carried through unchanged here — otherwise checking out in retail
+    // would silently wipe out a pending wholesale cart, and vice versa.
+    const otherModeItems = allCartItems.filter((i) => (i.priceMode || 'retail') !== priceMode)
+    await this.repo.saveCart(userId, [
+      ...otherModeItems,
+      ...validItems.map((i) => ({
         productId: i.productId,
         shopId: i.shopId,
         quantity: i.quantity,
-      }))
-    )
+        priceMode,
+      })),
+    ])
 
     const groupedByShop = new Map()
     for (const item of validItems) {

@@ -1096,55 +1096,58 @@ export class ProductsRepository {
    * @param {string[]|null} [allocatedShopIds] - Customer shop scoping
    * @returns {{ family: object|null, options: object[] }}
    */
-  async findFamilyOptions(productId, allocatedShopIds = null) {
-    // 1. Look up the product's family
+  /**
+   * @param {string} productId
+   * @param {string[]|null} [allocatedShopIds]
+   * @param {'retail'|'wholesale'} [priceMode='retail'] - Previously ignored
+   * entirely: this was the one customer-facing read path still pricing
+   * every option off the master catalog only (its own bespoke
+   * _fetchShopDataForProducts query, never updated when wholesale pricing
+   * and bulk min/max were added everywhere else). A multi-option product's
+   * variant picker (e.g. "500g / 1kg") never showed wholesale pricing, and
+   * never exposed bulk_min_quantity/bulk_max_quantity at all — so its ADD
+   * button could never land on a bulk minimum the way every other ADD
+   * surface (product card, search, product detail) does. Rebuilt on the
+   * same buildShopPriceJoin()/buildCustomerVisibilitySnippet() every
+   * sibling method (findById, findMany, ...) already uses, so this now
+   * matches them field-for-field.
+   */
+  async findFamilyOptions(productId, allocatedShopIds = null, priceMode = 'retail') {
+    // 1. Look up just enough to resolve the family — price/stock/visibility
+    // are resolved per-branch below via the shared shop-price join.
     const { rows: productRows } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url,
-              p.product_family_id, p.option_label, p.option_sort_order,
-              p.is_default_option, p.food_type, p.origin_tag,
-              p.custom_badges, p.display_delivery_minutes,
-              p.avg_rating, p.rating_count, p.net_quantity,
-              p.category_id, p.is_active
-       FROM products p
-       WHERE p.id = $1`,
+      `SELECT id, product_family_id FROM products WHERE id = $1 AND deleted_at IS NULL`,
       [productId]
     )
-
     if (productRows.length === 0) return null
+    const familyId = productRows[0].product_family_id
 
-    const product = productRows[0]
-    const familyId = product.product_family_id
-
-    // 2. If no family, return just this product as a single option
+    // 2. If no family, return just this product as a single option.
     if (!familyId) {
-      const option = { ...product }
-      // Enrich with shop data if customer context
-      if (Array.isArray(allocatedShopIds) && allocatedShopIds.length > 0) {
-        const shopData = await this._fetchShopDataForProducts([product.id], allocatedShopIds)
-        const shop = shopData[product.id]
-        if (shop) {
-          Object.assign(option, shop)
-          // Customer-facing price/stock must be the shop's own listing —
-          // the Object.assign above only added sp_price/sp_sale_price/
-          // sp_stock_quantity as EXTRA keys alongside the master price/
-          // sale_price/stock_quantity already on `option`, so a caller
-          // reading the conventional field names got the wrong (master)
-          // values. Overwrite, then drop the now-redundant sp_* keys so
-          // there's exactly one unambiguous value per field.
-          option.price = shop.sp_price ?? option.price
-          option.sale_price = shop.sp_sale_price ?? null
-          option.stock_quantity = shop.sp_stock_quantity ?? option.stock_quantity
-          delete option.sp_price
-          delete option.sp_sale_price
-          delete option.sp_stock_quantity
-          delete option.sp_is_available
-        }
-      }
-      return {
-        family: null,
-        options: [option],
-      }
+      const params = [productId]
+      const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+      const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
+
+      const { rows } = await query(
+        `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
+                ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
+                p.product_family_id, p.option_label, p.option_sort_order,
+                p.is_default_option, p.food_type, p.origin_tag,
+                p.custom_badges, p.display_delivery_minutes,
+                p.avg_rating, p.rating_count, p.net_quantity,
+                p.category_id, p.max_order_qty,
+                ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+                ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+                ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible
+           FROM products p
+           ${shopPrice.joinSql}
+          WHERE p.id = $1
+            AND p.deleted_at IS NULL
+            ${visibility.sql}`,
+        params
+      )
+      if (rows.length === 0) return null
+      return { family: null, options: rows }
     }
 
     // 3. Get family info
@@ -1154,97 +1157,38 @@ export class ProductsRepository {
     )
     const family = familyRows[0] || null
 
-    // 4. Get all active products in the family
+    // 4. Get every active option in the family, each priced/stocked/limited
+    // by its own best-matching allocated shop (same LATERAL join as
+    // findMany/findById) — and, via that same join's visibility EXISTS
+    // clause, excluding options with no available listing in one of the
+    // customer's allocated shops (equivalent to the old per-row JS filter,
+    // now pushed into SQL).
+    const params = [familyId]
+    const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+    const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
+
     const { rows: options } = await query(
-      `SELECT p.id, p.name, p.slug, p.price, p.sale_price,
-              p.stock_quantity, p.unit, p.thumbnail_url,
+      `SELECT p.id, p.name, p.slug, ${shopPrice.priceExpr} AS price, ${shopPrice.salePriceExpr} AS sale_price,
+              ${shopPrice.stockExpr} AS stock_quantity, p.unit, p.thumbnail_url,
               p.product_family_id, p.option_label, p.option_sort_order,
               p.is_default_option, p.food_type, p.origin_tag,
               p.custom_badges, p.display_delivery_minutes,
               p.avg_rating, p.rating_count, p.net_quantity,
-              p.category_id
-       FROM products p
-       WHERE p.product_family_id = $1
-         AND p.is_active = true
-       ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.name ASC`,
-      [familyId]
+              p.category_id, p.max_order_qty,
+              ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+              ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+              ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible
+         FROM products p
+         ${shopPrice.joinSql}
+        WHERE p.product_family_id = $1
+          AND p.is_active = true
+          AND p.deleted_at IS NULL
+          ${visibility.sql}
+        ORDER BY p.is_default_option DESC, p.option_sort_order ASC, p.name ASC`,
+      params
     )
-
-    // 5. Enrich with shop data if customer context
-    if (Array.isArray(allocatedShopIds) && allocatedShopIds.length > 0) {
-      const productIds = options.map(o => o.id)
-      const shopData = await this._fetchShopDataForProducts(productIds, allocatedShopIds)
-
-      // Filter out options with no available shop_product and enrich the
-      // rest. Same price/stock-overwrite as the standalone-product branch
-      // above — the merge alone leaves sp_price/sp_sale_price/
-      // sp_stock_quantity as extra keys beside the master price/sale_price/
-      // stock_quantity, which is exactly the bug that let a variant
-      // selector show the wrong price AND the wrong stock (a shop-listed,
-      // in-stock item could show "not available" because of the master
-      // product's unrelated stock number).
-      const enrichedOptions = options
-        .filter(o => shopData[o.id])
-        .map(o => {
-          const shop = shopData[o.id]
-          const merged = { ...o, ...shop }
-          merged.price = shop.sp_price ?? merged.price
-          merged.sale_price = shop.sp_sale_price ?? null
-          merged.stock_quantity = shop.sp_stock_quantity ?? merged.stock_quantity
-          delete merged.sp_price
-          delete merged.sp_sale_price
-          delete merged.sp_stock_quantity
-          delete merged.sp_is_available
-          return merged
-        })
-
-      return { family, options: enrichedOptions }
-    }
 
     return { family, options }
-  }
-
-  /**
-   * Batch-fetch best shop_product data for a list of product IDs.
-   * Returns a map of productId → shop data object.
-   *
-   * @param {string[]} productIds
-   * @param {string[]} shopIds
-   * @returns {Promise<Record<string, object>>}
-   */
-  async _fetchShopDataForProducts(productIds, shopIds) {
-    if (!productIds.length || !shopIds.length) return {}
-
-    const { rows } = await query(
-      `SELECT DISTINCT ON (sp.product_id)
-        sp.product_id, sp.id AS shop_product_id, sp.shop_id,
-        sp.price AS sp_price, sp.sale_price AS sp_sale_price,
-        sp.stock_quantity, sp.max_order_qty, sp.is_available
-      FROM shop_products sp
-      JOIN shops s ON s.id = sp.shop_id
-      WHERE sp.product_id = ANY($1::uuid[])
-        AND sp.shop_id = ANY($2::uuid[])
-        AND sp.is_available = true
-        AND sp.deleted_at IS NULL
-        AND s.is_active = true
-        AND s.deleted_at IS NULL
-      ORDER BY sp.product_id, sp.stock_quantity DESC`,
-      [productIds, shopIds]
-    )
-
-    const map = {}
-    for (const row of rows) {
-      map[row.product_id] = {
-        shop_product_id: row.shop_product_id,
-        shop_id: row.shop_id,
-        sp_price: row.sp_price,
-        sp_sale_price: row.sp_sale_price,
-        sp_stock_quantity: row.stock_quantity,
-        sp_max_order_qty: row.max_order_qty,
-        sp_is_available: row.is_available,
-      }
-    }
-    return map
   }
 
   /**
