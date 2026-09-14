@@ -133,6 +133,10 @@ export const removeItemSchema = {
     properties: {
       shopId:        { type: 'string', format: 'uuid' },
       shopProductId: { type: 'string', format: 'uuid' },
+      // Cart lines are stored tagged by mode; without this declared the
+      // global removeAdditional strips it and a wholesale line removal
+      // silently targets the retail line instead.
+      priceMode:     { type: 'string', enum: ['retail', 'wholesale'] },
     },
   },
   response: { 200: cartResponse },
@@ -183,6 +187,7 @@ export const getQuickAddSchema = {
     type: 'object',
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 20, default: 12 },
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
     },
   },
   response: {
@@ -204,6 +209,7 @@ export const getCartSummarySchema = {
     type: 'object',
     properties: {
       quickDeliverySelected: { type: 'boolean', default: false },
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
       // Which saved address to price delivery against — omitted, this
       // falls back to the customer's default address (see
       // BillSummaryService#_resolveAddress). Must be sent whenever the

@@ -18,6 +18,12 @@ export const listProductsSchema = {
       maxPrice: { type: 'number', minimum: 0 },
       inStock: { type: 'boolean' },
       groupOptions: { type: 'boolean', default: false },
+      // Must be declared: the global ajv `removeAdditional: 'all'`
+      // (src/app.js) deletes any query param absent from this schema
+      // BEFORE the handler runs, so an undeclared priceMode silently
+      // became retail here while cart/featured (no querystring schema,
+      // nothing to strip against) correctly served wholesale.
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
     },
   },
   response: {
@@ -55,6 +61,12 @@ export const listProductsSchema = {
               bulk_min_quantity: { type: 'integer', nullable: true },
               bulk_max_quantity: { type: 'integer', nullable: true },
               bulk_order_eligible: { type: 'boolean', nullable: true },
+              // The exact shop listing the displayed price came from. Cart
+              // mutations echo this back so they update the same row that
+              // was priced here; undeclared, fast-json-stringify dropped it
+              // and the client fell back to product-only identity.
+              shop_product_id: { type: 'string', nullable: true },
+              shop_id: { type: 'string', nullable: true },
               category_id: { type: 'string', nullable: true },
               category_name: { type: 'string', nullable: true },
               // Product family / option fields (Phase 1 contract).
@@ -102,6 +114,7 @@ export const searchProductsSchema = {
       q: { type: 'string', minLength: 1, maxLength: 100 },
       page: { type: 'integer', minimum: 1, default: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
     },
   },
 }
@@ -365,7 +378,10 @@ export const pairWithSchema = {
   },
   querystring: {
     type: 'object',
-    properties: { limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 } }
+    properties: {
+      limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 },
+      priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
+    }
   }
 }
 

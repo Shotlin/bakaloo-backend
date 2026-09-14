@@ -61,6 +61,25 @@ export const buildApp = async () => {
   // ─── GLOBAL HOOKS ──────────────────────────────────────
   app.addHook('onRequest', sanitize)
 
+  // `removeAdditional: 'all'` above deletes every query param a route's
+  // querystring schema doesn't declare — before the handler ever runs.
+  // priceMode is read by products/cart/orders/categories/themes handlers,
+  // so any route that declared a querystring schema but forgot priceMode
+  // silently served RETAIL to approved B2B customers, while routes with no
+  // querystring schema (nothing to strip against) served wholesale. That
+  // split is exactly how the cart could show a wholesale price while the
+  // category and search screens showed retail for the same product.
+  // onRequest runs before validation, so capture the caller's intent here
+  // and let resolveEffectivePriceMode() fall back to it. Declaring the
+  // param per-route is still correct (and done); this makes forgetting it
+  // on a future route non-fatal instead of a silent pricing bug.
+  app.addHook('onRequest', (request, _reply, done) => {
+    if (request.query?.priceMode === 'wholesale') {
+      request.priceModeHint = 'wholesale'
+    }
+    done()
+  })
+
   // PHASE 7 FIX (mobile-network stale-UI bug):
   // Never allow an intermediary (Cloudflare, a mobile-carrier transparent
   // proxy, or an on-device HTTP cache) to serve a stale copy of a

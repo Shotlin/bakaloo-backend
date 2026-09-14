@@ -16,7 +16,14 @@ const APPROVED_AND_ENABLED = (b2b) => !!b2b && b2b.status === 'APPROVED' && b2b.
  * @returns {'wholesale' | 'retail'}
  */
 export function resolveEffectivePriceMode(request, wantsWholesale) {
-  if (!wantsWholesale) return 'retail'
+  // `request.priceModeHint` is captured by a global onRequest hook in
+  // app.js, which runs BEFORE ajv's `removeAdditional: 'all'` deletes any
+  // query param a route's querystring schema forgot to declare. Callers
+  // still pass the parsed value; this only rescues the case where the
+  // schema ate it, which otherwise downgrades an approved B2B customer to
+  // retail with no error anywhere.
+  const asked = wantsWholesale || request?.priceModeHint === 'wholesale'
+  if (!asked) return 'retail'
   return APPROVED_AND_ENABLED(request.auth?.b2b) ? 'wholesale' : 'retail'
 }
 
