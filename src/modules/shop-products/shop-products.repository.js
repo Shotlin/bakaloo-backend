@@ -327,6 +327,7 @@ export class ShopProductsRepository {
           p.category_id   AS product_category_id,
           c.name          AS product_category_name,
           p.unit          AS product_unit,
+          p.net_quantity  AS product_net_quantity,
           s.name          AS shop_name
         FROM shop_products sp
         LEFT JOIN products p ON p.id = sp.product_id
@@ -383,6 +384,7 @@ export class ShopProductsRepository {
         category_id: row.product_category_id ?? null,
         category_name: row.product_category_name ?? null,
         unit: row.product_unit ?? null,
+        net_quantity: row.product_net_quantity ?? null,
       },
       shop_name: row.shop_name ?? null,
     }))
