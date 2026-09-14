@@ -54,7 +54,12 @@ export class ProductsController {
   async list(request, reply) {
     const customerContext = resolveCustomerContext(request)
     const priceMode = resolvePriceMode(request)
-    const result = await this.service.list(request.query, customerContext, priceMode)
+    // priceMode is resolved server-side and already forms its own segment
+    // of the cache key — leaving it in the filters object would also embed
+    // the raw client hint in the key's JSON, splitting one logical cache
+    // entry into two (hint sent / not sent) that hold identical content.
+    const { priceMode: _ignored, ...filters } = request.query
+    const result = await this.service.list(filters, customerContext, priceMode)
     return reply.code(200).send(
       success(result.data, 'Products fetched', { pagination: result.pagination })
     )
@@ -62,7 +67,7 @@ export class ProductsController {
 
   /** GET /search — Hybrid search with fuzzy suggestions */
   async search(request, reply) {
-    const { q, ...filters } = request.query
+    const { q, priceMode: _ignored, ...filters } = request.query
     const customerContext = resolveCustomerContext(request)
     const priceMode = resolvePriceMode(request)
     const result = await this.service.search(q, filters, customerContext, priceMode)
