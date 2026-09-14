@@ -102,7 +102,7 @@ function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
  *   ever reached via resolveEffectivePriceMode() (src/utils/price-mode.js),
  *   which already re-verifies the caller's live B2B status server-side —
  *   this function trusts whatever mode it's given.
- * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, nextIdx: number }}
+ * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, bulkMinQuantityExpr: string, bulkMaxQuantityExpr: string, bulkOrderEligibleExpr: string, nextIdx: number }}
  */
 function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'retail') {
   const isWholesale = priceMode === 'wholesale'
@@ -116,6 +116,12 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'ret
       priceExpr: isWholesale ? 'COALESCE(p.wholesale_price, p.price)' : 'p.price',
       salePriceExpr: isWholesale ? noSalePrice : 'p.sale_price',
       stockExpr: 'p.stock_quantity',
+      // Bulk-order settings live only on the per-shop listing (shop_products)
+      // — there's no master-product-level fallback the way wholesale_price
+      // has, so with no shop context there's simply no per-listing limit.
+      bulkMinQuantityExpr: 'NULL::integer',
+      bulkMaxQuantityExpr: 'NULL::integer',
+      bulkOrderEligibleExpr: 'NULL::boolean',
       nextIdx: startIdx,
     }
   }
@@ -132,7 +138,10 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'ret
     joinSql: `LEFT JOIN LATERAL (
       SELECT sp.price AS sp_price, sp.sale_price AS sp_sale_price,
              sp.wholesale_price AS sp_wholesale_price,
-             sp.stock_quantity AS sp_stock_quantity
+             sp.stock_quantity AS sp_stock_quantity,
+             sp.bulk_min_quantity AS sp_bulk_min_quantity,
+             sp.bulk_max_quantity AS sp_bulk_max_quantity,
+             sp.bulk_order_eligible AS sp_bulk_order_eligible
         FROM shop_products sp
        WHERE sp.product_id = p.id
          AND sp.shop_id = ANY($${idx}::uuid[])
@@ -145,6 +154,9 @@ function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'ret
       : 'COALESCE(shop_price.sp_price, p.price)',
     salePriceExpr: isWholesale ? noSalePrice : 'COALESCE(shop_price.sp_sale_price, p.sale_price)',
     stockExpr: 'COALESCE(shop_price.sp_stock_quantity, p.stock_quantity)',
+    bulkMinQuantityExpr: 'shop_price.sp_bulk_min_quantity',
+    bulkMaxQuantityExpr: 'shop_price.sp_bulk_max_quantity',
+    bulkOrderEligibleExpr: 'shop_price.sp_bulk_order_eligible',
     nextIdx: startIdx + 1,
   }
 }
@@ -283,6 +295,9 @@ export class ProductsRepository {
             p.custom_badges, p.display_delivery_minutes,
             p.avg_rating, p.rating_count, p.net_quantity,
             p.created_at,
+            ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+            ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+            ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
             c.name AS category_name,
             pf.name AS family_name,
             ${optionCountExpr} AS option_count,
@@ -304,6 +319,7 @@ export class ProductsRepository {
                is_default_option, food_type, origin_tag,
                custom_badges, display_delivery_minutes,
                avg_rating, rating_count, net_quantity,
+               bulk_min_quantity, bulk_max_quantity, bulk_order_eligible,
                category_name, family_name, option_count
         FROM ranked
         WHERE rn = 1
@@ -348,6 +364,9 @@ export class ProductsRepository {
         p.is_default_option, p.food_type, p.origin_tag,
         p.custom_badges, p.display_delivery_minutes,
         p.avg_rating, p.rating_count, p.net_quantity,
+        ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+        ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+        ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
         c.name AS category_name,
         pf.name AS family_name,
         ${optionCountExpr} AS option_count
@@ -433,6 +452,9 @@ export class ProductsRepository {
           ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
+          ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+          ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+          ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
           c.name AS category_name,
           p.is_featured,
           p.total_sold,
@@ -461,6 +483,9 @@ export class ProductsRepository {
           ${shopPrice.stockExpr} AS stock_quantity,
           p.unit,
           p.thumbnail_url,
+          ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+          ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+          ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
           c.name AS category_name,
           p.is_featured,
           p.total_sold,
@@ -501,6 +526,9 @@ export class ProductsRepository {
         stock_quantity,
         unit,
         thumbnail_url,
+        bulk_min_quantity,
+        bulk_max_quantity,
+        bulk_order_eligible,
         category_name,
         is_featured,
         total_sold,
@@ -754,6 +782,9 @@ export class ProductsRepository {
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
               p.low_stock_threshold, p.max_order_qty,
+              ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+              ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+              ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
               p.certifications, p.nutrition_info,
               p.meta_title, p.meta_description,
@@ -805,6 +836,9 @@ export class ProductsRepository {
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.hsn_code, p.uqc, p.gst_rate,
               p.low_stock_threshold, p.max_order_qty,
+              ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+              ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+              ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
               p.certifications, p.nutrition_info,
               p.meta_title, p.meta_description,

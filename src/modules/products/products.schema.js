@@ -45,6 +45,16 @@ export const listProductsSchema = {
               sku: { type: 'string', nullable: true },
               barcode: { type: 'string', nullable: true },
               low_stock_threshold: { type: 'integer' },
+              // Per-shop-listing B2B bulk-order settings (migrations 124,
+              // 130, 132) — null (bulk_order_eligible especially) whenever
+              // there's no shop context (admin/anonymous callers) or the
+              // customer's allocated shops don't carry this product, not an
+              // absence of the bulk feature itself. Declared here for the
+              // same reason as the option fields below — fast-json-stringify
+              // drops anything not named in this schema.
+              bulk_min_quantity: { type: 'integer', nullable: true },
+              bulk_max_quantity: { type: 'integer', nullable: true },
+              bulk_order_eligible: { type: 'boolean', nullable: true },
               category_id: { type: 'string', nullable: true },
               category_name: { type: 'string', nullable: true },
               // Product family / option fields (Phase 1 contract).
