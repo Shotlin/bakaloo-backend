@@ -164,9 +164,20 @@ export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode
     // shop row, even when a product exists in more than one allocated shop.
     shopProductIdExpr: 'shop_price.sp_shop_product_id',
     shopIdExpr: 'shop_price.sp_shop_id',
-    bulkMinQuantityExpr: 'shop_price.sp_bulk_min_quantity',
-    bulkMaxQuantityExpr: 'shop_price.sp_bulk_max_quantity',
-    bulkOrderEligibleExpr: 'shop_price.sp_bulk_order_eligible',
+    // Bulk-order settings are how this app's B2B ADD-to-cart minimum/
+    // maximum is configured (alongside wholesale_price in the dashboard).
+    // They must never reach a retail response: the mobile client's
+    // add-to-cart quantity defaulting is gated on `wholesaleActive &&
+    // product.hasBulkMinimum`, and `wholesaleActive` is client-side
+    // Riverpod state that can be transiently stale across a price-mode
+    // toggle. Nulling these here — the same way priceExpr/salePriceExpr
+    // above already do for the price fields — makes the API response
+    // itself incapable of carrying a wholesale quantity floor into a
+    // retail request, so a stale client flag alone can no longer
+    // reproduce the "B2C add defaults to 5" bug regardless of that race.
+    bulkMinQuantityExpr: isWholesale ? 'shop_price.sp_bulk_min_quantity' : 'NULL::integer',
+    bulkMaxQuantityExpr: isWholesale ? 'shop_price.sp_bulk_max_quantity' : 'NULL::integer',
+    bulkOrderEligibleExpr: isWholesale ? 'shop_price.sp_bulk_order_eligible' : 'NULL::boolean',
     nextIdx: startIdx + 1,
   }
 }
