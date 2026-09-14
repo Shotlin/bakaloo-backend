@@ -29,10 +29,17 @@ export function getSectionCacheKey(tabId) {
   return `${SECTION_CACHE_PREFIX}:${tabId}`
 }
 
-export function getSectionPublicCacheKey(storeKey = 'zepto', tabKey = 'all', audience = 'B2C') {
-  return `${SECTION_PUBLIC_CACHE_PREFIX}:${storeKey}:${tabKey}:${audience}`
+// scope/priceMode default to 'anon'/'retail' so an anonymous/admin request
+// (no shop allocation resolved) keeps a stable, cacheable key of its own —
+// same convention as products.service.js's _scopeKey('anon' for
+// !Array.isArray(allocatedShopIds)). A customer's actual allocated-shop hash
+// and price mode MUST be passed once resolved, or a wholesale/Shop-B
+// response can be served from a cache slot a retail/Shop-A request also
+// reads from — this is price-bearing content, not just theme structure.
+export function getSectionPublicCacheKey(storeKey = 'zepto', tabKey = 'all', audience = 'B2C', scope = 'anon', priceMode = 'retail') {
+  return `${SECTION_PUBLIC_CACHE_PREFIX}:${storeKey}:${tabKey}:${audience}:${scope}:${priceMode}`
 }
 
-export function getTabHomeCacheKey(storeKey = 'zepto', key = 'all', audience = 'B2C') {
-  return `${TAB_HOME_CACHE_PREFIX}:${storeKey}:${key}:${audience}`
+export function getTabHomeCacheKey(storeKey = 'zepto', key = 'all', audience = 'B2C', scope = 'anon', priceMode = 'retail') {
+  return `${TAB_HOME_CACHE_PREFIX}:${storeKey}:${key}:${audience}:${scope}:${priceMode}`
 }

@@ -529,10 +529,20 @@ export class ShopProductsService {
       // products:detail:*:id can — blanket bust, same tradeoff already
       // accepted for list/featured/slug above.
       await cacheDeletePattern('products:options:*')
+      // Theme-builder home (public.controller.js) is a SEPARATE cache
+      // namespace from products.service.js's — it resolves its own
+      // shop-priced product offers now (see getTabHomeContent/
+      // getSectionManifest) but was never covered by any bust here, so a
+      // dashboard price/stock/bulk edit could leave the home screen's
+      // featured/deals/trending/category rails and pinned-product sections
+      // stale for up to CACHE_TTL (5 min) after the fix that made them
+      // shop/wholesale-aware in the first place.
+      await cacheDeletePattern('bakaloo:tab_home:*')
+      await cacheDeletePattern('bakaloo:sections:public:*')
     } catch (err) {
       logger.error(
         { err: err.message, action: 'shop_products.invalidate_customer_list_caches_failed' },
-        'Failed to invalidate customer-facing product list/featured/slug/options caches'
+        'Failed to invalidate customer-facing product list/featured/slug/options/theme-home caches'
       )
     }
   }

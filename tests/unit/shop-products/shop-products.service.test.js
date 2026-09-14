@@ -326,12 +326,12 @@ describe('ShopProductsService.create', () => {
       ADMIN_ACTOR
     )
 
-    // 1 dashboard-cache bust (own namespace) + 4 customer-facing blanket
-    // busts (list/featured/slug/options — no per-product detail bust here
-    // since this mock's created row carries no product_id, so
-    // _invalidateCustomerProductDetailCache's own `if (!productId) return`
-    // guard skips it).
-    expect(cacheDeletePattern).toHaveBeenCalledTimes(5)
+    // 1 dashboard-cache bust (own namespace) + 6 customer-facing blanket
+    // busts (list/featured/slug/options/tab_home/sections — no per-product
+    // detail bust here since this mock's created row carries no product_id,
+    // so _invalidateCustomerProductDetailCache's own
+    // `if (!productId) return` guard skips it).
+    expect(cacheDeletePattern).toHaveBeenCalledTimes(7)
     expect(cacheDeletePattern).toHaveBeenCalledWith(
       `bakaloo:shop-products:v1:${SHOP_ID}:*`
     )
@@ -339,6 +339,8 @@ describe('ShopProductsService.create', () => {
     expect(cacheDeletePattern).toHaveBeenCalledWith('products:featured*')
     expect(cacheDeletePattern).toHaveBeenCalledWith('products:slug:*')
     expect(cacheDeletePattern).toHaveBeenCalledWith('products:options:*')
+    expect(cacheDeletePattern).toHaveBeenCalledWith('bakaloo:tab_home:*')
+    expect(cacheDeletePattern).toHaveBeenCalledWith('bakaloo:sections:public:*')
   })
 
   it('does NOT invalidate cache when authorization fails', async () => {
@@ -704,12 +706,12 @@ describe('ShopProductsService.updateStock', () => {
 
     expect(result.success).toBe(true)
     expect(calls).toContain('COMMIT')
-    // 1 dashboard-cache bust + 4 customer-facing blanket busts (list/
-    // featured/slug/options) — see the matching comment on the create()
-    // test above for why there's no 5th, per-product detail bust in this
-    // particular mock (applyStockUpdate's mocked return carries no
-    // product_id).
-    expect(cacheDeletePattern).toHaveBeenCalledTimes(5)
+    // 1 dashboard-cache bust + 6 customer-facing blanket busts (list/
+    // featured/slug/options/tab_home/sections) — see the matching comment
+    // on the create() test above for why there's no 7th, per-product
+    // detail bust in this particular mock (applyStockUpdate's mocked
+    // return carries no product_id).
+    expect(cacheDeletePattern).toHaveBeenCalledTimes(7)
 
     // Locate the COMMIT call's invocation order
     const commitCallIdx = client.query.mock.calls.findIndex(

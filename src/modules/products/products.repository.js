@@ -47,7 +47,7 @@ function normalizeSearchTerms(q) {
  * @param {number} startIdx - Next available $-placeholder index.
  * @returns {{ sql: string, nextIdx: number }}
  */
-function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
+export function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
   if (!Array.isArray(allocatedShopIds)) {
     return { sql: '', nextIdx: startIdx }
   }
@@ -104,7 +104,7 @@ function buildCustomerVisibilitySnippet(allocatedShopIds, params, startIdx) {
  *   this function trusts whatever mode it's given.
  * @returns {{ joinSql: string, priceExpr: string, salePriceExpr: string, stockExpr: string, bulkMinQuantityExpr: string, bulkMaxQuantityExpr: string, bulkOrderEligibleExpr: string, nextIdx: number }}
  */
-function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'retail') {
+export function buildShopPriceJoin(allocatedShopIds, params, startIdx, priceMode = 'retail') {
   const isWholesale = priceMode === 'wholesale'
   // Wholesale has no separate "sale" tier — bulk pricing is already the
   // negotiated rate, so retail promotions don't stack on top of it.

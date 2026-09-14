@@ -20,7 +20,7 @@ import { resolveEffectivePriceMode } from '../../utils/price-mode.js'
  * @param {object} request
  * @returns {{ userId: string }|null}
  */
-function resolveCustomerContext(request) {
+export function resolveCustomerContext(request) {
   const user = request?.user
   if (!user || !user.id) return null
   // Only customers are scoped. ADMIN/RIDER/shop-staff sessions retain

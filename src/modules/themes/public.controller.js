@@ -11,7 +11,15 @@ import {
 } from './theme-cache.js'
 import { STORE_KEYS } from '../theme-tabs/theme-tabs.shared.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
-import { resolveEffectiveAudience } from '../../utils/price-mode.js'
+import { resolveEffectiveAudience, resolveEffectivePriceMode } from '../../utils/price-mode.js'
+import { AllocationService } from '../allocation/allocation.service.js'
+import { AllocationRepository } from '../allocation/allocation.repository.js'
+import { resolveCustomerContext } from '../products/products.controller.js'
+import { hashShopIds } from '../products/products.service.js'
+import {
+  buildShopPriceJoin,
+  buildCustomerVisibilitySnippet,
+} from '../products/products.repository.js'
 
 const CACHE_TTL = 300
 
@@ -47,6 +55,65 @@ const HOME_MANIFEST_SECTION_CAP = 12
 export class PublicThemeController {
   constructor() {
     this.feeSettingsService = new FeeSettingsService()
+    this.allocationService = new AllocationService(new AllocationRepository())
+  }
+
+  /**
+   * Resolve which shop_products rows this request's product offers must
+   * come from — same contract and logic as
+   * ProductsService#_resolveAllocatedShopIds. Duplicated here (rather than
+   * calling into ProductsService) only because this part needs its own
+   * `this.allocationService` instance; resolveCustomerContext/hashShopIds
+   * above ARE imported and shared, not duplicated. Matches this codebase's
+   * existing per-module convention for the stateful half of this pattern
+   * (see the identical private copy in cart.service.js/categories.service.js).
+   *
+   * Deliberately preserves the "no allocation yet → unscoped/anonymous
+   * (null)" fallback rather than failing closed: a customer who hasn't set
+   * a delivery address yet still gets a browsable (master-priced) home
+   * screen instead of an empty one, exactly like every other product
+   * endpoint already behaves. Once they set an address and allocation
+   * resolves, the next request scopes to their real shop(s).
+   *
+   * @param {{ userId?: string }|null} customerContext
+   * @returns {Promise<string[]|null>}
+   */
+  async _resolveAllocatedShopIds(customerContext) {
+    if (!customerContext || !customerContext.userId) return null
+    try {
+      const ids = await this.allocationService.getShopIdsForUser(customerContext.userId)
+      if (Array.isArray(ids) && ids.length === 0) {
+        logger.debug(
+          { customerId: customerContext.userId, action: 'public_theme.allocation_fallback' },
+          'Customer has no allocated shops — falling back to anonymous (unscoped) home content'
+        )
+        return null
+      }
+      return Array.isArray(ids) ? ids : null
+    } catch (err) {
+      logger.error(
+        { customerId: customerContext.userId, err: err.message, action: 'public_theme.resolve_allocations_failed' },
+        'Failed to resolve customer allocations for home content; falling back to anonymous visibility'
+      )
+      return null
+    }
+  }
+
+  /**
+   * @param {object} request
+   * @returns {'wholesale'|'retail'}
+   */
+  _resolvePriceMode(request) {
+    return resolveEffectivePriceMode(request, request?.query?.priceMode === 'wholesale')
+  }
+
+  /**
+   * @param {string[]|null} allocatedShopIds
+   * @returns {string}
+   */
+  _scopeKey(allocatedShopIds) {
+    if (!Array.isArray(allocatedShopIds)) return 'anon'
+    return `c:${hashShopIds(allocatedShopIds)}`
   }
 
   async getActiveTheme(request, reply) {
@@ -137,7 +204,20 @@ export class PublicThemeController {
     }
 
     const audience = resolveEffectiveAudience(request)
-    const cacheKey = getTabHomeCacheKey(storeKey, tabKey, audience)
+    // Every product offer on this page must come from the customer's own
+    // selected/allocated shop(s) at their own current price mode — same
+    // resolution every other product-serving endpoint (products.controller.js)
+    // already does. Previously this entire handler skipped it: the home
+    // screen's featured/deals/trending/category rails always queried
+    // `products.price`/`products.stock_quantity` directly, so it never
+    // reflected a shop's own price, a wholesale price, or bulk-order limits
+    // — regardless of any fix made to the regular product endpoints.
+    const customerContext = resolveCustomerContext(request)
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+    const priceMode = this._resolvePriceMode(request)
+    const scope = this._scopeKey(allocatedShopIds)
+
+    const cacheKey = getTabHomeCacheKey(storeKey, tabKey, audience, scope, priceMode)
     const cached = await redis.get(cacheKey)
     if (cached) {
       return success(JSON.parse(cached), 'Tab home content')
@@ -155,25 +235,25 @@ export class PublicThemeController {
     // limit clamped to HOME_CAPS.* — regardless of what the dashboard stored.
     const featuredProducts = await resolveSectionProducts(
       merchConfig.featured,
-      () => getFeaturedProducts(HOME_CAPS.featured),
+      () => getFeaturedProducts(HOME_CAPS.featured, allocatedShopIds, priceMode),
       HOME_CAPS.featured
     )
     const dealProducts = await resolveSectionProducts(
       merchConfig.deals,
-      () => getDealProducts(HOME_CAPS.deals),
+      () => getDealProducts(HOME_CAPS.deals, allocatedShopIds, priceMode),
       HOME_CAPS.deals
     )
     const trendingProducts = await resolveSectionProducts(
       merchConfig.trending,
-      () => getTrendingProducts(HOME_CAPS.trending),
+      () => getTrendingProducts(HOME_CAPS.trending, allocatedShopIds, priceMode),
       HOME_CAPS.trending
     )
     const seasonalProducts = await resolveSectionProducts(
       merchConfig.seasonal_mosaic,
       async () => mergeUniqueProducts([
-        await getDealProducts(HOME_CAPS.seasonal),
-        await getFeaturedProducts(HOME_CAPS.seasonal),
-        await getTrendingProducts(HOME_CAPS.seasonal),
+        await getDealProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
+        await getFeaturedProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
+        await getTrendingProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
       ]).slice(0, HOME_CAPS.seasonal),
       HOME_CAPS.seasonal
     )
@@ -181,9 +261,13 @@ export class PublicThemeController {
       merchConfig.category_rails,
       async () => getDefaultCategorySections(
         HOME_CAPS.defaultRailCount,
-        HOME_CAPS.defaultRailItems
+        HOME_CAPS.defaultRailItems,
+        allocatedShopIds,
+        priceMode
       ),
-      HOME_CAPS.categoryRail
+      HOME_CAPS.categoryRail,
+      allocatedShopIds,
+      priceMode
     )
 
     const responseData = {
@@ -276,7 +360,14 @@ export class PublicThemeController {
 
     const audience = resolveEffectiveAudience(request)
     const clientETag = request.headers['if-none-match']
-    const cacheKey = getSectionPublicCacheKey(storeKey, tabKey, audience)
+    // Same reasoning as getTabHomeContent above — section manifest products
+    // (pinned or category-filled) must come from the customer's own shop
+    // allocation at their own price mode, not the master catalog.
+    const customerContext = resolveCustomerContext(request)
+    const allocatedShopIds = await this._resolveAllocatedShopIds(customerContext)
+    const priceMode = this._resolvePriceMode(request)
+    const scope = this._scopeKey(allocatedShopIds)
+    const cacheKey = getSectionPublicCacheKey(storeKey, tabKey, audience, scope, priceMode)
 
     const cached = await redis.get(cacheKey)
     if (cached) {
@@ -322,7 +413,7 @@ export class PublicThemeController {
 
         // Fetch manually pinned products first, preserving dashboard order
         const manualProducts = productIds.length > 0
-          ? await getProductsByIds(productIds)
+          ? await getProductsByIds(productIds, allocatedShopIds, priceMode)
           : []
         const seenIds = manualProducts.map((p) => p.id)
 
@@ -332,7 +423,9 @@ export class PublicThemeController {
           const fillProducts = await getProductsByCategoryIds(
             categoryIds,
             limit - products.length,
-            seenIds
+            seenIds,
+            allocatedShopIds,
+            priceMode
           )
           products = [...manualProducts, ...fillProducts]
         }
@@ -549,7 +642,7 @@ async function fetchSectionRows(tabId, audience) {
   return rows
 }
 
-async function resolveSectionProducts(config, fallbackResolver, cap) {
+async function resolveSectionProducts(config, fallbackResolver, cap, allocatedShopIds = null, priceMode = 'retail') {
   const productIds = Array.isArray(config?.product_ids) ? config.product_ids : []
   const categoryIds = Array.isArray(config?.category_ids) ? config.category_ids : []
   // PHASE 5B: normalizeLimit honours dashboard config but clamps to cap.
@@ -559,7 +652,7 @@ async function resolveSectionProducts(config, fallbackResolver, cap) {
     return (await fallbackResolver()).slice(0, limit)
   }
 
-  const manualProducts = await getProductsByIds(productIds)
+  const manualProducts = await getProductsByIds(productIds, allocatedShopIds, priceMode)
   const seenIds = new Set(manualProducts.map((product) => product.id))
 
   if (manualProducts.length >= limit || categoryIds.length === 0) {
@@ -569,13 +662,15 @@ async function resolveSectionProducts(config, fallbackResolver, cap) {
   const fillProducts = await getProductsByCategoryIds(
     categoryIds,
     limit - manualProducts.length,
-    [...seenIds]
+    [...seenIds],
+    allocatedShopIds,
+    priceMode
   )
 
   return [...manualProducts, ...fillProducts].slice(0, limit)
 }
 
-async function resolveCategorySections(rails, fallbackResolver, railCap) {
+async function resolveCategorySections(rails, fallbackResolver, railCap, allocatedShopIds = null, priceMode = 'retail') {
   if (!Array.isArray(rails) || rails.length === 0) {
     return fallbackResolver()
   }
@@ -588,7 +683,9 @@ async function resolveCategorySections(rails, fallbackResolver, railCap) {
     // PHASE 5B: each rail limit clamped to railCap.
     const limit = normalizeLimit(rail.limit, HOME_CAPS.categoryRail, railCap)
     const manualProducts = await getProductsByIds(
-      Array.isArray(rail.product_ids) ? rail.product_ids : []
+      Array.isArray(rail.product_ids) ? rail.product_ids : [],
+      allocatedShopIds,
+      priceMode
     )
     const seenIds = manualProducts.map((product) => product.id)
     const fillProducts =
@@ -596,7 +693,9 @@ async function resolveCategorySections(rails, fallbackResolver, railCap) {
         ? await getProductsByCategoryIds(
             [rail.category_id],
             limit - manualProducts.length,
-            seenIds
+            seenIds,
+            allocatedShopIds,
+            priceMode
           )
         : []
 
@@ -614,19 +713,35 @@ async function resolveCategorySections(rails, fallbackResolver, railCap) {
   return sections.length > 0 ? sections : fallbackResolver()
 }
 
-async function getProductsByIds(productIds) {
+/**
+ * @param {string[]} productIds
+ * @param {string[]|null} [allocatedShopIds] - Same shop-price join every
+ * customer-facing products.repository.js read path uses. Previously this
+ * queried p.price/p.stock_quantity directly with no shop_products join at
+ * all — the direct cause of dashboard-pinned home/section products never
+ * reflecting a shop's own price, a wholesale price, or bulk-order limits.
+ * A pinned product unavailable at the customer's shop is now dropped
+ * (via the same visibility EXISTS every other endpoint applies) rather
+ * than falling back to a master price nobody would actually charge.
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+async function getProductsByIds(productIds, allocatedShopIds = null, priceMode = 'retail') {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return []
   }
+
+  const params = [productIds]
+  const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+  const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
 
   const { rows } = await query(
     `SELECT
        p.id,
        p.name,
        p.slug,
-       p.price,
-       p.sale_price,
-       p.stock_quantity,
+       ${shopPrice.priceExpr} AS price,
+       ${shopPrice.salePriceExpr} AS sale_price,
+       ${shopPrice.stockExpr} AS stock_quantity,
        p.unit,
        p.thumbnail_url,
        p.category_id,
@@ -654,6 +769,9 @@ async function getProductsByIds(productIds) {
        p.brand_logo_url,
        p.avg_rating,
        p.rating_count,
+       ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+       ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+       ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
        COALESCE(
          (SELECT COUNT(*)::int FROM products ps
           WHERE ps.product_family_id = p.product_family_id
@@ -663,11 +781,13 @@ async function getProductsByIds(productIds) {
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      LEFT JOIN product_families pf ON pf.id = p.product_family_id
+     ${shopPrice.joinSql}
      WHERE p.is_active = true
-       AND p.stock_quantity > 0
+       AND ${shopPrice.stockExpr} > 0
        AND p.id = ANY($1::uuid[])
+       ${visibility.sql}
      ORDER BY array_position($1::uuid[], p.id)`,
-    [productIds]
+    params
   )
 
   return rows
@@ -691,7 +811,19 @@ async function getProductsByIds(productIds) {
  * ORDER BY/LIMIT — otherwise a single large/high-selling category could
  * crowd out every product from the other requested categories.
  */
-export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = []) {
+/**
+ * @param {string[]} categoryIds
+ * @param {number} limit
+ * @param {string[]} [excludeIds]
+ * @param {string[]|null} [allocatedShopIds] - Same shop-price join every
+ * customer-facing products.repository.js read path uses (see
+ * getProductsByIds' docstring for why). Applied to both the `matches` CTE
+ * (so a product unavailable at the customer's shop never enters the
+ * fairness ranking in the first place) and `ranked` (so the actually
+ * displayed price/stock/bulk fields are the shop's own row).
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = [], allocatedShopIds = null, priceMode = 'retail') {
   if (!Array.isArray(categoryIds) || categoryIds.length === 0 || limit <= 0) {
     return []
   }
@@ -700,8 +832,11 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
   let excludeClause = ''
   if (excludeIds.length > 0) {
     params.push(excludeIds)
-    excludeClause = ' AND NOT (p.id = ANY($3::uuid[]))'
+    excludeClause = ` AND NOT (p.id = ANY($${params.length}::uuid[]))`
   }
+
+  const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+  const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
 
   const { rows } = await query(
     `WITH matches AS (
@@ -714,7 +849,8 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
            WHERE cp.product_id = p.id AND cp.category_id = cat.id
          )
        )
-       WHERE p.is_active = true AND p.stock_quantity > 0${excludeClause}
+       ${shopPrice.joinSql}
+       WHERE p.is_active = true AND ${shopPrice.stockExpr} > 0${excludeClause}${visibility.sql}
      ),
      best_match AS (
        -- A product reachable via more than one of the requested categories
@@ -729,9 +865,9 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
          p.id,
          p.name,
          p.slug,
-         p.price,
-         p.sale_price,
-         p.stock_quantity,
+         ${shopPrice.priceExpr} AS price,
+         ${shopPrice.salePriceExpr} AS sale_price,
+         ${shopPrice.stockExpr} AS stock_quantity,
          p.unit,
          p.thumbnail_url,
          p.category_id,
@@ -760,6 +896,9 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
          p.brand_logo_url,
          p.avg_rating,
          p.rating_count,
+         ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+         ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+         ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
          COALESCE(
            (SELECT COUNT(*)::int FROM products ps
             WHERE ps.product_family_id = p.product_family_id
@@ -774,6 +913,7 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
        JOIN products p ON p.id = bm.product_id
        LEFT JOIN categories c ON c.id = p.category_id
        LEFT JOIN product_families pf ON pf.id = p.product_family_id
+       ${shopPrice.joinSql}
      )
      SELECT
        id, name, slug, price, sale_price, stock_quantity, unit, thumbnail_url,
@@ -782,7 +922,8 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
        product_family_id, family_name, option_label, option_sort_order,
        is_default_option, food_type, origin_tag, custom_badges,
        display_delivery_minutes, net_quantity, brand, brand_logo_url,
-       avg_rating, rating_count, option_count
+       avg_rating, rating_count, bulk_min_quantity, bulk_max_quantity,
+       bulk_order_eligible, option_count
      FROM ranked
      ORDER BY local_rank ASC, is_featured DESC, total_sold DESC, created_at DESC
      LIMIT $2`,
@@ -792,15 +933,24 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
   return rows
 }
 
-async function getFeaturedProducts(limit) {
+/**
+ * @param {number} limit
+ * @param {string[]|null} [allocatedShopIds] - See getProductsByIds' docstring.
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+async function getFeaturedProducts(limit, allocatedShopIds = null, priceMode = 'retail') {
+  const params = [limit]
+  const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+  const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
+
   const { rows } = await query(
     `SELECT
        p.id,
        p.name,
        p.slug,
-       p.price,
-       p.sale_price,
-       p.stock_quantity,
+       ${shopPrice.priceExpr} AS price,
+       ${shopPrice.salePriceExpr} AS sale_price,
+       ${shopPrice.stockExpr} AS stock_quantity,
        p.unit,
        p.thumbnail_url,
        p.category_id,
@@ -828,6 +978,9 @@ async function getFeaturedProducts(limit) {
        p.brand_logo_url,
        p.avg_rating,
        p.rating_count,
+       ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+       ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+       ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
        COALESCE(
          (SELECT COUNT(*)::int FROM products ps
           WHERE ps.product_family_id = p.product_family_id
@@ -837,26 +990,37 @@ async function getFeaturedProducts(limit) {
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      LEFT JOIN product_families pf ON pf.id = p.product_family_id
+     ${shopPrice.joinSql}
      WHERE p.is_active = true
-       AND p.stock_quantity > 0
+       AND ${shopPrice.stockExpr} > 0
        AND p.is_featured = true
+       ${visibility.sql}
      ORDER BY p.total_sold DESC, p.created_at DESC
      LIMIT $1`,
-    [limit]
+    params
   )
 
   return rows
 }
 
-async function getDealProducts(limit) {
+/**
+ * @param {number} limit
+ * @param {string[]|null} [allocatedShopIds] - See getProductsByIds' docstring.
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+async function getDealProducts(limit, allocatedShopIds = null, priceMode = 'retail') {
+  const params = [limit]
+  const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+  const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
+
   const { rows } = await query(
     `SELECT
        p.id,
        p.name,
        p.slug,
-       p.price,
-       p.sale_price,
-       p.stock_quantity,
+       ${shopPrice.priceExpr} AS price,
+       ${shopPrice.salePriceExpr} AS sale_price,
+       ${shopPrice.stockExpr} AS stock_quantity,
        p.unit,
        p.thumbnail_url,
        p.category_id,
@@ -884,6 +1048,9 @@ async function getDealProducts(limit) {
        p.brand_logo_url,
        p.avg_rating,
        p.rating_count,
+       ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+       ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+       ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
        COALESCE(
          (SELECT COUNT(*)::int FROM products ps
           WHERE ps.product_family_id = p.product_family_id
@@ -893,27 +1060,38 @@ async function getDealProducts(limit) {
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      LEFT JOIN product_families pf ON pf.id = p.product_family_id
+     ${shopPrice.joinSql}
      WHERE p.is_active = true
-       AND p.stock_quantity > 0
-       AND p.sale_price IS NOT NULL
-       AND p.sale_price < p.price
+       AND ${shopPrice.stockExpr} > 0
+       AND ${shopPrice.salePriceExpr} IS NOT NULL
+       AND ${shopPrice.salePriceExpr} < ${shopPrice.priceExpr}
+       ${visibility.sql}
      ORDER BY p.total_sold DESC, p.created_at DESC
      LIMIT $1`,
-    [limit]
+    params
   )
 
   return rows
 }
 
-async function getTrendingProducts(limit) {
+/**
+ * @param {number} limit
+ * @param {string[]|null} [allocatedShopIds] - See getProductsByIds' docstring.
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+async function getTrendingProducts(limit, allocatedShopIds = null, priceMode = 'retail') {
+  const params = [limit]
+  const visibility = buildCustomerVisibilitySnippet(allocatedShopIds, params, params.length + 1)
+  const shopPrice = buildShopPriceJoin(allocatedShopIds, params, visibility.nextIdx, priceMode)
+
   const { rows } = await query(
     `SELECT
        p.id,
        p.name,
        p.slug,
-       p.price,
-       p.sale_price,
-       p.stock_quantity,
+       ${shopPrice.priceExpr} AS price,
+       ${shopPrice.salePriceExpr} AS sale_price,
+       ${shopPrice.stockExpr} AS stock_quantity,
        p.unit,
        p.thumbnail_url,
        p.category_id,
@@ -941,6 +1119,9 @@ async function getTrendingProducts(limit) {
        p.brand_logo_url,
        p.avg_rating,
        p.rating_count,
+       ${shopPrice.bulkMinQuantityExpr} AS bulk_min_quantity,
+       ${shopPrice.bulkMaxQuantityExpr} AS bulk_max_quantity,
+       ${shopPrice.bulkOrderEligibleExpr} AS bulk_order_eligible,
        COALESCE(
          (SELECT COUNT(*)::int FROM products ps
           WHERE ps.product_family_id = p.product_family_id
@@ -950,17 +1131,31 @@ async function getTrendingProducts(limit) {
      FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      LEFT JOIN product_families pf ON pf.id = p.product_family_id
+     ${shopPrice.joinSql}
      WHERE p.is_active = true
-       AND p.stock_quantity > 0
+       AND ${shopPrice.stockExpr} > 0
+       ${visibility.sql}
      ORDER BY p.total_sold DESC, p.created_at DESC
      LIMIT $1`,
-    [limit]
+    params
   )
 
   return rows
 }
 
-async function getDefaultCategorySections(limitSections, itemsPerSection) {
+/**
+ * @param {number} limitSections
+ * @param {number} itemsPerSection
+ * @param {string[]|null} [allocatedShopIds] - Threaded through to the
+ * per-category product fetch below so each rail's items are shop/price-mode
+ * scoped. The "which categories even get a rail" EXISTS check just above
+ * stays master-catalog-based (deciding whether to render a rail at all,
+ * not a displayed price) — a category that turns out to have nothing
+ * available at this customer's shop simply yields an empty rail, already
+ * skipped by the `if (products.length === 0) continue` below.
+ * @param {'retail'|'wholesale'} [priceMode='retail']
+ */
+async function getDefaultCategorySections(limitSections, itemsPerSection, allocatedShopIds = null, priceMode = 'retail') {
   const { rows: categories } = await query(
     `SELECT
        c.id,
@@ -984,7 +1179,7 @@ async function getDefaultCategorySections(limitSections, itemsPerSection) {
   const sections = []
   for (const category of categories) {
     // PHASE 5B: use configurable per-rail cap.
-    const products = await getProductsByCategoryIds([category.id], perRail, [])
+    const products = await getProductsByCategoryIds([category.id], perRail, [], allocatedShopIds, priceMode)
     if (products.length === 0) continue
     sections.push({
       category_id: category.id,

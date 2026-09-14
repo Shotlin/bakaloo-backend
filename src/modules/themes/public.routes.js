@@ -94,6 +94,14 @@ export default async function publicThemeRoutes(fastify) {
             type: 'string',
             enum: ['zepto', 'off_zone', 'super_mall', 'cafe'],
           },
+          // Was missing entirely — with the global ajv removeAdditional:'all'
+          // config (see app.js), any query param not declared here is
+          // silently stripped before the handler ever sees it. The mobile
+          // app's PriceModeInterceptor always sends ?priceMode=wholesale
+          // once B2B is active, so this route's wholesale hint was being
+          // dropped at the schema layer regardless of anything the
+          // controller/SQL does with it.
+          priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
         },
       },
       response: {
@@ -107,6 +115,11 @@ export default async function publicThemeRoutes(fastify) {
         },
       },
     },
+    // Was the one route in this file without tryAttachUser — request.user
+    // (needed to resolve which shop this customer is allocated to) and
+    // request.auth.b2b (needed for resolveEffectiveAudience) were never
+    // populated here, so this endpoint could only ever resolve anonymous/B2C.
+    preHandler: [tryAttachUser],
   }, ctrl.getTabHomeContent.bind(ctrl))
 
   fastify.get('/tabs/:tabKey/sections', {
@@ -127,6 +140,9 @@ export default async function publicThemeRoutes(fastify) {
             type: 'string',
             enum: ['zepto', 'off_zone', 'super_mall', 'cafe'],
           },
+          // See the matching comment on /tabs/:key/home above — same
+          // removeAdditional:'all' stripping risk applies here.
+          priceMode: { type: 'string', enum: ['retail', 'wholesale'] },
         },
       },
       response: {

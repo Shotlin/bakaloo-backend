@@ -22,7 +22,7 @@ const CACHE_VERSION = 'v3'
  * @param {string[]} ids
  * @returns {string}
  */
-function hashShopIds(ids) {
+export function hashShopIds(ids) {
   if (!Array.isArray(ids) || ids.length === 0) return 'empty'
   const sorted = [...ids].sort()
   return crypto
