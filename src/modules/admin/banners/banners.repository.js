@@ -190,7 +190,9 @@ export class AdminBannersRepository {
               WHERE csm.segment_id = b.target_segment_id AND csm.user_id = $4
            ))
          )
-       ORDER BY b.display_order ASC`,
+       ORDER BY
+         CASE WHEN $3 = 'PROFILE' THEN b.created_at END DESC NULLS LAST,
+         b.display_order ASC`,
       [isOpen, audience, placement, userId]
     )
     return rows
