@@ -865,7 +865,7 @@ export async function getProductsByCategoryIds(categoryIds, limit, excludeIds = 
          )
        )
        ${shopPrice.joinSql}
-       WHERE p.is_active = true AND ${shopPrice.stockExpr} > 0${excludeClause}${visibility.sql}
+       WHERE p.is_active = true AND ${shopPrice.stockExpr} > 0 ${excludeClause} ${visibility.sql}
      ),
      best_match AS (
        -- A product reachable via more than one of the requested categories
