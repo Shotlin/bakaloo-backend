@@ -12,9 +12,9 @@ const walletService = new WalletService(new WalletRepository())
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 export class AdminCustomersService {
-  async list({ page = 1, limit = 20, search, status, sortBy, sortOrder }) {
+  async list({ page = 1, limit = 20, search, status, segment, sortBy, sortOrder }) {
     const offset = (page - 1) * limit
-    return repo.findAll({ offset, limit, search, status, sortBy, sortOrder })
+    return repo.findAll({ offset, limit, search, status, segment, sortBy, sortOrder })
   }
 
   async getDetail(id) {

@@ -8,6 +8,7 @@ export const listCustomersSchema = {
       limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
       search: { type: 'string' },
       status: { type: 'string', enum: ['active', 'blocked'] },
+      segment: { type: 'string', enum: ['vip', 'churned'] },
       sortBy: { type: 'string', enum: ['created_at', 'name', 'orders', 'spent'], default: 'created_at' },
       sortOrder: { type: 'string', enum: ['ASC', 'DESC'], default: 'DESC' },
     },

@@ -1,7 +1,7 @@
 import { query, getClient } from '../../../config/database.js'
 
 export class AdminCustomersRepository {
-  async findAll({ offset, limit, search, status, sortBy = 'created_at', sortOrder = 'DESC' }) {
+  async findAll({ offset, limit, search, status, segment, sortBy = 'created_at', sortOrder = 'DESC' }) {
     const params = []
     // A user who registered as a customer and later also signed up as a
     // rider (via OTP in the rider app, which overwrites users.role to
@@ -20,10 +20,25 @@ export class AdminCustomersRepository {
     else if (status === 'blocked') { clauses.push('u.is_blocked = true') }
     else if (status === 'inactive') { clauses.push('u.is_active = false') }
 
+    // Mirrors the dashboard's own VIP/Churned badge logic (10+ orders or
+    // ₹10k+ spent for VIP; 60+ days since the last of 2+ orders for
+    // Churned) so the segment filter agrees with what's shown on-screen.
+    // Needs the o_stats join below in every query that uses `where`, since
+    // it references o_stats columns.
+    if (segment === 'vip') {
+      clauses.push(`(COALESCE(o_stats.order_count, 0) >= 10 OR COALESCE(o_stats.total_spent, 0) >= 10000)`)
+    } else if (segment === 'churned') {
+      clauses.push(`(o_stats.last_order_at IS NOT NULL AND o_stats.last_order_at < NOW() - INTERVAL '60 days' AND COALESCE(o_stats.order_count, 0) >= 2)`)
+    }
+
     const allowedSort = { created_at: 'u.created_at', name: 'u.name', orders: 'order_count', spent: 'total_spent' }
     const orderCol = allowedSort[sortBy] || 'u.created_at'
     const dir = sortOrder === 'ASC' ? 'ASC' : 'DESC'
     const where = clauses.join(' AND ')
+    const statsJoin = `LEFT JOIN (
+         SELECT user_id, COUNT(*)::int AS order_count, SUM(total_amount) AS total_spent, MAX(created_at) AS last_order_at
+         FROM orders WHERE status != 'CANCELLED' GROUP BY user_id
+       ) o_stats ON o_stats.user_id = u.id`
 
     const { rows } = await query(
       `SELECT u.id, u.name, u.phone, u.email, u.avatar_url, u.is_active, u.is_blocked, u.created_at,
@@ -33,10 +48,7 @@ export class AdminCustomersRepository {
               o_stats.last_order_at
        FROM users u
        LEFT JOIN wallets w ON w.user_id = u.id
-       LEFT JOIN (
-         SELECT user_id, COUNT(*)::int AS order_count, SUM(total_amount) AS total_spent, MAX(created_at) AS last_order_at
-         FROM orders WHERE status != 'CANCELLED' GROUP BY user_id
-       ) o_stats ON o_stats.user_id = u.id
+       ${statsJoin}
        WHERE ${where}
        ORDER BY ${orderCol} ${dir} NULLS LAST
        LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -44,7 +56,7 @@ export class AdminCustomersRepository {
     )
 
     const countRes = await query(
-      `SELECT COUNT(*)::int AS total FROM users u WHERE ${where}`,
+      `SELECT COUNT(*)::int AS total FROM users u ${statsJoin} WHERE ${where}`,
       params
     )
 
@@ -57,7 +69,7 @@ export class AdminCustomersRepository {
     // the old client-side "not blocked" proxy the dashboard used to show
     // as "Active".
     const activeTodayRes = await query(
-      `SELECT COUNT(*)::int AS active_today FROM users u
+      `SELECT COUNT(*)::int AS active_today FROM users u ${statsJoin}
        WHERE ${where} AND (u.last_active_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`,
       params
     )

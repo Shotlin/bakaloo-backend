@@ -5,8 +5,8 @@ const svc = new AdminCustomersService()
 
 export class AdminCustomersController {
   async list(request, reply) {
-    const { page, limit, search, status, sortBy, sortOrder } = request.query
-    const data = await svc.list({ page, limit, search, status, sortBy, sortOrder })
+    const { page, limit, search, status, segment, sortBy, sortOrder } = request.query
+    const data = await svc.list({ page, limit, search, status, segment, sortBy, sortOrder })
     return success(data, 'Customers fetched')
   }
 
