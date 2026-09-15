@@ -8,7 +8,79 @@ export class AdminOrdersRepository {
     // so it costs nothing for the normal order list, and only applies when
     // one of these two flags is actually requested.
     const needsPaymentsJoin = needsPaymentReview || recoveredFromFailed
-    let sql = `
+    // Built once and reused verbatim in both the row query and the count
+    // query below, instead of the row query's SQL being built first and
+    // the count query trying to reconstruct its WHERE clause out of it via
+    // string splitting on a 'WHERE 1=1' marker — that marker could (and
+    // did) also match a code comment quoting the same string, silently
+    // truncating every actual filter out of the count query and causing a
+    // param-count mismatch as soon as any filter was applied.
+    //
+    // "Place Order" B2B credit orders never appear in the general Orders
+    // list, unconditionally — they live exclusively in the dedicated B2B
+    // Orders page (findAllB2B below), which has its own approval/
+    // settlement workflow this list doesn't support. b2b_approval_status
+    // is NULL for every other order.
+    let whereClause = ' WHERE 1=1 AND o.b2b_approval_status IS NULL'
+    const params = []
+    let idx = 1
+
+    if (status) { params.push(status); whereClause += ` AND o.status = $${idx++}` }
+    if (paymentMethod) { params.push(paymentMethod); whereClause += ` AND o.payment_method = $${idx++}` }
+    if (paymentStatus) { params.push(paymentStatus); whereClause += ` AND o.payment_status = $${idx++}` }
+    if (startDate) { params.push(startDate); whereClause += ` AND o.created_at >= $${idx++}` }
+    if (endDate) { params.push(endDate); whereClause += ` AND o.created_at <= $${idx++}` }
+    if (search) {
+      params.push(`%${search}%`)
+      whereClause += ` AND (o.order_number ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.name ILIKE $${idx})`
+      idx++
+    }
+    if (deliveryType === 'express') {
+      whereClause += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = true`
+    } else if (deliveryType === 'standard') {
+      whereClause += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = false`
+    } else if (deliveryType === 'scheduled') {
+      whereClause += ` AND o.delivery_mode = 'SCHEDULED'`
+    }
+    if (needsPaymentReview) {
+      whereClause += ` AND p.metadata->>'needs_manual_review' = 'true'`
+    }
+    if (recoveredFromFailed) {
+      // Historical audit trail: a payment that was shown FAILED (and may
+      // already have been told to the customer) but Razorpay later
+      // confirmed was actually captured — auto-recovered by the payment
+      // recovery sweep or a manual "Re-check with Razorpay".
+      whereClause += ` AND p.metadata->>'recovered_from_failed' = 'true'`
+    }
+    if (riderId) { params.push(riderId); whereClause += ` AND o.rider_id = $${idx++}` }
+    if (minAmount != null) { params.push(minAmount); whereClause += ` AND o.total_amount >= $${idx++}` }
+    if (maxAmount != null) { params.push(maxAmount); whereClause += ` AND o.total_amount <= $${idx++}` }
+    if (area) {
+      // Free-text box on the UI ("Area / Pincode") — matches either the
+      // saved delivery pincode or city, whichever the admin typed.
+      params.push(`%${area}%`)
+      whereClause += ` AND (o.delivery_address->>'pincode' ILIKE $${idx} OR o.delivery_address->>'city' ILIKE $${idx})`
+      idx++
+    }
+    if (isB2B) {
+      // Orders snapshotted a buyer GSTIN at checkout only when the
+      // customer had an APPROVED business account at order time — the B2B
+      // Orders dashboard page's filter.
+      whereClause += ` AND o.buyer_gstin IS NOT NULL`
+    }
+
+    const paymentsJoinSql = needsPaymentsJoin ? 'JOIN payments p ON p.order_id = o.id' : ''
+
+    const countSql = `
+      SELECT COUNT(*) FROM orders o
+      LEFT JOIN users u ON u.id = o.user_id
+      ${paymentsJoinSql}
+      ${whereClause}
+    `
+    const countRes = await query(countSql, params)
+    const total = parseInt(countRes.rows[0].count)
+
+    const sql = `
       SELECT o.*, u.name AS customer_name, u.phone AS customer_phone,
              ru.name AS rider_name, sh.name AS shop_name,
              CASE
@@ -20,76 +92,13 @@ export class AdminOrdersRepository {
       LEFT JOIN users u ON u.id = o.user_id
       LEFT JOIN users ru ON ru.id = o.rider_id
       LEFT JOIN shops sh ON sh.id = o.shop_id
-      ${needsPaymentsJoin ? 'JOIN payments p ON p.order_id = o.id' : ''}
-      WHERE 1=1
-      -- "Place Order" B2B credit orders never appear in the general Orders
-      -- list, unconditionally — they live exclusively in the dedicated B2B
-      -- Orders page (findAllB2B below), which has its own approval/
-      -- settlement workflow this list doesn't support. b2b_approval_status
-      -- is NULL for every other order. Kept as an unconditional AND (not
-      -- folded into the WHERE clause itself) so countSql's
-      -- \`sql.split('WHERE 1=1')[1]\` marker-based reconstruction below
-      -- keeps working.
-      AND o.b2b_approval_status IS NULL
+      ${paymentsJoinSql}
+      ${whereClause}
+      ORDER BY o.created_at DESC LIMIT $${idx++} OFFSET $${idx++}
     `
-    const params = []
-    let idx = 1
+    const rowParams = [...params, limit, offset]
 
-    if (status) { params.push(status); sql += ` AND o.status = $${idx++}` }
-    if (paymentMethod) { params.push(paymentMethod); sql += ` AND o.payment_method = $${idx++}` }
-    if (paymentStatus) { params.push(paymentStatus); sql += ` AND o.payment_status = $${idx++}` }
-    if (startDate) { params.push(startDate); sql += ` AND o.created_at >= $${idx++}` }
-    if (endDate) { params.push(endDate); sql += ` AND o.created_at <= $${idx++}` }
-    if (search) {
-      params.push(`%${search}%`)
-      sql += ` AND (o.order_number ILIKE $${idx} OR u.phone ILIKE $${idx} OR u.name ILIKE $${idx})`
-      idx++
-    }
-    if (deliveryType === 'express') {
-      sql += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = true`
-    } else if (deliveryType === 'standard') {
-      sql += ` AND o.delivery_mode = 'ASAP' AND o.quick_delivery_selected = false`
-    } else if (deliveryType === 'scheduled') {
-      sql += ` AND o.delivery_mode = 'SCHEDULED'`
-    }
-    if (needsPaymentReview) {
-      sql += ` AND p.metadata->>'needs_manual_review' = 'true'`
-    }
-    if (recoveredFromFailed) {
-      // Historical audit trail: a payment that was shown FAILED (and may
-      // already have been told to the customer) but Razorpay later
-      // confirmed was actually captured — auto-recovered by the payment
-      // recovery sweep or a manual "Re-check with Razorpay".
-      sql += ` AND p.metadata->>'recovered_from_failed' = 'true'`
-    }
-    if (riderId) { params.push(riderId); sql += ` AND o.rider_id = $${idx++}` }
-    if (minAmount != null) { params.push(minAmount); sql += ` AND o.total_amount >= $${idx++}` }
-    if (maxAmount != null) { params.push(maxAmount); sql += ` AND o.total_amount <= $${idx++}` }
-    if (area) {
-      // Free-text box on the UI ("Area / Pincode") — matches either the
-      // saved delivery pincode or city, whichever the admin typed.
-      params.push(`%${area}%`)
-      sql += ` AND (o.delivery_address->>'pincode' ILIKE $${idx} OR o.delivery_address->>'city' ILIKE $${idx})`
-      idx++
-    }
-    if (isB2B) {
-      // Orders snapshotted a buyer GSTIN at checkout only when the
-      // customer had an APPROVED business account at order time — the B2B
-      // Orders dashboard page's filter.
-      sql += ` AND o.buyer_gstin IS NOT NULL`
-    }
-
-    const countSql = (needsPaymentsJoin
-      ? `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id JOIN payments p ON p.order_id = o.id WHERE 1=1`
-      : `SELECT COUNT(*) FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1`) +
-      sql.split('WHERE 1=1')[1].replace(/ORDER BY.*$/, '').replace(/LIMIT.*$/, '')
-    const countRes = await query(countSql, params)
-    const total = parseInt(countRes.rows[0].count)
-
-    params.push(limit, offset)
-    sql += ` ORDER BY o.created_at DESC LIMIT $${idx++} OFFSET $${idx++}`
-
-    const { rows } = await query(sql, params)
+    const { rows } = await query(sql, rowParams)
     return { orders: rows, total }
   }
 
