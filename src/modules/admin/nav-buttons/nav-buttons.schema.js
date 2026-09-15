@@ -18,15 +18,19 @@ export const NAV_BUTTON_ICON_KEYS = [
   'coin', 'wallet', 'image', 'globe', 'browser', 'deviceMobile',
 ]
 
-const iconKeyBody = {
-  type: 'string',
-  enum: NAV_BUTTON_ICON_KEYS,
-}
-
 const commonProperties = {
   label: { type: 'string', minLength: 1, maxLength: 30 },
-  iconKey: iconKeyBody,
+  // PRESET uses iconKey (+ accentColor for its badge background). CUSTOM
+  // uses an uploaded image instead and is rendered with no badge — see
+  // migration 136's docstring. Cross-field "each type has what it needs"
+  // is enforced in the service layer, not here (matches this schema's
+  // existing light-validation style — every other cross-field rule in
+  // this module is likewise a service-level check, not AJV if/then).
+  iconType: { type: 'string', enum: ['PRESET', 'CUSTOM'], default: 'PRESET' },
+  iconKey: { type: ['string', 'null'], enum: [...NAV_BUTTON_ICON_KEYS, null] },
   accentColor: { type: ['string', 'null'], pattern: '^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$' },
+  customIconActiveUrl: { type: ['string', 'null'], format: 'uri' },
+  customIconInactiveUrl: { type: ['string', 'null'], format: 'uri' },
   destinationType: { type: 'string', enum: ['APP_ROUTE', 'CATEGORY', 'PRODUCT', 'WEBVIEW'] },
   destinationValue: { type: 'string', minLength: 1, maxLength: 500 },
   passIdentity: { type: 'boolean', default: false },
@@ -48,7 +52,7 @@ export const navButtonIdSchema = {
 export const createNavButtonSchema = {
   body: {
     type: 'object',
-    required: ['label', 'iconKey', 'destinationType', 'destinationValue'],
+    required: ['label', 'destinationType', 'destinationValue'],
     properties: commonProperties,
   },
 }

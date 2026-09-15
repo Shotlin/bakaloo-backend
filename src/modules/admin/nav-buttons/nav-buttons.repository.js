@@ -1,7 +1,8 @@
 import { query, getClient } from '../../../config/database.js'
 
 const SELECT_COLUMNS = `
-  id, label, icon_key, accent_color,
+  id, label, icon_type, icon_key, accent_color,
+  custom_icon_active_url, custom_icon_inactive_url,
   destination_type, destination_value, pass_identity,
   audience, target_segment_id,
   is_active, start_date, end_date, sort_order,
@@ -25,19 +26,23 @@ export class AdminNavButtonsRepository {
   }
 
   async create({
-    label, iconKey, accentColor, destinationType, destinationValue, passIdentity,
+    label, iconType, iconKey, accentColor, customIconActiveUrl, customIconInactiveUrl,
+    destinationType, destinationValue, passIdentity,
     audience, targetSegmentId, isActive, startDate, endDate,
   }, createdBy) {
     const { rows: [{ max: maxOrder }] } = await query('SELECT COALESCE(MAX(sort_order), 0) AS max FROM nav_buttons')
     const { rows: [b] } = await query(
       `INSERT INTO nav_buttons (
-         label, icon_key, accent_color, destination_type, destination_value, pass_identity,
+         label, icon_type, icon_key, accent_color, custom_icon_active_url, custom_icon_inactive_url,
+         destination_type, destination_value, pass_identity,
          audience, target_segment_id, is_active, start_date, end_date, sort_order, created_by
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING ${SELECT_COLUMNS}`,
       [
-        label, iconKey, accentColor || null, destinationType, destinationValue, !!passIdentity,
+        label, iconType || 'PRESET', iconKey || null, accentColor || null,
+        customIconActiveUrl || null, customIconInactiveUrl || null,
+        destinationType, destinationValue, !!passIdentity,
         audience || 'ALL', targetSegmentId || null, isActive !== false,
         startDate || null, endDate || null, (maxOrder || 0) + 1, createdBy,
       ]
@@ -48,11 +53,14 @@ export class AdminNavButtonsRepository {
   async update(id, data) {
     const sets = []; const params = []; let idx = 1
     const fields = [
-      'label', 'icon_key', 'accent_color', 'destination_type', 'destination_value',
+      'label', 'icon_type', 'icon_key', 'accent_color',
+      'custom_icon_active_url', 'custom_icon_inactive_url',
+      'destination_type', 'destination_value',
       'pass_identity', 'audience', 'target_segment_id', 'is_active', 'start_date', 'end_date',
     ]
     const bodyMap = {
-      label: 'label', icon_key: 'iconKey', accent_color: 'accentColor',
+      label: 'label', icon_type: 'iconType', icon_key: 'iconKey', accent_color: 'accentColor',
+      custom_icon_active_url: 'customIconActiveUrl', custom_icon_inactive_url: 'customIconInactiveUrl',
       destination_type: 'destinationType', destination_value: 'destinationValue',
       pass_identity: 'passIdentity', audience: 'audience', target_segment_id: 'targetSegmentId',
       is_active: 'isActive', start_date: 'startDate', end_date: 'endDate',
