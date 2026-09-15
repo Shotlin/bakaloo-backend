@@ -238,13 +238,6 @@ export const buildApp = async () => {
     prefix: '/api/v1/webview',
   })
 
-  // External links (public GET / admin PUT) — dashboard-configurable
-  // destination URLs for the Profile screen's "Business Transaction"
-  // button and the Payments section's "Games" button, both opened in the
-  // same in-app WebView as the 5th nav button.
-  await app.register(import('./modules/external-links/external-links.routes.js'), {
-    prefix: '/api/v1/external-links',
-  })
 
   // Tutorials (public) — active in-app tutorial videos for mobile/web
   await app.register(import('./modules/tutorials/tutorials.routes.js'), {

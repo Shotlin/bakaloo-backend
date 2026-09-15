@@ -37,6 +37,16 @@ export default async function navButtonRoutes(fastify) {
     return success(button, 'Nav button fetched')
   })
 
+  // GET /profile-menu — every active PROFILE_MENU button this viewer
+  // should see (the Profile screen's Business Transaction / Games / etc.
+  // buttons), unlike GET / above this can return several at once.
+  fastify.get('/profile-menu', { preHandler: [tryAttachUser] }, async (request, reply) => {
+    const audience = resolveEffectiveAudience(request)
+    const userId = request.user?.id || null
+    const buttons = await svc.getAllActiveForViewer('PROFILE_MENU', audience, userId)
+    return success(buttons, 'Profile menu buttons fetched')
+  })
+
   // POST /webview-token — mint a short-lived identity-handoff token for a
   // WEBVIEW-destination button with pass_identity=true. Requires a real
   // login; there's nothing to hand off for an anonymous viewer.

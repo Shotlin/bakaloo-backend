@@ -81,4 +81,8 @@ export class AdminNavButtonsService {
   async getActiveForViewer(audience = 'B2C', userId = null) {
     return repo.findActiveForViewer(audience, userId)
   }
+
+  async getAllActiveForViewer(placement, audience = 'B2C', userId = null) {
+    return repo.findAllActiveForViewer(placement, audience, userId)
+  }
 }

@@ -39,6 +39,10 @@ const commonProperties = {
   isActive: { type: 'boolean', default: true },
   startDate: { type: ['string', 'null'], format: 'date-time' },
   endDate: { type: ['string', 'null'], format: 'date-time' },
+  // BOTTOM_NAV (default): the single 5th bottom-nav slot — at most one row
+  // resolves per viewer. PROFILE_MENU: an unbounded list of buttons shown
+  // on the Profile screen — every matching active row renders.
+  placement: { type: 'string', enum: ['BOTTOM_NAV', 'PROFILE_MENU'], default: 'BOTTOM_NAV' },
 }
 
 export const navButtonIdSchema = {

@@ -4,7 +4,7 @@ const SELECT_COLUMNS = `
   id, label, icon_type, icon_key, accent_color,
   custom_icon_active_url, custom_icon_inactive_url,
   destination_type, destination_value, pass_identity,
-  audience, target_segment_id,
+  audience, target_segment_id, placement,
   is_active, start_date, end_date, sort_order,
   created_at, updated_at
 `
@@ -28,16 +28,16 @@ export class AdminNavButtonsRepository {
   async create({
     label, iconType, iconKey, accentColor, customIconActiveUrl, customIconInactiveUrl,
     destinationType, destinationValue, passIdentity,
-    audience, targetSegmentId, isActive, startDate, endDate,
+    audience, targetSegmentId, isActive, startDate, endDate, placement,
   }, createdBy) {
     const { rows: [{ max: maxOrder }] } = await query('SELECT COALESCE(MAX(sort_order), 0) AS max FROM nav_buttons')
     const { rows: [b] } = await query(
       `INSERT INTO nav_buttons (
          label, icon_type, icon_key, accent_color, custom_icon_active_url, custom_icon_inactive_url,
          destination_type, destination_value, pass_identity,
-         audience, target_segment_id, is_active, start_date, end_date, sort_order, created_by
+         audience, target_segment_id, is_active, start_date, end_date, sort_order, created_by, placement
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING ${SELECT_COLUMNS}`,
       [
         label, iconType || 'PRESET', iconKey || null, accentColor || null,
@@ -45,6 +45,7 @@ export class AdminNavButtonsRepository {
         destinationType, destinationValue, !!passIdentity,
         audience || 'ALL', targetSegmentId || null, isActive !== false,
         startDate || null, endDate || null, (maxOrder || 0) + 1, createdBy,
+        placement || 'BOTTOM_NAV',
       ]
     )
     return b
@@ -57,6 +58,7 @@ export class AdminNavButtonsRepository {
       'custom_icon_active_url', 'custom_icon_inactive_url',
       'destination_type', 'destination_value',
       'pass_identity', 'audience', 'target_segment_id', 'is_active', 'start_date', 'end_date',
+      'placement',
     ]
     const bodyMap = {
       label: 'label', icon_type: 'iconType', icon_key: 'iconKey', accent_color: 'accentColor',
@@ -64,6 +66,7 @@ export class AdminNavButtonsRepository {
       destination_type: 'destinationType', destination_value: 'destinationValue',
       pass_identity: 'passIdentity', audience: 'audience', target_segment_id: 'targetSegmentId',
       is_active: 'isActive', start_date: 'startDate', end_date: 'endDate',
+      placement: 'placement',
     }
 
     for (const col of fields) {
@@ -122,6 +125,7 @@ export class AdminNavButtonsRepository {
       `SELECT ${SELECT_COLUMNS}
        FROM nav_buttons
        WHERE is_active = true
+         AND placement = 'BOTTOM_NAV'
          AND (start_date IS NULL OR start_date <= NOW())
          AND (end_date IS NULL OR end_date >= NOW())
          AND audience IN ($1, 'ALL')
@@ -137,5 +141,34 @@ export class AdminNavButtonsRepository {
       [audience, userId]
     )
     return b || null
+  }
+
+  /**
+   * Resolves every PROFILE_MENU button the customer should see, in
+   * sort_order — unlike findActiveForViewer above (BOTTOM_NAV, at most one
+   * row), a menu list has room for several, so no LIMIT 1 / tie-break
+   * here. Same active/date-window + audience + segment gate as banners
+   * and the bottom-nav button.
+   */
+  async findAllActiveForViewer(placement, audience = 'B2C', userId = null) {
+    const { rows } = await query(
+      `SELECT ${SELECT_COLUMNS}
+       FROM nav_buttons
+       WHERE is_active = true
+         AND placement = $1
+         AND (start_date IS NULL OR start_date <= NOW())
+         AND (end_date IS NULL OR end_date >= NOW())
+         AND audience IN ($2, 'ALL')
+         AND (
+           target_segment_id IS NULL
+           OR ($3::uuid IS NOT NULL AND EXISTS (
+             SELECT 1 FROM customer_segment_members csm
+              WHERE csm.segment_id = target_segment_id AND csm.user_id = $3
+           ))
+         )
+       ORDER BY sort_order ASC`,
+      [placement, audience, userId]
+    )
+    return rows
   }
 }
