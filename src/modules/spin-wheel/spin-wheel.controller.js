@@ -85,6 +85,47 @@ export class SpinWheelController {
     return reply.code(200).send(success(null, 'Spin prizes reordered'))
   }
 
+  // ─── Admin: first-time reward prizes ─────────────────────
+
+  async listFirstTimePrizes(request, reply) {
+    const prizes = await this.service.listFirstTimePrizes()
+    return reply.code(200).send(success(prizes, 'First-time spin prizes fetched'))
+  }
+
+  async createFirstTimePrize(request, reply) {
+    const actor = this._actorCtx(request)
+    const result = await this.service.createFirstTimePrize(request.body, actor)
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'VALIDATION_ERROR'))
+    }
+    return reply.code(201).send(success(result.prize, 'First-time spin prize created'))
+  }
+
+  async updateFirstTimePrize(request, reply) {
+    const actor = this._actorCtx(request)
+    const result = await this.service.updateFirstTimePrize(request.params.id, request.body, actor)
+    if (!result.success) {
+      const code = result.message === 'Prize not found' ? 404 : 400
+      return reply.code(code).send(error(result.message, code === 404 ? 'NOT_FOUND' : 'VALIDATION_ERROR'))
+    }
+    return reply.code(200).send(success(result.prize, 'First-time spin prize updated'))
+  }
+
+  async deleteFirstTimePrize(request, reply) {
+    const actor = this._actorCtx(request)
+    const result = await this.service.deleteFirstTimePrize(request.params.id, actor)
+    if (!result.success) {
+      return reply.code(404).send(error(result.message, 'NOT_FOUND'))
+    }
+    return reply.code(200).send(success(null, 'First-time spin prize deleted'))
+  }
+
+  async reorderFirstTimePrizes(request, reply) {
+    const actor = this._actorCtx(request)
+    await this.service.reorderFirstTimePrizes(request.body.orderedIds, actor)
+    return reply.code(200).send(success(null, 'First-time spin prizes reordered'))
+  }
+
   // ─── Admin: settings ────────────────────────────────────
 
   async getSettings(request, reply) {

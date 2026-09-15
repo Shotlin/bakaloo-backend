@@ -11,6 +11,7 @@ import { UsersRepository } from '../users/users.repository.js'
 const COUPON_REQUIRED_TYPES = new Set(['FREE_DELIVERY', 'PERCENTAGE_OFF', 'FLAT_OFF', 'BUY_ONE_GET_ONE'])
 const MAX_ACTIVE_PRIZES = 8
 const MIN_ACTIVE_PRIZES = 2
+const MIN_ACTIVE_FIRST_TIME_PRIZES = 1
 const PROBABILITY_SUM_TOLERANCE = 0.5
 
 /**
@@ -96,6 +97,23 @@ export class ScratchCardService {
   }
 
   /**
+   * Same shape as _validateActiveSetForScratch, but the first-time pool
+   * only needs 1 active row minimum (it's fine to always hand out the same
+   * single "Welcome Gift") — BETTER_LUCK can never appear here at all, so
+   * there's nothing else to gate.
+   */
+  _validateActiveSetForFirstTime(prizes) {
+    if (prizes.length < MIN_ACTIVE_FIRST_TIME_PRIZES || prizes.length > MAX_ACTIVE_PRIZES) {
+      return { ok: false, reason: `active first-time prize count ${prizes.length} out of range ${MIN_ACTIVE_FIRST_TIME_PRIZES}-${MAX_ACTIVE_PRIZES}` }
+    }
+    const sum = prizes.reduce((total, p) => total + p.winProbability, 0)
+    if (Math.abs(sum - 100) > PROBABILITY_SUM_TOLERANCE) {
+      return { ok: false, reason: `active first-time probabilities sum to ${sum}, expected 100` }
+    }
+    return { ok: true }
+  }
+
+  /**
    * The core transaction: lazily grants today's daily scratch if not yet
    * granted, rejects if the user has none left, otherwise decrements and
    * resolves a winner. Reward issuance (§ below) deliberately happens AFTER
@@ -116,6 +134,7 @@ export class ScratchCardService {
     let wonPrize = null
     let scratchesRemaining = 0
     let historyId = null
+    let isFirstTimeReward = false
     try {
       await client.query('BEGIN')
       const wallet = await this.repo.getOrCreateScratchWalletForUpdate(client, userId)
@@ -133,12 +152,34 @@ export class ScratchCardService {
         return { success: false, message: 'No scratch cards available' }
       }
 
-      const prizes = await this.repo.findActivePrizes()
-      const validation = this._validateActiveSetForScratch(prizes)
-      if (!validation.ok) {
-        await client.query('ROLLBACK')
-        logger.error({ userId, reason: validation.reason }, 'Scratch blocked: card misconfigured')
-        return { success: false, message: 'Scratch card is not configured correctly — please contact support.' }
+      // A brand-new player's very first scratch ever draws from a small
+      // admin-configured, always-a-real-win pool instead of the normal
+      // odds (which include BETTER_LUCK) — see migration 139. Checked
+      // inside this transaction, after the wallet row lock above is
+      // already held, so two concurrent first scratches for one user
+      // can't both land here. Falls back to the normal pool — logged, not
+      // fatal — if the first-time pool itself is misconfigured, so an
+      // admin mistake there never blocks a genuine first scratch outright.
+      let prizes = null
+      if (settings.firstTimeRewardEnabled && !(await this.repo.hasScratchHistory(client, userId))) {
+        const firstTimePrizes = await this.repo.findActiveFirstTimePrizes()
+        const ftValidation = this._validateActiveSetForFirstTime(firstTimePrizes)
+        if (ftValidation.ok) {
+          prizes = firstTimePrizes
+          isFirstTimeReward = true
+        } else {
+          logger.warn({ userId, reason: ftValidation.reason }, 'First-time scratch pool misconfigured — falling back to normal odds')
+        }
+      }
+
+      if (!prizes) {
+        prizes = await this.repo.findActivePrizes()
+        const validation = this._validateActiveSetForScratch(prizes)
+        if (!validation.ok) {
+          await client.query('ROLLBACK')
+          logger.error({ userId, reason: validation.reason }, 'Scratch blocked: card misconfigured')
+          return { success: false, message: 'Scratch card is not configured correctly — please contact support.' }
+        }
       }
 
       availableScratches -= 1
@@ -153,6 +194,7 @@ export class ScratchCardService {
         prizeValue: won.value,
         isWin: won.type !== 'BETTER_LUCK',
         rewardStatus: 'N_A',
+        isFirstTimeReward,
       })
 
       await client.query('COMMIT')
@@ -181,6 +223,7 @@ export class ScratchCardService {
       },
       rewardStatus,
       scratchesRemaining,
+      isFirstTimeReward,
     }
   }
 
@@ -390,6 +433,99 @@ export class ScratchCardService {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
       target_type: 'scratch_prize',
+      target_id: null,
+      before: null,
+      after: { count: orderedIds.length },
+      ip_address: actor.ip,
+      user_agent: actor.userAgent,
+    })
+    return { success: true }
+  }
+
+  // ─── Admin: first-time reward prizes ────────────────────────────────────
+  // Mirrors the regular prize CRUD above exactly (including reusing
+  // _validatePrizeCoupon), just against the first-time pool and its own
+  // MIN_ACTIVE_FIRST_TIME_PRIZES floor of 1 instead of 2.
+
+  async listFirstTimePrizes() {
+    return this.repo.findAllFirstTimePrizes()
+  }
+
+  async createFirstTimePrize(data, actor) {
+    if (!data.type || !data.label) {
+      return { success: false, message: 'type and label are required' }
+    }
+    const couponError = await this._validatePrizeCoupon(data)
+    if (couponError) return { success: false, message: couponError }
+    if (data.isActive !== false) {
+      const activeCount = await this.repo.countActiveFirstTime()
+      if (activeCount + 1 > MAX_ACTIVE_PRIZES) {
+        return { success: false, message: `Only ${MAX_ACTIVE_PRIZES} first-time prizes can be active at once — deactivate one first.` }
+      }
+    }
+    const prize = await this.repo.createFirstTimePrize(data)
+    emitAudit('scratch_first_time_prize_created', {
+      actor_user_id: actor.userId,
+      actor_role: actor.platformRole || actor.role,
+      target_type: 'scratch_first_time_prize',
+      target_id: prize.id,
+      before: null,
+      after: prize,
+      ip_address: actor.ip,
+      user_agent: actor.userAgent,
+    })
+    return { success: true, prize }
+  }
+
+  async updateFirstTimePrize(id, data, actor) {
+    const existing = await this.repo.findFirstTimePrizeById(id)
+    if (!existing) return { success: false, message: 'Prize not found' }
+    const merged = { ...existing, ...data }
+    const couponError = await this._validatePrizeCoupon(merged)
+    if (couponError) return { success: false, message: couponError }
+    if (merged.isActive !== false && !existing.isActive) {
+      const activeCount = await this.repo.countActiveFirstTime(id)
+      if (activeCount + 1 > MAX_ACTIVE_PRIZES) {
+        return { success: false, message: `Only ${MAX_ACTIVE_PRIZES} first-time prizes can be active at once — deactivate one first.` }
+      }
+    }
+    const prize = await this.repo.updateFirstTimePrize(id, data)
+    emitAudit('scratch_first_time_prize_updated', {
+      actor_user_id: actor.userId,
+      actor_role: actor.platformRole || actor.role,
+      target_type: 'scratch_first_time_prize',
+      target_id: id,
+      before: existing,
+      after: prize,
+      ip_address: actor.ip,
+      user_agent: actor.userAgent,
+    })
+    return { success: true, prize }
+  }
+
+  async deleteFirstTimePrize(id, actor) {
+    const existing = await this.repo.findFirstTimePrizeById(id)
+    if (!existing) return { success: false, message: 'Prize not found' }
+    await this.repo.deleteFirstTimePrize(id)
+    emitAudit('scratch_first_time_prize_deleted', {
+      actor_user_id: actor.userId,
+      actor_role: actor.platformRole || actor.role,
+      target_type: 'scratch_first_time_prize',
+      target_id: id,
+      before: existing,
+      after: null,
+      ip_address: actor.ip,
+      user_agent: actor.userAgent,
+    })
+    return { success: true }
+  }
+
+  async reorderFirstTimePrizes(orderedIds, actor) {
+    await this.repo.reorderFirstTimePrizes(orderedIds)
+    emitAudit('scratch_first_time_prizes_reordered', {
+      actor_user_id: actor.userId,
+      actor_role: actor.platformRole || actor.role,
+      target_type: 'scratch_first_time_prize',
       target_id: null,
       before: null,
       after: { count: orderedIds.length },

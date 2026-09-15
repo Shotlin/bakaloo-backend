@@ -63,6 +63,18 @@ function makeRepoMock(overrides = {}) {
     getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
     peekScratchWallet: vi.fn().mockResolvedValue({ availableScratches: 0, grantedToday: false }),
     setScratchWallet: vi.fn().mockImplementation(async (client, userId, { availableScratches }) => ({ userId, availableScratches })),
+    // Defaults model a returning user with no first-time pool configured —
+    // most tests in this file predate the first-time reward feature and
+    // shouldn't accidentally take that path.
+    hasScratchHistory: vi.fn().mockResolvedValue(true),
+    findActiveFirstTimePrizes: vi.fn().mockResolvedValue([]),
+    findAllFirstTimePrizes: vi.fn().mockResolvedValue([]),
+    findFirstTimePrizeById: vi.fn().mockResolvedValue(null),
+    countActiveFirstTime: vi.fn().mockResolvedValue(0),
+    createFirstTimePrize: vi.fn().mockImplementation(async (data) => prize(data)),
+    updateFirstTimePrize: vi.fn().mockImplementation(async (id, data) => prize({ id, ...data })),
+    deleteFirstTimePrize: vi.fn().mockResolvedValue(true),
+    reorderFirstTimePrizes: vi.fn().mockResolvedValue(true),
     insertGrant: vi.fn().mockResolvedValue(undefined),
     countGrantsForRule: vi.fn().mockResolvedValue(0),
     listGrants: vi.fn().mockResolvedValue([]),
@@ -297,6 +309,92 @@ describe('ScratchCardService.scratch — eligibility + resolution', () => {
     const result = await service.scratch(USER_ID)
     expect(result.success).toBe(false)
     expect(result.message).toMatch(/name/i)
+  })
+})
+
+describe('ScratchCardService.scratch — first-time guaranteed reward', () => {
+  it('a brand-new player (no scratch history) draws from the first-time pool and is marked isFirstTimeReward (positive)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasScratchHistory: vi.fn().mockResolvedValue(false),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      // A normal pool that would fail validation (only 1 active, below
+      // MIN_ACTIVE_PRIZES) — proves the first-time pool was actually used
+      // instead of falling through to this one.
+      findActivePrizes: vi.fn().mockResolvedValue([prize()]),
+    })
+    const service = makeService({ repo })
+    const result = await service.scratch(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(true)
+    expect(result.prize.type).toBe('CASHBACK')
+    expect(result.prize.isWin).toBe(true)
+    expect(repo.insertHistory).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ isFirstTimeReward: true })
+    )
+  })
+
+  it('a returning player (has scratch history) uses the normal pool even though first-time reward is enabled (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasScratchHistory: vi.fn().mockResolvedValue(true),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'BETTER_LUCK', winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.scratch(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(result.prize.type).toBe('BETTER_LUCK')
+  })
+
+  it('a first-ever scratch with first-time reward disabled in settings uses the normal pool (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: false }),
+      hasScratchHistory: vi.fn().mockResolvedValue(false),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'BETTER_LUCK', winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.scratch(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(repo.findActiveFirstTimePrizes).not.toHaveBeenCalled()
+  })
+
+  it('a misconfigured first-time pool falls back to the normal pool instead of blocking a genuine first scratch (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasScratchHistory: vi.fn().mockResolvedValue(false),
+      // No active first-time prizes at all — below MIN_ACTIVE_FIRST_TIME_PRIZES.
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'CASHBACK', value: 20, winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.scratch(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(result.prize.type).toBe('CASHBACK')
   })
 })
 

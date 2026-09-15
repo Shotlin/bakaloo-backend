@@ -11,6 +11,11 @@ import {
   updatePrizeSchema,
   deletePrizeSchema,
   reorderPrizesSchema,
+  listFirstTimePrizesSchema,
+  createFirstTimePrizeSchema,
+  updateFirstTimePrizeSchema,
+  deleteFirstTimePrizeSchema,
+  reorderFirstTimePrizesSchema,
   getSettingsSchema,
   updateSettingsSchema,
   listMilestoneRulesSchema,
@@ -82,6 +87,32 @@ export default async function spinWheelRoutes(fastify) {
     schema: reorderPrizesSchema,
     preHandler: adminAuth,
   }, controller.reorderPrizes.bind(controller))
+
+  // ─── Admin: first-time reward prizes ─────────────────────
+  fastify.get('/admin/first-time-prizes', {
+    schema: listFirstTimePrizesSchema,
+    preHandler: adminAuth,
+  }, controller.listFirstTimePrizes.bind(controller))
+
+  fastify.post('/admin/first-time-prizes', {
+    schema: createFirstTimePrizeSchema,
+    preHandler: adminAuth,
+  }, controller.createFirstTimePrize.bind(controller))
+
+  fastify.patch('/admin/first-time-prizes/:id', {
+    schema: updateFirstTimePrizeSchema,
+    preHandler: adminAuth,
+  }, controller.updateFirstTimePrize.bind(controller))
+
+  fastify.delete('/admin/first-time-prizes/:id', {
+    schema: deleteFirstTimePrizeSchema,
+    preHandler: adminAuth,
+  }, controller.deleteFirstTimePrize.bind(controller))
+
+  fastify.put('/admin/first-time-prizes/reorder', {
+    schema: reorderFirstTimePrizesSchema,
+    preHandler: adminAuth,
+  }, controller.reorderFirstTimePrizes.bind(controller))
 
   // ─── Admin: settings ─────────────────────────────────────
   fastify.get('/admin/settings', {

@@ -115,11 +115,133 @@ export class SpinWheelRepository {
     }
   }
 
+  // ─── First-time reward prizes ───────────────────────────────────────────
+  // Same shape/queries as the regular prize CRUD above, just pointed at
+  // spin_first_time_prizes — see migration 139.
+
+  async findActiveFirstTimePrizes() {
+    const { rows } = await query(
+      `SELECT ${PRIZE_COLUMNS} FROM spin_first_time_prizes WHERE is_active = true ORDER BY display_order ASC`
+    )
+    return rows.map(this._formatPrize)
+  }
+
+  async findAllFirstTimePrizes() {
+    const { rows } = await query(
+      `SELECT ${PRIZE_COLUMNS} FROM spin_first_time_prizes ORDER BY display_order ASC, created_at ASC`
+    )
+    return rows.map(this._formatPrize)
+  }
+
+  async findFirstTimePrizeById(id) {
+    const { rows } = await query(`SELECT ${PRIZE_COLUMNS} FROM spin_first_time_prizes WHERE id = $1`, [id])
+    return rows[0] ? this._formatPrize(rows[0]) : null
+  }
+
+  async countActiveFirstTime(excludeId = null) {
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count FROM spin_first_time_prizes WHERE is_active = true AND ($1::uuid IS NULL OR id != $1)`,
+      [excludeId]
+    )
+    return rows[0].count
+  }
+
+  async createFirstTimePrize(data) {
+    const { rows: [{ max: maxOrder }] } = await query('SELECT COALESCE(MAX(display_order), 0) AS max FROM spin_first_time_prizes')
+    const { rows } = await query(
+      `INSERT INTO spin_first_time_prizes (type, icon_key, label, value, win_probability, display_order, is_active, linked_coupon_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING ${PRIZE_COLUMNS}`,
+      [
+        data.type,
+        data.iconKey || 'gift',
+        data.label,
+        data.value ?? null,
+        data.winProbability ?? 0,
+        (maxOrder || 0) + 1,
+        data.isActive !== false,
+        data.linkedCouponId ?? null,
+      ]
+    )
+    return this._formatPrize(rows[0])
+  }
+
+  async updateFirstTimePrize(id, data) {
+    const fields = []
+    const params = []
+    let idx = 1
+    const fieldMap = {
+      type: 'type',
+      iconKey: 'icon_key',
+      label: 'label',
+      value: 'value',
+      winProbability: 'win_probability',
+      isActive: 'is_active',
+      linkedCouponId: 'linked_coupon_id',
+    }
+    for (const [jsKey, dbKey] of Object.entries(fieldMap)) {
+      if (data[jsKey] !== undefined) {
+        fields.push(`${dbKey} = $${idx++}`)
+        params.push(data[jsKey])
+      }
+    }
+    if (fields.length === 0) return this.findFirstTimePrizeById(id)
+    fields.push('updated_at = NOW()')
+    params.push(id)
+    const { rows } = await query(
+      `UPDATE spin_first_time_prizes SET ${fields.join(', ')} WHERE id = $${idx} RETURNING ${PRIZE_COLUMNS}`,
+      params
+    )
+    return rows[0] ? this._formatPrize(rows[0]) : null
+  }
+
+  async deleteFirstTimePrize(id) {
+    const { rowCount } = await query('DELETE FROM spin_first_time_prizes WHERE id = $1', [id])
+    return rowCount > 0
+  }
+
+  async reorderFirstTimePrizes(orderedIds) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query(
+          'UPDATE spin_first_time_prizes SET display_order = $1, updated_at = NOW() WHERE id = $2',
+          [i + 1, orderedIds[i]]
+        )
+      }
+      await client.query('COMMIT')
+      return true
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Whether this user has ever spun before (any row at all in spin_history)
+   * — the sole signal for "is this their first-ever spin". Always called
+   * from inside spin()'s transaction, after its wallet row lock is already
+   * held, so two concurrent first spins for the same user can't both see
+   * "no history" (the second is blocked until the first's spin_history
+   * insert commits).
+   */
+  async hasSpinHistory(client, userId) {
+    const runner = client ? client.query.bind(client) : query
+    const { rows } = await runner(
+      'SELECT EXISTS(SELECT 1 FROM spin_history WHERE user_id = $1) AS has_history',
+      [userId]
+    )
+    return rows[0].has_history === true
+  }
+
   // ─── Settings (singleton) ──────────────────────────────────────────────
 
   async getSettings() {
     const { rows } = await query(
-      `SELECT id, daily_free_spins, trigger_mode,
+      `SELECT id, daily_free_spins, trigger_mode, first_time_reward_enabled,
               background_image_url, background_image_public_id,
               banner_title, banner_subtitle, banner_tagline, updated_at
        FROM spin_wheel_settings LIMIT 1`
@@ -134,6 +256,7 @@ export class SpinWheelRepository {
     const fieldMap = {
       dailyFreeSpins: 'daily_free_spins',
       triggerMode: 'trigger_mode',
+      firstTimeRewardEnabled: 'first_time_reward_enabled',
       backgroundImageUrl: 'background_image_url',
       backgroundImagePublicId: 'background_image_public_id',
       bannerTitle: 'banner_title',
@@ -150,7 +273,7 @@ export class SpinWheelRepository {
     fields.push('updated_at = NOW()')
     const { rows } = await query(
       `UPDATE spin_wheel_settings SET ${fields.join(', ')}
-       RETURNING id, daily_free_spins, trigger_mode,
+       RETURNING id, daily_free_spins, trigger_mode, first_time_reward_enabled,
                  background_image_url, background_image_public_id,
                  banner_title, banner_subtitle, banner_tagline, updated_at`,
       params
@@ -308,12 +431,12 @@ export class SpinWheelRepository {
 
   // ─── History ────────────────────────────────────────────────────────────
 
-  async insertHistory(client, { userId, prizeId, prizeType, prizeLabel, prizeValue, isWin, rewardStatus }) {
+  async insertHistory(client, { userId, prizeId, prizeType, prizeLabel, prizeValue, isWin, rewardStatus, isFirstTimeReward = false }) {
     const runner = client ? client.query.bind(client) : query
     const { rows } = await runner(
-      `INSERT INTO spin_history (user_id, prize_id, prize_type, prize_label, prize_value, is_win, reward_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [userId, prizeId, prizeType, prizeLabel, prizeValue ?? null, isWin, rewardStatus || 'N_A']
+      `INSERT INTO spin_history (user_id, prize_id, prize_type, prize_label, prize_value, is_win, reward_status, is_first_time_reward)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      [userId, prizeId, prizeType, prizeLabel, prizeValue ?? null, isWin, rewardStatus || 'N_A', !!isFirstTimeReward]
     )
     return rows[0].id
   }
@@ -328,7 +451,8 @@ export class SpinWheelRepository {
   async listHistory({ limit = 20, offset = 0, userId = null } = {}) {
     const { rows } = await query(
       `SELECT h.id, h.user_id, u.name AS user_name, u.phone AS user_phone,
-              h.prize_type, h.prize_label, h.prize_value, h.is_win, h.reward_status, h.reward_ref, h.spun_at
+              h.prize_type, h.prize_label, h.prize_value, h.is_win, h.reward_status, h.reward_ref,
+              h.is_first_time_reward, h.spun_at
        FROM spin_history h
        LEFT JOIN users u ON u.id = h.user_id
        WHERE ($1::uuid IS NULL OR h.user_id = $1)
@@ -352,6 +476,7 @@ export class SpinWheelRepository {
         isWin: r.is_win,
         rewardStatus: r.reward_status,
         rewardRef: r.reward_ref,
+        isFirstTimeReward: r.is_first_time_reward === true,
         spunAt: r.spun_at,
       })),
     }
@@ -380,6 +505,7 @@ export class SpinWheelRepository {
       id: row.id,
       dailyFreeSpins: row.daily_free_spins,
       triggerMode: row.trigger_mode,
+      firstTimeRewardEnabled: row.first_time_reward_enabled,
       backgroundImageUrl: row.background_image_url,
       backgroundImagePublicId: row.background_image_public_id,
       bannerTitle: row.banner_title,

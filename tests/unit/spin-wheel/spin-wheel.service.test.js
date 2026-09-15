@@ -63,6 +63,18 @@ function makeRepoMock(overrides = {}) {
     getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
     peekSpinWallet: vi.fn().mockResolvedValue({ availableSpins: 0, grantedToday: false }),
     setSpinWallet: vi.fn().mockImplementation(async (client, userId, { availableSpins }) => ({ userId, availableSpins })),
+    // Defaults model a RETURNING user with no first-time pool configured —
+    // most tests in this file predate the first-time reward feature and
+    // shouldn't accidentally take that path.
+    hasSpinHistory: vi.fn().mockResolvedValue(true),
+    findActiveFirstTimePrizes: vi.fn().mockResolvedValue([]),
+    findAllFirstTimePrizes: vi.fn().mockResolvedValue([]),
+    findFirstTimePrizeById: vi.fn().mockResolvedValue(null),
+    countActiveFirstTime: vi.fn().mockResolvedValue(0),
+    createFirstTimePrize: vi.fn().mockImplementation(async (data) => prize(data)),
+    updateFirstTimePrize: vi.fn().mockImplementation(async (id, data) => prize({ id, ...data })),
+    deleteFirstTimePrize: vi.fn().mockResolvedValue(true),
+    reorderFirstTimePrizes: vi.fn().mockResolvedValue(true),
     insertGrant: vi.fn().mockResolvedValue(undefined),
     countGrantsForRule: vi.fn().mockResolvedValue(0),
     listGrants: vi.fn().mockResolvedValue([]),
@@ -289,6 +301,92 @@ describe('SpinWheelService.spin — eligibility + resolution', () => {
     const service = makeService({ repo })
     const result = await service.spin(USER_ID)
     expect(result.success).toBe(false)
+  })
+})
+
+describe('SpinWheelService.spin — first-time guaranteed reward', () => {
+  it('a brand-new player (no spin history) draws from the first-time pool and is marked isFirstTimeReward (positive)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasSpinHistory: vi.fn().mockResolvedValue(false),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      // A normal pool that would fail validation (only 1 active, below
+      // MIN_ACTIVE_PRIZES) — proves the first-time pool was actually used
+      // instead of falling through to this one.
+      findActivePrizes: vi.fn().mockResolvedValue([prize()]),
+    })
+    const service = makeService({ repo })
+    const result = await service.spin(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(true)
+    expect(result.prize.type).toBe('CASHBACK')
+    expect(result.prize.isWin).toBe(true)
+    expect(repo.insertHistory).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ isFirstTimeReward: true })
+    )
+  })
+
+  it('a returning player (has spin history) uses the normal pool even though first-time reward is enabled (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasSpinHistory: vi.fn().mockResolvedValue(true),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'BETTER_LUCK', winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.spin(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(result.prize.type).toBe('BETTER_LUCK')
+  })
+
+  it('a first-ever spin with first-time reward disabled in settings uses the normal pool (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: false }),
+      hasSpinHistory: vi.fn().mockResolvedValue(false),
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([
+        prize({ id: 'ft-1', type: 'CASHBACK', value: 25, winProbability: 100 }),
+      ]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'BETTER_LUCK', winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.spin(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(repo.findActiveFirstTimePrizes).not.toHaveBeenCalled()
+  })
+
+  it('a misconfigured first-time pool falls back to the normal pool instead of blocking a genuine first spin (negative)', async () => {
+    const repo = makeRepoMock({
+      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 1, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN', firstTimeRewardEnabled: true }),
+      hasSpinHistory: vi.fn().mockResolvedValue(false),
+      // No active first-time prizes at all — below MIN_ACTIVE_FIRST_TIME_PRIZES.
+      findActiveFirstTimePrizes: vi.fn().mockResolvedValue([]),
+      findActivePrizes: vi.fn().mockResolvedValue([
+        prize({ type: 'CASHBACK', value: 20, winProbability: 100 }),
+        prize({ id: 'p2', winProbability: 0 }),
+      ]),
+    })
+    const service = makeService({ repo })
+    const result = await service.spin(USER_ID)
+    expect(result.success).toBe(true)
+    expect(result.isFirstTimeReward).toBe(false)
+    expect(result.prize.type).toBe('CASHBACK')
   })
 })
 

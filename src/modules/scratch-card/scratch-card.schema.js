@@ -1,4 +1,8 @@
 const PRIZE_TYPES = ['FREE_DELIVERY', 'PERCENTAGE_OFF', 'FLAT_OFF', 'BUY_ONE_GET_ONE', 'CASHBACK', 'BETTER_LUCK']
+// No BETTER_LUCK here — the first-time reward pool exists specifically to
+// guarantee a real win on a user's first-ever scratch, so that type is
+// never legal for it (also enforced at the DB level — see migration 139).
+const FIRST_TIME_PRIZE_TYPES = ['FREE_DELIVERY', 'PERCENTAGE_OFF', 'FLAT_OFF', 'BUY_ONE_GET_ONE', 'CASHBACK']
 const ICON_KEYS = ['shopping_cart', 'percent', 'basket', 'coins', 'gift', 'sad_face', 'star', 'ticket']
 const TRIGGER_MODES = ['ALWAYS_ON_LOGIN', 'MILESTONE_ONLY', 'MANUAL_ONLY']
 const MILESTONE_TYPES = ['ORDER_COUNT', 'TOTAL_SPEND']
@@ -85,6 +89,73 @@ export const reorderPrizesSchema = {
   },
 }
 
+export const listFirstTimePrizesSchema = {
+  tags: ['Scratch Card'],
+  summary: 'List all first-time-reward scratch prizes (active + inactive templates) [ADMIN]',
+}
+
+export const createFirstTimePrizeSchema = {
+  tags: ['Scratch Card'],
+  summary: 'Create a first-time-reward scratch prize [ADMIN]',
+  body: {
+    type: 'object',
+    required: ['type', 'label'],
+    properties: {
+      type: { type: 'string', enum: FIRST_TIME_PRIZE_TYPES },
+      iconKey: { type: 'string', enum: ICON_KEYS, default: 'gift' },
+      label: { type: 'string', minLength: 1, maxLength: 50 },
+      value: { type: ['number', 'null'], minimum: 0 },
+      winProbability: { type: 'number', minimum: 0, maximum: 100, default: 0 },
+      isActive: { type: 'boolean', default: true },
+      linkedCouponId: { type: ['string', 'null'], format: 'uuid' },
+    },
+  },
+}
+
+export const updateFirstTimePrizeSchema = {
+  tags: ['Scratch Card'],
+  summary: 'Update a first-time-reward scratch prize [ADMIN]',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', format: 'uuid' } },
+  },
+  body: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', enum: FIRST_TIME_PRIZE_TYPES },
+      iconKey: { type: 'string', enum: ICON_KEYS },
+      label: { type: 'string', minLength: 1, maxLength: 50 },
+      value: { type: ['number', 'null'], minimum: 0 },
+      winProbability: { type: 'number', minimum: 0, maximum: 100 },
+      isActive: { type: 'boolean' },
+      linkedCouponId: { type: ['string', 'null'], format: 'uuid' },
+    },
+  },
+}
+
+export const deleteFirstTimePrizeSchema = {
+  tags: ['Scratch Card'],
+  summary: 'Delete a first-time-reward scratch prize [ADMIN]',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', format: 'uuid' } },
+  },
+}
+
+export const reorderFirstTimePrizesSchema = {
+  tags: ['Scratch Card'],
+  summary: 'Reorder first-time-reward scratch prizes [ADMIN]',
+  body: {
+    type: 'object',
+    required: ['orderedIds'],
+    properties: {
+      orderedIds: { type: 'array', items: { type: 'string', format: 'uuid' }, minItems: 1 },
+    },
+  },
+}
+
 export const getSettingsSchema = {
   tags: ['Scratch Card'],
   summary: 'Get scratch card settings (daily allowance, popup trigger mode, cover image) [ADMIN]',
@@ -98,6 +169,9 @@ export const updateSettingsSchema = {
     properties: {
       dailyFreeScratches: { type: 'integer', minimum: 0 },
       triggerMode: { type: 'string', enum: TRIGGER_MODES },
+      // Guaranteed-win first-time reward (see migration 139) — off falls
+      // back to normal odds for every scratch, first-ever or not.
+      firstTimeRewardEnabled: { type: 'boolean' },
       // coverImageUrl/PublicId come from the generic POST /uploads/image
       // endpoint (dashboard uploads first, then PUTs the returned url/
       // publicId here); null clears back to the app's bundled default image.
@@ -185,4 +259,4 @@ export const listHistorySchema = {
 }
 
 // Exported for reuse if another module needs the same enums (dashboard-facing docs, etc.)
-export const SCRATCH_CARD_ENUMS = { PRIZE_TYPES, ICON_KEYS, TRIGGER_MODES, MILESTONE_TYPES }
+export const SCRATCH_CARD_ENUMS = { PRIZE_TYPES, FIRST_TIME_PRIZE_TYPES, ICON_KEYS, TRIGGER_MODES, MILESTONE_TYPES }
