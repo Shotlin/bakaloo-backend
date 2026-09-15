@@ -1,6 +1,7 @@
 import { SectionsController } from './sections.controller.js'
 import {
   copyToB2BSchema,
+  copyToB2CSchema,
   createSectionSchema,
   reorderSectionsSchema,
   rollbackSchema,
@@ -28,6 +29,7 @@ export default async function adminSectionRoutes(fastify) {
   fastify.patch('/:tabId/reorder', { schema: reorderSectionsSchema }, ctrl.reorder)
   fastify.post('/:id/duplicate', { schema: sectionIdSchema }, ctrl.duplicate)
   fastify.post('/:tabId/copy-to-b2b', { schema: copyToB2BSchema }, ctrl.copyToB2B)
+  fastify.post('/:tabId/copy-to-b2c', { schema: copyToB2CSchema }, ctrl.copyToB2C)
   fastify.get('/:tabId/versions', { schema: tabIdSchema }, ctrl.getVersions)
   fastify.post('/:tabId/rollback', { schema: rollbackSchema }, ctrl.rollbackVersion)
   fastify.post('/:tabId/schedule', { schema: scheduleSchema }, ctrl.scheduleLayout)

@@ -233,42 +233,57 @@ export class PublicThemeController {
 
     // PHASE 5B: Each resolveSectionProducts call gets the dashboard-configured
     // limit clamped to HOME_CAPS.* — regardless of what the dashboard stored.
-    const featuredProducts = await resolveSectionProducts(
-      merchConfig.featured,
-      () => getFeaturedProducts(HOME_CAPS.featured, allocatedShopIds, priceMode),
-      HOME_CAPS.featured
-    )
-    const dealProducts = await resolveSectionProducts(
-      merchConfig.deals,
-      () => getDealProducts(HOME_CAPS.deals, allocatedShopIds, priceMode),
-      HOME_CAPS.deals
-    )
-    const trendingProducts = await resolveSectionProducts(
-      merchConfig.trending,
-      () => getTrendingProducts(HOME_CAPS.trending, allocatedShopIds, priceMode),
-      HOME_CAPS.trending
-    )
-    const seasonalProducts = await resolveSectionProducts(
-      merchConfig.seasonal_mosaic,
-      async () => mergeUniqueProducts([
-        await getDealProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
-        await getFeaturedProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
-        await getTrendingProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
-      ]).slice(0, HOME_CAPS.seasonal),
-      HOME_CAPS.seasonal
-    )
-    const categorySections = await resolveCategorySections(
-      merchConfig.category_rails,
-      async () => getDefaultCategorySections(
-        HOME_CAPS.defaultRailCount,
-        HOME_CAPS.defaultRailItems,
+    // These 5 sections are mutually independent (each only depends on
+    // allocatedShopIds/priceMode/merchConfig, never on another section's
+    // result), so they run concurrently instead of one-after-another —
+    // on a cache miss this was ~7 serial Postgres round-trips in a row.
+    const [
+      featuredProducts,
+      dealProducts,
+      trendingProducts,
+      seasonalProducts,
+      categorySections,
+    ] = await Promise.all([
+      resolveSectionProducts(
+        merchConfig.featured,
+        () => getFeaturedProducts(HOME_CAPS.featured, allocatedShopIds, priceMode),
+        HOME_CAPS.featured
+      ),
+      resolveSectionProducts(
+        merchConfig.deals,
+        () => getDealProducts(HOME_CAPS.deals, allocatedShopIds, priceMode),
+        HOME_CAPS.deals
+      ),
+      resolveSectionProducts(
+        merchConfig.trending,
+        () => getTrendingProducts(HOME_CAPS.trending, allocatedShopIds, priceMode),
+        HOME_CAPS.trending
+      ),
+      resolveSectionProducts(
+        merchConfig.seasonal_mosaic,
+        async () => {
+          const [deals, featured, trending] = await Promise.all([
+            getDealProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
+            getFeaturedProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
+            getTrendingProducts(HOME_CAPS.seasonal, allocatedShopIds, priceMode),
+          ])
+          return mergeUniqueProducts([deals, featured, trending]).slice(0, HOME_CAPS.seasonal)
+        },
+        HOME_CAPS.seasonal
+      ),
+      resolveCategorySections(
+        merchConfig.category_rails,
+        async () => getDefaultCategorySections(
+          HOME_CAPS.defaultRailCount,
+          HOME_CAPS.defaultRailItems,
+          allocatedShopIds,
+          priceMode
+        ),
+        HOME_CAPS.categoryRail,
         allocatedShopIds,
         priceMode
       ),
-      HOME_CAPS.categoryRail,
-      allocatedShopIds,
-      priceMode
-    )
+    ])
 
     const responseData = {
       store_key: storeKey,
@@ -1176,17 +1191,27 @@ async function getDefaultCategorySections(limitSections, itemsPerSection, alloca
   )
 
   const perRail = itemsPerSection ?? HOME_CAPS.defaultRailItems
+  // Each category's own `perRail` products, fetched concurrently instead of
+  // one-after-another — these queries don't depend on each other. (Not
+  // merged into a single multi-category call: that query's LIMIT applies
+  // across the combined result, not per category, which would shrink each
+  // rail instead of just fetching them in parallel.)
+  const rows = await Promise.all(
+    categories.map((category) =>
+      getProductsByCategoryIds([category.id], perRail, [], allocatedShopIds, priceMode)
+    )
+  )
+
   const sections = []
-  for (const category of categories) {
-    // PHASE 5B: use configurable per-rail cap.
-    const products = await getProductsByCategoryIds([category.id], perRail, [], allocatedShopIds, priceMode)
-    if (products.length === 0) continue
+  categories.forEach((category, index) => {
+    const products = rows[index]
+    if (products.length === 0) return
     sections.push({
       category_id: category.id,
       title: category.name,
       products,
     })
-  }
+  })
 
   return sections
 }

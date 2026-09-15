@@ -72,6 +72,22 @@ export class SectionsController {
     return success(result.sections, `Copied ${result.copied} section(s) to B2B`)
   }
 
+  /**
+   * POST /:tabId/copy-to-b2c — the reverse direction: bootstrap a tab's B2C
+   * sections from its B2B ones. Exists for the case where content only
+   * ended up under the B2B row by mistake (e.g. the builder's audience
+   * toggle was left on B2B while authoring) and needs to reach retail
+   * customers instead of just wholesale ones.
+   */
+  async copyToB2C(request, reply) {
+    const result = await svc.copyToAudience(request.params.tabId, 'B2B', 'B2C', request.user.id, request.ip)
+    if (!result) return error('Tab not found', 404)
+    if (result.alreadyHadSections) {
+      return error('This tab already has B2C sections — delete them first if you want to re-copy from B2B.', 'B2C_SECTIONS_EXIST')
+    }
+    return success(result.sections, `Copied ${result.copied} section(s) to B2C`)
+  }
+
   async getVersions(request, reply) {
     return success(await svc.getVersions(request.params.tabId, resolveAudience(request)), 'Version history fetched')
   }

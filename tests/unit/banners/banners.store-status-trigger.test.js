@@ -13,6 +13,16 @@ vi.mock('../../../src/utils/activityLogger.js', () => ({
   logAdminActivity: vi.fn(),
 }))
 
+// getActiveForStoreStatus is now Redis cache-aside (same pattern as every
+// other public theme endpoint) — mock the cache module so these tests
+// exercise the repo call/normalization logic without needing real Redis.
+vi.mock('../../../src/utils/cache.js', () => ({
+  cacheGet: vi.fn().mockResolvedValue(null),
+  cacheSet: vi.fn(),
+  cacheDel: vi.fn(),
+  cacheDeletePattern: vi.fn(),
+}))
+
 vi.mock('../../../src/config/cloudinary.js', () => ({
   normalizeCloudinaryDeliveryUrl: (url) => url,
 }))

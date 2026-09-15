@@ -139,3 +139,7 @@ export const scheduleSchema = {
 export const copyToB2BSchema = {
   params: tabIdSchema.params,
 }
+
+export const copyToB2CSchema = {
+  params: tabIdSchema.params,
+}

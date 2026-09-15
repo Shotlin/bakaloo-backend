@@ -2,8 +2,24 @@ import { AdminBannersRepository } from './banners.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../../config/cloudinary.js'
 import { getStoreStatusService } from '../../store-status/store-status.routes.js'
+import { cacheGet, cacheSet, cacheDeletePattern } from '../../../utils/cache.js'
 
 const repo = new AdminBannersRepository()
+
+// Every other public theme endpoint (getActiveTheme, getTabThemes,
+// getTabHomeContent, getSectionManifest) is Redis cache-aside; this one
+// was going straight to Postgres on every single home-screen load. Keyed
+// per-user (falling back to 'anon') rather than just audience/placement,
+// same convention as getTabHomeCacheKey's per-customer `scope` — segment
+// targeting means two users in the same audience can legitimately see
+// different banners, so caching by audience alone risks leaking a
+// segment-exclusive banner to someone outside that segment.
+const BANNERS_PUBLIC_CACHE_PREFIX = 'bakaloo:banners:public'
+const BANNERS_PUBLIC_CACHE_TTL = 60
+
+function getBannersPublicCacheKey(audience, placement, isOpen, userId) {
+  return `${BANNERS_PUBLIC_CACHE_PREFIX}:${placement}:${audience}:${isOpen ? 'open' : 'closed'}:${userId || 'anon'}`
+}
 
 export class AdminBannersService {
   constructor(storeStatusService = null) {
@@ -42,6 +58,7 @@ export class AdminBannersService {
     }
     const banner = await repo.create(mapped)
     logAdminActivity(adminId, 'CREATE_BANNER', 'banner', banner.id, null, null, ip)
+    await cacheDeletePattern(`${BANNERS_PUBLIC_CACHE_PREFIX}:*`)
     return this._normalizeBanner(banner)
   }
 
@@ -64,18 +81,23 @@ export class AdminBannersService {
     }
     const banner = await repo.update(id, mapped)
     logAdminActivity(adminId, 'UPDATE_BANNER', 'banner', id, null, null, ip)
+    await cacheDeletePattern(`${BANNERS_PUBLIC_CACHE_PREFIX}:*`)
     return this._normalizeBanner(banner)
   }
 
   async remove(id, adminId, ip) {
     const ok = await repo.remove(id)
-    if (ok) logAdminActivity(adminId, 'DELETE_BANNER', 'banner', id, null, null, ip)
+    if (ok) {
+      logAdminActivity(adminId, 'DELETE_BANNER', 'banner', id, null, null, ip)
+      await cacheDeletePattern(`${BANNERS_PUBLIC_CACHE_PREFIX}:*`)
+    }
     return ok
   }
 
   async reorder(orderedIds, adminId, ip) {
     await repo.reorder(orderedIds)
     logAdminActivity(adminId, 'REORDER_BANNERS', 'banner', null, null, { count: orderedIds.length }, ip)
+    await cacheDeletePattern(`${BANNERS_PUBLIC_CACHE_PREFIX}:*`)
     return true
   }
 
@@ -91,7 +113,16 @@ export class AdminBannersService {
    */
   async getActiveForStoreStatus(audience = 'B2C', placement = 'HOME', userId = null) {
     const { isOpen } = await this.storeStatusService.isOpen()
-    return this._normalizeBanners(await repo.findActiveForStoreStatus(isOpen, audience, placement, userId))
+    const cacheKey = getBannersPublicCacheKey(audience, placement, isOpen, userId)
+
+    const cached = await cacheGet(cacheKey)
+    if (cached) return cached
+
+    const banners = this._normalizeBanners(
+      await repo.findActiveForStoreStatus(isOpen, audience, placement, userId)
+    )
+    await cacheSet(cacheKey, banners, BANNERS_PUBLIC_CACHE_TTL)
+    return banners
   }
 
   _normalizeBanners(banners = []) {
