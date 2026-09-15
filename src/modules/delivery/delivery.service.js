@@ -7,6 +7,7 @@ import { buildCustomerOrderEventNotification } from '../notifications/customer-o
 import { UploadsService } from '../uploads/uploads.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { SpinWheelService } from '../spin-wheel/spin-wheel.service.js'
+import { ScratchCardService } from '../scratch-card/scratch-card.service.js'
 import { CommissionSettingsRepository } from '../commission-settings/commission-settings.repository.js'
 import { PaymentSettingsService } from '../payment-settings/payment-settings.service.js'
 import { verifyPickupSignature } from '../../utils/qrToken.js'
@@ -29,6 +30,7 @@ export class DeliveryService {
       : null
     this.cashbackService = new CashbackService()
     this.spinWheelService = new SpinWheelService()
+    this.scratchCardService = new ScratchCardService()
     this.commissionSettingsRepo = new CommissionSettingsRepository()
     this.paymentSettingsService = new PaymentSettingsService()
   }
@@ -839,6 +841,9 @@ export class DeliveryService {
     // cashback above — must never block or fail the rider's confirmation.
     this.spinWheelService.evaluateMilestones(assignment.customer_id).catch((err) => {
       logger.warn({ err: err.message, orderId }, 'Spin milestone evaluation failed (rider deliver)')
+    })
+    this.scratchCardService.evaluateMilestones(assignment.customer_id).catch((err) => {
+      logger.warn({ err: err.message, orderId }, 'Scratch milestone evaluation failed (rider deliver)')
     })
 
     return {

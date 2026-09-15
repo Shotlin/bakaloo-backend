@@ -1,10 +1,10 @@
-// Coverage for SpinWheelService — server-authoritative prize resolution,
-// spin-credit bookkeeping, and the coupon-linkage validation guard.
-// Constructor injection covers repo/couponsRepo/walletService/usersRepo
-// (mirrors cart-milestones.service.test.js's shape), but spin()/
-// evaluateMilestones()/grantSpins() also open their own transaction via the
-// module-level getClient() — mocked the same way
-// payment-settings.service.spec.js does it, so this needs no live DB.
+// Coverage for ScratchCardService — server-authoritative prize resolution,
+// scratch-credit bookkeeping, and the coupon-linkage validation guard.
+// Mirrors spin-wheel.service.test.js's shape exactly (sibling gamification
+// module, identical mechanics). Constructor injection covers repo/
+// couponsRepo/walletService/usersRepo; scratch()/evaluateMilestones()/
+// grantScratches() also open their own transaction via the module-level
+// getClient() — mocked the same way, so this needs no live DB.
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -16,7 +16,7 @@ vi.mock('../../../src/config/database.js', () => ({
 }))
 
 import { getClient } from '../../../src/config/database.js'
-import { SpinWheelService } from '../../../src/modules/spin-wheel/spin-wheel.service.js'
+import { ScratchCardService } from '../../../src/modules/scratch-card/scratch-card.service.js'
 
 /** A client stub satisfying the service's own BEGIN/COMMIT/ROLLBACK calls — the repo mock ignores it entirely, so it never needs to run real SQL. */
 function makeClientMock() {
@@ -52,17 +52,17 @@ function makeRepoMock(overrides = {}) {
     updatePrize: vi.fn().mockImplementation(async (id, data) => prize({ id, ...data })),
     deletePrize: vi.fn().mockResolvedValue(true),
     reorderPrizes: vi.fn().mockResolvedValue(true),
-    getSettings: vi.fn().mockResolvedValue({ id: 's-1', dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
-    updateSettings: vi.fn().mockResolvedValue({ id: 's-1', dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
+    getSettings: vi.fn().mockResolvedValue({ id: 's-1', dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
+    updateSettings: vi.fn().mockResolvedValue({ id: 's-1', dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
     findAllMilestoneRules: vi.fn().mockResolvedValue([]),
     findActiveMilestoneRules: vi.fn().mockResolvedValue([]),
     findMilestoneRuleById: vi.fn().mockResolvedValue(null),
     createMilestoneRule: vi.fn(),
     updateMilestoneRule: vi.fn(),
     deleteMilestoneRule: vi.fn(),
-    getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
-    peekSpinWallet: vi.fn().mockResolvedValue({ availableSpins: 0, grantedToday: false }),
-    setSpinWallet: vi.fn().mockImplementation(async (client, userId, { availableSpins }) => ({ userId, availableSpins })),
+    getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
+    peekScratchWallet: vi.fn().mockResolvedValue({ availableScratches: 0, grantedToday: false }),
+    setScratchWallet: vi.fn().mockImplementation(async (client, userId, { availableScratches }) => ({ userId, availableScratches })),
     insertGrant: vi.fn().mockResolvedValue(undefined),
     countGrantsForRule: vi.fn().mockResolvedValue(0),
     listGrants: vi.fn().mockResolvedValue([]),
@@ -91,17 +91,17 @@ function makeWalletServiceMock(overrides = {}) {
 function makeUsersRepoMock(overrides = {}) {
   return {
     getStats: vi.fn().mockResolvedValue({ total_orders: 0, total_spent: '0' }),
-    // spin()'s name-mandatory gate (see spin-wheel.service.js) needs a named
-    // user to get past it — every describe block in this file is about
-    // prize/wallet/milestone logic, not that gate, so default to a user who
-    // already has a name on file.
+    // scratch()'s name-mandatory gate (see scratch-card.service.js) needs a
+    // named user to get past it — every describe block in this file is
+    // about prize/wallet/milestone logic, not that gate, so default to a
+    // user who already has a name on file.
     findById: vi.fn().mockResolvedValue({ id: USER_ID, name: 'Test User' }),
     ...overrides,
   }
 }
 
 function makeService({ repo, couponsRepo, walletService, usersRepo } = {}) {
-  return new SpinWheelService(
+  return new ScratchCardService(
     repo || makeRepoMock(),
     couponsRepo || makeCouponsRepoMock(),
     walletService || makeWalletServiceMock(),
@@ -109,7 +109,7 @@ function makeService({ repo, couponsRepo, walletService, usersRepo } = {}) {
   )
 }
 
-describe('SpinWheelService — prize coupon-linkage validation (positive + negative)', () => {
+describe('ScratchCardService — prize coupon-linkage validation (positive + negative)', () => {
   it('rejects creating an active FREE_DELIVERY prize with no linked coupon (negative)', async () => {
     const service = makeService()
     const result = await service.createPrize({ type: 'FREE_DELIVERY', label: 'Free Delivery', isActive: true }, ACTOR)
@@ -176,59 +176,59 @@ describe('SpinWheelService — prize coupon-linkage validation (positive + negat
   })
 })
 
-describe('SpinWheelService.spin — eligibility + resolution', () => {
-  it('rejects with no spins available and does not insert history (negative)', async () => {
+describe('ScratchCardService.scratch — eligibility + resolution', () => {
+  it('rejects with no scratch cards available and does not insert history (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: true }),
-      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(false)
-    expect(result.message).toBe('No spins available')
+    expect(result.message).toBe('No scratch cards available')
     expect(repo.insertHistory).not.toHaveBeenCalled()
   })
 
   it('lazily grants the daily allowance when not yet granted today, then spends one (positive)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
-      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
       findActivePrizes: vi.fn().mockResolvedValue([prize({ type: 'BETTER_LUCK', winProbability: 100, linkedCouponId: null }), prize({ id: 'p2', winProbability: 0 })]),
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(true)
-    // Granted 1 (daily), spent 1 on this spin → 0 remaining.
-    expect(result.spinsRemaining).toBe(0)
-    expect(repo.setSpinWallet).toHaveBeenCalledWith(expect.anything(), USER_ID, expect.objectContaining({ markDailyGranted: true }))
+    // Granted 1 (daily), spent 1 on this scratch → 0 remaining.
+    expect(result.scratchesRemaining).toBe(0)
+    expect(repo.setScratchWallet).toHaveBeenCalledWith(expect.anything(), USER_ID, expect.objectContaining({ markDailyGranted: true }))
   })
 
   it('does not re-grant the daily allowance when already granted today (positive)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 3, grantedToday: true }),
-      getSettings: vi.fn().mockResolvedValue({ dailyFreeSpins: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 3, grantedToday: true }),
+      getSettings: vi.fn().mockResolvedValue({ dailyFreeScratches: 1, triggerMode: 'ALWAYS_ON_LOGIN' }),
       findActivePrizes: vi.fn().mockResolvedValue([
         prize({ type: 'BETTER_LUCK', winProbability: 100 }),
         prize({ id: 'p2', winProbability: 0 }),
       ]),
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(true)
-    expect(result.spinsRemaining).toBe(2) // 3 - 1, no daily top-up
+    expect(result.scratchesRemaining).toBe(2) // 3 - 1, no daily top-up
   })
 
   it('a CASHBACK win credits the wallet with subType SCRATCH and marks reward ISSUED (positive)', async () => {
     const walletService = makeWalletServiceMock()
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 5, grantedToday: true }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 5, grantedToday: true }),
       findActivePrizes: vi.fn().mockResolvedValue([
         prize({ type: 'CASHBACK', value: 20, winProbability: 100 }),
         prize({ id: 'p2', winProbability: 0 }),
       ]),
     })
     const service = makeService({ repo, walletService })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(true)
     expect(result.rewardStatus).toBe('ISSUED')
     expect(walletService.addMoney).toHaveBeenCalledWith(
@@ -240,14 +240,14 @@ describe('SpinWheelService.spin — eligibility + resolution', () => {
 
   it('a coupon-requiring win with no linked coupon marks FAILED without throwing back to the caller (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 5, grantedToday: true }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 5, grantedToday: true }),
       findActivePrizes: vi.fn().mockResolvedValue([
         prize({ type: 'FREE_DELIVERY', linkedCouponId: null, winProbability: 100 }),
         prize({ id: 'p2', winProbability: 0 }),
       ]),
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(true) // the customer still sees they won
     expect(result.rewardStatus).toBe('FAILED')
   })
@@ -255,99 +255,94 @@ describe('SpinWheelService.spin — eligibility + resolution', () => {
   it('a coupon-requiring win targets the linked coupon and marks ISSUED (positive)', async () => {
     const couponsRepo = makeCouponsRepoMock()
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 5, grantedToday: true }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 5, grantedToday: true }),
       findActivePrizes: vi.fn().mockResolvedValue([
         prize({ type: 'FREE_DELIVERY', linkedCouponId: 'c-9', winProbability: 100 }),
         prize({ id: 'p2', winProbability: 0 }),
       ]),
     })
     const service = makeService({ repo, couponsRepo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.rewardStatus).toBe('ISSUED')
     expect(couponsRepo.addTargetUser).toHaveBeenCalledWith('c-9', USER_ID)
   })
 
   it('rejects (fails closed) when the active set is misconfigured — count out of 2-8 range (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 5, grantedToday: true }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 5, grantedToday: true }),
       findActivePrizes: vi.fn().mockResolvedValue([prize()]), // only 1 active — below MIN_ACTIVE_PRIZES
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(false)
     expect(repo.insertHistory).not.toHaveBeenCalled()
   })
 
   it('rejects (fails closed) when active probabilities do not sum to 100 (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 5, grantedToday: true }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 5, grantedToday: true }),
       findActivePrizes: vi.fn().mockResolvedValue([
         prize({ id: 'a', winProbability: 10 }),
         prize({ id: 'b', winProbability: 10 }),
       ]),
     })
     const service = makeService({ repo })
-    const result = await service.spin(USER_ID)
+    const result = await service.scratch(USER_ID)
     expect(result.success).toBe(false)
+  })
+
+  it('blocks a nameless account from scratching (negative)', async () => {
+    const usersRepo = makeUsersRepoMock({ findById: vi.fn().mockResolvedValue({ id: USER_ID, name: '' }) })
+    const service = makeService({ usersRepo })
+    const result = await service.scratch(USER_ID)
+    expect(result.success).toBe(false)
+    expect(result.message).toMatch(/name/i)
   })
 })
 
-describe('SpinWheelService.getAppearanceForCustomer — background image + banner copy', () => {
+describe('ScratchCardService.getAppearanceForCustomer — cover image', () => {
   it('derives a capped1080-profile Cloudinary URL when a public id is on file (positive)', async () => {
     const repo = makeRepoMock({
       getSettings: vi.fn().mockResolvedValue({
-        backgroundImagePublicId: 'bakaloo/spin-wheel/abc123',
-        backgroundImageUrl: 'https://res.cloudinary.com/demo/image/upload/abc123.png',
-        bannerTitle: 'Win up to ₹100 off',
-        bannerSubtitle: 'on your next order',
-        bannerTagline: 'Good Deals\nEveryday!',
+        coverImagePublicId: 'bakaloo/scratch-card/abc123',
+        coverImageUrl: 'https://res.cloudinary.com/demo/image/upload/abc123.png',
       }),
     })
     const service = makeService({ repo })
     const result = await service.getAppearanceForCustomer()
-    expect(result.backgroundImageUrl).toContain('w_1080')
-    expect(result.backgroundImageUrl).toContain('abc123')
-    expect(result.bannerTitle).toBe('Win up to ₹100 off')
+    expect(result.coverImageUrl).toContain('w_1080')
+    expect(result.coverImageUrl).toContain('abc123')
   })
 
   it('falls back to the raw stored url when there is no public id (positive)', async () => {
     const repo = makeRepoMock({
       getSettings: vi.fn().mockResolvedValue({
-        backgroundImagePublicId: null,
-        backgroundImageUrl: 'https://example.com/custom-bg.png',
-        bannerTitle: 'Win up to ₹100 off',
-        bannerSubtitle: 'on your next order',
-        bannerTagline: 'Good Deals\nEveryday!',
+        coverImagePublicId: null,
+        coverImageUrl: 'https://example.com/custom-cover.png',
       }),
     })
     const service = makeService({ repo })
     const result = await service.getAppearanceForCustomer()
-    expect(result.backgroundImageUrl).toBe('https://example.com/custom-bg.png')
+    expect(result.coverImageUrl).toBe('https://example.com/custom-cover.png')
   })
 
-  it('returns null backgroundImageUrl when no admin upload exists yet — app keeps its bundled default (negative)', async () => {
+  it('returns null coverImageUrl when no admin upload exists yet — app keeps its bundled default (negative)', async () => {
     const repo = makeRepoMock({
-      getSettings: vi.fn().mockResolvedValue({
-        backgroundImagePublicId: null,
-        backgroundImageUrl: null,
-        bannerTitle: 'Win up to ₹100 off',
-        bannerSubtitle: 'on your next order',
-        bannerTagline: 'Good Deals\nEveryday!',
-      }),
+      getSettings: vi.fn().mockResolvedValue({ coverImagePublicId: null, coverImageUrl: null }),
     })
     const service = makeService({ repo })
     const result = await service.getAppearanceForCustomer()
-    expect(result.backgroundImageUrl).toBeNull()
+    expect(result.coverImageUrl).toBeNull()
   })
 })
 
-describe('SpinWheelService.evaluateMilestones — dedup + repeating multi-threshold math', () => {
+describe('ScratchCardService.evaluateMilestones — dedup + repeating multi-threshold math', () => {
   it('a non-repeating rule grants exactly once even if evaluated twice (positive + dedup)', async () => {
     let granted = 0
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
       findActiveMilestoneRules: vi.fn().mockResolvedValue([
-        { id: 'rule-1', milestoneType: 'ORDER_COUNT', threshold: 5, bonusSpins: 1, isRepeating: false, isActive: true },
+        { id: 'rule-1', milestoneType: 'ORDER_COUNT', threshold: 5, bonusScratches: 1, isRepeating: false, isActive: true },
       ]),
       countGrantsForRule: vi.fn().mockImplementation(async () => granted),
       insertGrant: vi.fn().mockImplementation(async () => { granted += 1 }),
@@ -363,9 +358,9 @@ describe('SpinWheelService.evaluateMilestones — dedup + repeating multi-thresh
 
   it('a repeating rule grants once per multiple of the threshold already crossed (positive)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
       findActiveMilestoneRules: vi.fn().mockResolvedValue([
-        { id: 'rule-spend', milestoneType: 'TOTAL_SPEND', threshold: 500, bonusSpins: 1, isRepeating: true, isActive: true },
+        { id: 'rule-spend', milestoneType: 'TOTAL_SPEND', threshold: 500, bonusScratches: 1, isRepeating: true, isActive: true },
       ]),
       countGrantsForRule: vi.fn().mockResolvedValue(0),
     })
@@ -380,7 +375,7 @@ describe('SpinWheelService.evaluateMilestones — dedup + repeating multi-thresh
 
   it('an inactive rule never grants (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
       findActiveMilestoneRules: vi.fn().mockResolvedValue([]), // repo itself only returns active rules
     })
     const usersRepo = makeUsersRepoMock({ getStats: vi.fn().mockResolvedValue({ total_orders: 999, total_spent: '999999' }) })
@@ -393,9 +388,9 @@ describe('SpinWheelService.evaluateMilestones — dedup + repeating multi-thresh
 
   it('a user with no qualifying stats yet never grants (negative)', async () => {
     const repo = makeRepoMock({
-      getOrCreateSpinWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableSpins: 0, grantedToday: false }),
+      getOrCreateScratchWalletForUpdate: vi.fn().mockResolvedValue({ userId: USER_ID, availableScratches: 0, grantedToday: false }),
       findActiveMilestoneRules: vi.fn().mockResolvedValue([
-        { id: 'rule-1', milestoneType: 'ORDER_COUNT', threshold: 5, bonusSpins: 1, isRepeating: false, isActive: true },
+        { id: 'rule-1', milestoneType: 'ORDER_COUNT', threshold: 5, bonusScratches: 1, isRepeating: false, isActive: true },
       ]),
       countGrantsForRule: vi.fn().mockResolvedValue(0),
     })

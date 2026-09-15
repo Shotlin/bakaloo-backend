@@ -1,0 +1,121 @@
+import { ScratchCardController } from './scratch-card.controller.js'
+import { ScratchCardService } from './scratch-card.service.js'
+import { ScratchCardRepository } from './scratch-card.repository.js'
+import {
+  appearanceSchema,
+  eligibilitySchema,
+  scratchSchema,
+  listPrizesSchema,
+  createPrizeSchema,
+  updatePrizeSchema,
+  deletePrizeSchema,
+  reorderPrizesSchema,
+  getSettingsSchema,
+  updateSettingsSchema,
+  listMilestoneRulesSchema,
+  createMilestoneRuleSchema,
+  updateMilestoneRuleSchema,
+  deleteMilestoneRuleSchema,
+  grantScratchesSchema,
+  listHistorySchema,
+} from './scratch-card.schema.js'
+
+/**
+ * Scratch Card routes plugin
+ * Prefix: /api/v1/scratch-card
+ *
+ * Same shape as spin-wheel.routes.js — customer + admin routes in one
+ * module, since every route here shares one repository/service.
+ */
+export default async function scratchCardRoutes(fastify) {
+  const repository = new ScratchCardRepository()
+  const service = new ScratchCardService(repository)
+  const controller = new ScratchCardController(service)
+
+  const adminAuth = [fastify.authenticate, fastify.requireAdmin]
+
+  // ─── Customer routes ────────────────────────────────────
+  fastify.get('/appearance', {
+    schema: appearanceSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.appearance.bind(controller))
+
+  fastify.get('/eligibility', {
+    schema: eligibilitySchema,
+    preHandler: [fastify.authenticate],
+  }, controller.eligibility.bind(controller))
+
+  fastify.post('/scratch', {
+    schema: scratchSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.scratch.bind(controller))
+
+  // ─── Admin: prizes ───────────────────────────────────────
+  fastify.get('/admin/prizes', {
+    schema: listPrizesSchema,
+    preHandler: adminAuth,
+  }, controller.listPrizes.bind(controller))
+
+  fastify.post('/admin/prizes', {
+    schema: createPrizeSchema,
+    preHandler: adminAuth,
+  }, controller.createPrize.bind(controller))
+
+  fastify.patch('/admin/prizes/:id', {
+    schema: updatePrizeSchema,
+    preHandler: adminAuth,
+  }, controller.updatePrize.bind(controller))
+
+  fastify.delete('/admin/prizes/:id', {
+    schema: deletePrizeSchema,
+    preHandler: adminAuth,
+  }, controller.deletePrize.bind(controller))
+
+  fastify.put('/admin/prizes/reorder', {
+    schema: reorderPrizesSchema,
+    preHandler: adminAuth,
+  }, controller.reorderPrizes.bind(controller))
+
+  // ─── Admin: settings ─────────────────────────────────────
+  fastify.get('/admin/settings', {
+    schema: getSettingsSchema,
+    preHandler: adminAuth,
+  }, controller.getSettings.bind(controller))
+
+  fastify.put('/admin/settings', {
+    schema: updateSettingsSchema,
+    preHandler: adminAuth,
+  }, controller.updateSettings.bind(controller))
+
+  // ─── Admin: milestone rules ──────────────────────────────
+  fastify.get('/admin/milestones', {
+    schema: listMilestoneRulesSchema,
+    preHandler: adminAuth,
+  }, controller.listMilestoneRules.bind(controller))
+
+  fastify.post('/admin/milestones', {
+    schema: createMilestoneRuleSchema,
+    preHandler: adminAuth,
+  }, controller.createMilestoneRule.bind(controller))
+
+  fastify.patch('/admin/milestones/:id', {
+    schema: updateMilestoneRuleSchema,
+    preHandler: adminAuth,
+  }, controller.updateMilestoneRule.bind(controller))
+
+  fastify.delete('/admin/milestones/:id', {
+    schema: deleteMilestoneRuleSchema,
+    preHandler: adminAuth,
+  }, controller.deleteMilestoneRule.bind(controller))
+
+  // ─── Admin: manual grant + history ───────────────────────
+  fastify.post('/admin/grant', {
+    schema: grantScratchesSchema,
+    preHandler: adminAuth,
+  }, controller.grantScratches.bind(controller))
+
+  fastify.get('/admin/history', {
+    schema: listHistorySchema,
+    preHandler: adminAuth,
+  }, controller.listHistory.bind(controller))
+}

@@ -2,7 +2,7 @@ import { getClient } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { buildCloudinaryUrl } from '../../config/cloudinary.js'
-import { SpinWheelRepository } from './spin-wheel.repository.js'
+import { ScratchCardRepository } from './scratch-card.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
@@ -14,11 +14,13 @@ const MIN_ACTIVE_PRIZES = 2
 const PROBABILITY_SUM_TOLERANCE = 0.5
 
 /**
- * Pure weighted-pick — exported standalone so the property test can drive
- * it directly with thousands of trials and a real (or seeded) RNG, with no
- * DB/service scaffolding involved. `prizes` must already be the resolved
- * active set (see SpinWheelService#_validateActiveSetForSpin) with each
- * item's `winProbability` a 0-100 number.
+ * Pure weighted-pick — identical algorithm to spin-wheel.service.js's
+ * pickWeightedPrize, duplicated rather than imported cross-module (each
+ * gamification module stays self-contained here, same as spin-wheel/
+ * cart-milestones/first-time-offers never importing each other's internals).
+ * Exported standalone so the property test can drive it directly with
+ * thousands of trials and a real (or seeded) RNG, with no DB/service
+ * scaffolding involved.
  *
  * @param {Array<{winProbability:number}>} prizes
  * @param {() => number} [random] - defaults to Math.random; inject a
@@ -37,9 +39,9 @@ export function pickWeightedPrize(prizes, random = Math.random) {
   return prizes[prizes.length - 1]
 }
 
-export class SpinWheelService {
+export class ScratchCardService {
   constructor(
-    repo = new SpinWheelRepository(),
+    repo = new ScratchCardRepository(),
     couponsRepo = new CouponsRepository(),
     walletService = new WalletService(new WalletRepository()),
     usersRepo = new UsersRepository()
@@ -52,55 +54,37 @@ export class SpinWheelService {
 
   // ─── Customer-facing ────────────────────────────────────────────────────
 
-  /** Active prizes for rendering the wheel — deliberately excludes winProbability and linkedCouponId (odds/internal wiring aren't the client's business). */
-  async getActivePrizesForCustomer() {
-    const prizes = await this.repo.findActivePrizes()
-    return prizes.map((p) => ({
-      id: p.id,
-      type: p.type,
-      iconKey: p.iconKey,
-      label: p.label,
-      value: p.value,
-      displayOrder: p.displayOrder,
-    }))
-  }
-
   /**
-   * Popup background image + banner-box copy — deliberately excludes
-   * dailyFreeSpins/triggerMode (not the client's business, same spirit as
-   * getActivePrizesForCustomer excluding winProbability/linkedCouponId).
-   * backgroundImageUrl is null when no admin upload exists yet, which the
-   * app reads as "keep using the bundled default asset".
+   * Cover ("foil") image scratched away to reveal the prize. Deliberately
+   * excludes dailyFreeScratches/triggerMode (not the client's business) —
+   * same spirit as SpinWheelService#getAppearanceForCustomer.
+   * coverImageUrl is null when no admin upload exists yet, which the app
+   * reads as "keep using the bundled default cover asset".
    */
   async getAppearanceForCustomer() {
     const settings = await this.repo.getSettings()
-    const backgroundImageUrl = settings?.backgroundImagePublicId
-      ? buildCloudinaryUrl(settings.backgroundImagePublicId, 'capped1080')
-      : (settings?.backgroundImageUrl || null)
-    return {
-      backgroundImageUrl,
-      bannerTitle: settings?.bannerTitle || null,
-      bannerSubtitle: settings?.bannerSubtitle || null,
-      bannerTagline: settings?.bannerTagline || null,
-    }
+    const coverImageUrl = settings?.coverImagePublicId
+      ? buildCloudinaryUrl(settings.coverImagePublicId, 'capped1080')
+      : (settings?.coverImageUrl || null)
+    return { coverImageUrl }
   }
 
   async getEligibility(userId) {
     const [settings, wallet] = await Promise.all([
       this.repo.getSettings(),
-      this.repo.peekSpinWallet(userId),
+      this.repo.peekScratchWallet(userId),
     ])
-    const spinsAvailable = wallet.grantedToday
-      ? wallet.availableSpins
-      : wallet.availableSpins + settings.dailyFreeSpins
+    const scratchesAvailable = wallet.grantedToday
+      ? wallet.availableScratches
+      : wallet.availableScratches + settings.dailyFreeScratches
     return {
-      spinsAvailable,
-      dailyFreeSpins: settings.dailyFreeSpins,
+      scratchesAvailable,
+      dailyFreeScratches: settings.dailyFreeScratches,
       triggerMode: settings.triggerMode,
     }
   }
 
-  _validateActiveSetForSpin(prizes) {
+  _validateActiveSetForScratch(prizes) {
     if (prizes.length < MIN_ACTIVE_PRIZES || prizes.length > MAX_ACTIVE_PRIZES) {
       return { ok: false, reason: `active prize count ${prizes.length} out of range ${MIN_ACTIVE_PRIZES}-${MAX_ACTIVE_PRIZES}` }
     }
@@ -112,55 +96,53 @@ export class SpinWheelService {
   }
 
   /**
-   * The core transaction: lazily grants today's daily spin if not yet
+   * The core transaction: lazily grants today's daily scratch if not yet
    * granted, rejects if the user has none left, otherwise decrements and
-   * resolves a winner. Reward issuance (§ below) deliberately happens
-   * AFTER this transaction commits — mirrors orders.service.js's
-   * post-commit follow-through (e.g. lines ~792-807) rather than trying to
-   * fold a coupon-targeting/wallet-credit call into the same DB
-   * transaction, so a reward-issuance failure can never roll back (and
-   * thus hide) a spin the customer already saw resolve.
+   * resolves a winner. Reward issuance (§ below) deliberately happens AFTER
+   * this transaction commits — same reasoning as SpinWheelService#spin: a
+   * reward-issuance failure can never roll back (and thus hide) a scratch
+   * result the customer already saw revealed.
    */
-  async spin(userId) {
-    // Name-mandatory gate — same as orders.service.js#placeOrder: a spin
-    // can issue real value (cashback credit or a coupon), so a nameless
-    // account must be blocked from redeeming one, not just from checkout.
-    const spinningUser = await this.usersRepo.findById(userId)
-    if (!spinningUser || !(spinningUser.name || '').trim()) {
-      return { success: false, message: 'Please add your name to your profile before spinning' }
+  async scratch(userId) {
+    // Name-mandatory gate — same as orders.service.js#placeOrder and
+    // SpinWheelService#spin: a scratch can issue real value (cashback
+    // credit or a coupon), so a nameless account must be blocked.
+    const scratchingUser = await this.usersRepo.findById(userId)
+    if (!scratchingUser || !(scratchingUser.name || '').trim()) {
+      return { success: false, message: 'Please add your name to your profile before scratching a card' }
     }
 
     const client = await getClient()
     let wonPrize = null
-    let spinsRemaining = 0
+    let scratchesRemaining = 0
     let historyId = null
     try {
       await client.query('BEGIN')
-      const wallet = await this.repo.getOrCreateSpinWalletForUpdate(client, userId)
+      const wallet = await this.repo.getOrCreateScratchWalletForUpdate(client, userId)
       const settings = await this.repo.getSettings()
 
-      let availableSpins = wallet.availableSpins
+      let availableScratches = wallet.availableScratches
       const markDailyGranted = !wallet.grantedToday
-      if (!wallet.grantedToday && settings.dailyFreeSpins > 0) {
-        availableSpins += settings.dailyFreeSpins
+      if (!wallet.grantedToday && settings.dailyFreeScratches > 0) {
+        availableScratches += settings.dailyFreeScratches
       }
 
-      if (availableSpins <= 0) {
-        await this.repo.setSpinWallet(client, userId, { availableSpins, markDailyGranted })
+      if (availableScratches <= 0) {
+        await this.repo.setScratchWallet(client, userId, { availableScratches, markDailyGranted })
         await client.query('COMMIT')
-        return { success: false, message: 'No spins available' }
+        return { success: false, message: 'No scratch cards available' }
       }
 
       const prizes = await this.repo.findActivePrizes()
-      const validation = this._validateActiveSetForSpin(prizes)
+      const validation = this._validateActiveSetForScratch(prizes)
       if (!validation.ok) {
         await client.query('ROLLBACK')
-        logger.error({ userId, reason: validation.reason }, 'Spin blocked: wheel misconfigured')
-        return { success: false, message: 'Spin wheel is not configured correctly — please contact support.' }
+        logger.error({ userId, reason: validation.reason }, 'Scratch blocked: card misconfigured')
+        return { success: false, message: 'Scratch card is not configured correctly — please contact support.' }
       }
 
-      availableSpins -= 1
-      await this.repo.setSpinWallet(client, userId, { availableSpins, markDailyGranted })
+      availableScratches -= 1
+      await this.repo.setScratchWallet(client, userId, { availableScratches, markDailyGranted })
 
       const won = pickWeightedPrize(prizes)
       historyId = await this.repo.insertHistory(client, {
@@ -175,10 +157,10 @@ export class SpinWheelService {
 
       await client.query('COMMIT')
       wonPrize = won
-      spinsRemaining = availableSpins
+      scratchesRemaining = availableScratches
     } catch (err) {
       await client.query('ROLLBACK')
-      logger.error({ err, userId }, 'Spin transaction failed')
+      logger.error({ err, userId }, 'Scratch transaction failed')
       return { success: false, message: 'Something went wrong — please try again.' }
     } finally {
       client.release()
@@ -198,20 +180,20 @@ export class SpinWheelService {
         isWin: wonPrize.type !== 'BETTER_LUCK',
       },
       rewardStatus,
-      spinsRemaining,
+      scratchesRemaining,
     }
   }
 
   /**
-   * Issues the actual reward — CASHBACK credits the wallet directly
-   * (subType 'SCRATCH', previously-unused per 068_first_time_offers_and_
-   * cashback.sql); every other winning type targets a pre-linked
-   * INDIVIDUAL coupon via the same coupon_target_users mechanism
-   * cart_milestones/first_time_offers already use (CouponsRepository#
-   * addTargetUser). Never throws — a failure here must never take away a
-   * win the customer already saw the wheel land on; it's recorded as
-   * reward_status='FAILED' for an admin to fix manually (see spin_history
-   * / GET /spin-wheel/history) instead.
+   * Issues the actual reward — identical mechanics to SpinWheelService#
+   * _issueReward. CASHBACK credits the wallet directly (subType 'SCRATCH',
+   * the same previously-unused sub_type from 068_first_time_offers_and_
+   * cashback.sql that Spin & Win also reuses); every other winning type
+   * targets a pre-linked INDIVIDUAL coupon via the same coupon_target_users
+   * mechanism. Never throws — a failure here must never take away a win the
+   * customer already saw revealed; it's recorded as reward_status='FAILED'
+   * for an admin to fix manually (see scratch_history / GET
+   * /scratch-card/history) instead.
    */
   async _issueReward(userId, prize, historyId) {
     if (prize.type === 'BETTER_LUCK') {
@@ -221,48 +203,47 @@ export class SpinWheelService {
       try {
         const result = await this.walletService.addMoney(userId, {
           amount: prize.value,
-          description: 'Spin & Win prize',
+          description: 'Scratch Card prize',
           subType: 'SCRATCH',
           sourceId: historyId,
         })
         if (result.success) {
           return { rewardStatus: 'ISSUED', rewardRef: result.transaction?.id ?? null }
         }
-        logger.warn({ userId, historyId, message: result.message }, 'Spin win wallet credit failed')
+        logger.warn({ userId, historyId, message: result.message }, 'Scratch win wallet credit failed')
         return { rewardStatus: 'FAILED', rewardRef: null }
       } catch (err) {
-        logger.error({ err, userId, historyId }, 'Spin win wallet credit threw')
+        logger.error({ err, userId, historyId }, 'Scratch win wallet credit threw')
         return { rewardStatus: 'FAILED', rewardRef: null }
       }
     }
     // Coupon-requiring types (FREE_DELIVERY / PERCENTAGE_OFF / FLAT_OFF / BUY_ONE_GET_ONE)
     if (!prize.linkedCouponId) {
-      logger.warn({ userId, historyId, prizeType: prize.type }, 'Spin win has no linked coupon')
+      logger.warn({ userId, historyId, prizeType: prize.type }, 'Scratch win has no linked coupon')
       return { rewardStatus: 'FAILED', rewardRef: null }
     }
     try {
       await this.couponsRepo.addTargetUser(prize.linkedCouponId, userId)
       return { rewardStatus: 'ISSUED', rewardRef: prize.linkedCouponId }
     } catch (err) {
-      logger.error({ err, userId, historyId }, 'Spin win coupon targeting failed')
+      logger.error({ err, userId, historyId }, 'Scratch win coupon targeting failed')
       return { rewardStatus: 'FAILED', rewardRef: null }
     }
   }
 
   /**
-   * Grants bonus spins for any admin-defined milestone rule this user has
-   * newly earned — called (fire-and-forget) from every place an order can
-   * reach DELIVERED. Takes the same user_spin_wallet row lock spin() uses,
-   * as the FIRST step, so two orders delivered near-simultaneously for one
-   * user can't both grant a non-repeating rule (the second evaluation
-   * blocks on the lock until the first commits its dedupe-defeating
-   * spin_credit_grants row).
+   * Grants bonus scratch cards for any admin-defined milestone rule this
+   * user has newly earned — called (fire-and-forget) from every place an
+   * order can reach DELIVERED, alongside SpinWheelService#evaluateMilestones.
+   * Takes the same user_scratch_wallet row lock scratch() uses, as the FIRST
+   * step, so two orders delivered near-simultaneously for one user can't
+   * both grant a non-repeating rule.
    */
   async evaluateMilestones(userId) {
     const client = await getClient()
     try {
       await client.query('BEGIN')
-      const wallet = await this.repo.getOrCreateSpinWalletForUpdate(client, userId)
+      const wallet = await this.repo.getOrCreateScratchWalletForUpdate(client, userId)
       const rules = await this.repo.findActiveMilestoneRules()
       if (rules.length === 0) {
         await client.query('COMMIT')
@@ -284,21 +265,21 @@ export class SpinWheelService {
         }
         for (let i = 0; i < toGrant; i++) {
           await this.repo.insertGrant(client, {
-            userId, amount: rule.bonusSpins, source: 'MILESTONE', sourceRef: rule.id,
+            userId, amount: rule.bonusScratches, source: 'MILESTONE', sourceRef: rule.id,
           })
-          totalGrant += rule.bonusSpins
+          totalGrant += rule.bonusScratches
         }
       }
       if (totalGrant > 0) {
-        await this.repo.setSpinWallet(client, userId, {
-          availableSpins: wallet.availableSpins + totalGrant,
+        await this.repo.setScratchWallet(client, userId, {
+          availableScratches: wallet.availableScratches + totalGrant,
           markDailyGranted: wallet.grantedToday,
         })
       }
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
-      logger.error({ err, userId }, 'Spin milestone evaluation failed')
+      logger.error({ err, userId }, 'Scratch milestone evaluation failed')
     } finally {
       client.release()
     }
@@ -311,12 +292,11 @@ export class SpinWheelService {
   }
 
   /**
-   * Mirrors CartMilestonesService#_validateCouponUnlock exactly — a
+   * Mirrors SpinWheelService#_validatePrizeCoupon exactly — a
    * coupon-requiring prize being activated must point at a real, active,
    * INDIVIDUAL-target coupon, or the "win" would silently do nothing at
    * checkout. Inactive prizes are exempt (a template with no coupon linked
-   * yet is a legitimate, expected state — see the seed data in migration
-   * 118).
+   * yet is a legitimate, expected state — see the seed data in migration 137).
    */
   async _validatePrizeCoupon(data) {
     if (!COUPON_REQUIRED_TYPES.has(data.type)) return null
@@ -327,10 +307,10 @@ export class SpinWheelService {
     const coupon = await this.couponsRepo.findById(data.linkedCouponId)
     if (!coupon) return 'Selected coupon was not found'
     if (coupon.targetType !== 'INDIVIDUAL') {
-      return `"${coupon.code}" must have its Target Audience set to "Individual" to work as a spin prize — it's currently "${coupon.targetType}".`
+      return `"${coupon.code}" must have its Target Audience set to "Individual" to work as a scratch prize — it's currently "${coupon.targetType}".`
     }
     if (!coupon.isActive) {
-      return `"${coupon.code}" is inactive — activate it before linking it as a spin prize.`
+      return `"${coupon.code}" is inactive — activate it before linking it as a scratch prize.`
     }
     return null
   }
@@ -348,10 +328,10 @@ export class SpinWheelService {
       }
     }
     const prize = await this.repo.createPrize(data)
-    emitAudit('spin_prize_created', {
+    emitAudit('scratch_prize_created', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_prize',
+      target_type: 'scratch_prize',
       target_id: prize.id,
       before: null,
       after: prize,
@@ -374,10 +354,10 @@ export class SpinWheelService {
       }
     }
     const prize = await this.repo.updatePrize(id, data)
-    emitAudit('spin_prize_updated', {
+    emitAudit('scratch_prize_updated', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_prize',
+      target_type: 'scratch_prize',
       target_id: id,
       before: existing,
       after: prize,
@@ -391,10 +371,10 @@ export class SpinWheelService {
     const existing = await this.repo.findPrizeById(id)
     if (!existing) return { success: false, message: 'Prize not found' }
     await this.repo.deletePrize(id)
-    emitAudit('spin_prize_deleted', {
+    emitAudit('scratch_prize_deleted', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_prize',
+      target_type: 'scratch_prize',
       target_id: id,
       before: existing,
       after: null,
@@ -406,10 +386,10 @@ export class SpinWheelService {
 
   async reorderPrizes(orderedIds, actor) {
     await this.repo.reorderPrizes(orderedIds)
-    emitAudit('spin_prizes_reordered', {
+    emitAudit('scratch_prizes_reordered', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_prize',
+      target_type: 'scratch_prize',
       target_id: null,
       before: null,
       after: { count: orderedIds.length },
@@ -428,10 +408,10 @@ export class SpinWheelService {
   async updateSettings(data, actor) {
     const before = await this.repo.getSettings()
     const settings = await this.repo.updateSettings(data)
-    emitAudit('spin_wheel_settings_updated', {
+    emitAudit('scratch_card_settings_updated', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_wheel_settings',
+      target_type: 'scratch_card_settings',
       target_id: settings.id,
       before,
       after: settings,
@@ -452,10 +432,10 @@ export class SpinWheelService {
       return { success: false, message: 'milestoneType and threshold are required' }
     }
     const rule = await this.repo.createMilestoneRule(data)
-    emitAudit('spin_milestone_rule_created', {
+    emitAudit('scratch_milestone_rule_created', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_milestone_rule',
+      target_type: 'scratch_milestone_rule',
       target_id: rule.id,
       before: null,
       after: rule,
@@ -469,10 +449,10 @@ export class SpinWheelService {
     const existing = await this.repo.findMilestoneRuleById(id)
     if (!existing) return { success: false, message: 'Milestone rule not found' }
     const rule = await this.repo.updateMilestoneRule(id, data)
-    emitAudit('spin_milestone_rule_updated', {
+    emitAudit('scratch_milestone_rule_updated', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_milestone_rule',
+      target_type: 'scratch_milestone_rule',
       target_id: id,
       before: existing,
       after: rule,
@@ -486,10 +466,10 @@ export class SpinWheelService {
     const existing = await this.repo.findMilestoneRuleById(id)
     if (!existing) return { success: false, message: 'Milestone rule not found' }
     await this.repo.deleteMilestoneRule(id)
-    emitAudit('spin_milestone_rule_deleted', {
+    emitAudit('scratch_milestone_rule_deleted', {
       actor_user_id: actor.userId,
       actor_role: actor.platformRole || actor.role,
-      target_type: 'spin_milestone_rule',
+      target_type: 'scratch_milestone_rule',
       target_id: id,
       before: existing,
       after: null,
@@ -501,38 +481,38 @@ export class SpinWheelService {
 
   // ─── Admin: manual grant + history ──────────────────────────────────────
 
-  async grantSpins(targetUserId, amount, actor) {
+  async grantScratches(targetUserId, amount, actor) {
     if (!targetUserId || !amount || amount <= 0) {
       return { success: false, message: 'targetUserId and a positive amount are required' }
     }
     const client = await getClient()
     try {
       await client.query('BEGIN')
-      const wallet = await this.repo.getOrCreateSpinWalletForUpdate(client, targetUserId)
-      const newBalance = wallet.availableSpins + amount
-      await this.repo.setSpinWallet(client, targetUserId, {
-        availableSpins: newBalance,
+      const wallet = await this.repo.getOrCreateScratchWalletForUpdate(client, targetUserId)
+      const newBalance = wallet.availableScratches + amount
+      await this.repo.setScratchWallet(client, targetUserId, {
+        availableScratches: newBalance,
         markDailyGranted: wallet.grantedToday,
       })
       await this.repo.insertGrant(client, {
         userId: targetUserId, amount, source: 'ADMIN', sourceRef: actor.userId, createdBy: actor.userId,
       })
       await client.query('COMMIT')
-      emitAudit('spin_credits_granted', {
+      emitAudit('scratch_credits_granted', {
         actor_user_id: actor.userId,
         actor_role: actor.platformRole || actor.role,
-        target_type: 'user_spin_wallet',
+        target_type: 'user_scratch_wallet',
         target_id: targetUserId,
         before: null,
         after: { amount, newBalance },
         ip_address: actor.ip,
         user_agent: actor.userAgent,
       })
-      return { success: true, spinsAvailable: newBalance }
+      return { success: true, scratchesAvailable: newBalance }
     } catch (err) {
       await client.query('ROLLBACK')
-      logger.error({ err, targetUserId, amount }, 'Grant spins failed')
-      return { success: false, message: 'Failed to grant spins' }
+      logger.error({ err, targetUserId, amount }, 'Grant scratches failed')
+      return { success: false, message: 'Failed to grant scratch cards' }
     } finally {
       client.release()
     }

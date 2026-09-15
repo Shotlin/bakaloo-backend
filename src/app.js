@@ -194,6 +194,13 @@ export const buildApp = async () => {
     prefix: '/api/v1/spin-wheel',
   })
 
+  // Scratch Card — GPay/PhonePe-style scratch-to-reveal sibling to Spin &
+  // Win, same server-authoritative odds/credit/reward mechanics, fully
+  // independent credit pool (see src/modules/scratch-card).
+  await app.register(import('./modules/scratch-card/scratch-card.routes.js'), {
+    prefix: '/api/v1/scratch-card',
+  })
+
   // Addresses — fully implemented
   await app.register(import('./modules/addresses/addresses.routes.js'), {
     prefix: '/api/v1/addresses',

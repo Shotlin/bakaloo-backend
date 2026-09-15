@@ -16,6 +16,7 @@ import { RiderAssignmentRepository } from '../../rider-assignment/rider-assignme
 import { FinalizeAssignmentRepository } from '../../rider-assignment/finalize-assignment.repository.js'
 import { CashbackService } from '../../cashback/cashback.service.js'
 import { SpinWheelService } from '../../spin-wheel/spin-wheel.service.js'
+import { ScratchCardService } from '../../scratch-card/scratch-card.service.js'
 import { BusinessAccountsRepository } from '../../business-accounts/business-accounts.repository.js'
 import ExcelJS from 'exceljs'
 
@@ -100,6 +101,7 @@ export class AdminOrdersService {
     this.finalizeAssignmentRepo = new FinalizeAssignmentRepository()
     this.cashbackService = new CashbackService()
     this.spinWheelService = new SpinWheelService()
+    this.scratchCardService = new ScratchCardService()
     this.businessAccountsRepo = new BusinessAccountsRepository()
   }
 
@@ -344,6 +346,9 @@ export class AdminOrdersService {
       })
       this.spinWheelService.evaluateMilestones(order.user_id).catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Spin milestone evaluation failed (admin status update)')
+      })
+      this.scratchCardService.evaluateMilestones(order.user_id).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Scratch milestone evaluation failed (admin status update)')
       })
     }
 

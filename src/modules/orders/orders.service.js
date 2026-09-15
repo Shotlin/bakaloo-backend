@@ -34,6 +34,7 @@ import { PaymentSettingsService } from '../payment-settings/payment-settings.ser
 import { FirstTimeOffersService } from '../first-time-offers/first-time-offers.service.js'
 import { CashbackService } from '../cashback/cashback.service.js'
 import { SpinWheelService } from '../spin-wheel/spin-wheel.service.js'
+import { ScratchCardService } from '../scratch-card/scratch-card.service.js'
 import { WalletService } from '../wallet/wallet.service.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
 import { LedgerService } from '../ledger/ledger.service.js'
@@ -140,6 +141,7 @@ export class OrdersService {
       options.firstTimeOffersService || new FirstTimeOffersService()
     this.cashbackService = options.cashbackService || new CashbackService()
     this.spinWheelService = options.spinWheelService || new SpinWheelService()
+    this.scratchCardService = options.scratchCardService || new ScratchCardService()
     // Wallet-balance-toggle checkout feature — offsets an order's total
     // regardless of paymentMethod (COD/ONLINE). See placeOrder() step 4b
     // and cancel()'s wallet-refund-on-self-cancel block.
@@ -1611,6 +1613,9 @@ export class OrdersService {
       })
       this.spinWheelService.evaluateMilestones(order.userId).catch((err) => {
         logger.warn({ err: err.message, orderId }, 'Spin milestone evaluation failed (admin deliver)')
+      })
+      this.scratchCardService.evaluateMilestones(order.userId).catch((err) => {
+        logger.warn({ err: err.message, orderId }, 'Scratch milestone evaluation failed (admin deliver)')
       })
     }
     if (status === ORDER_STATUS.CANCELLED) {
